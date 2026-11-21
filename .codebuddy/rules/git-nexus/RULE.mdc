@@ -1,0 +1,46 @@
+---
+description: 每天开工前刷新 GitNexus 索引；凡能通过 GitNexus 查询的代码信息，一律优先用图谱查询，文本搜索仅作兜底
+alwaysApply: true
+enabled: true
+---
+
+# 开工前置：GitNexus 索引与查询
+
+**每天开始任何任务之前**（编码、排查、重构、检索、提交前检查），必须先刷新本项目的 GitNexus 索引，确保后续分析基于最新代码结构。未完成刷新不要开始实质性工作。
+
+## 执行方式
+
+在项目根目录 `d:/dev/CompleteInvestmentInformationMarvis` 执行（PowerShell）：
+
+```powershell
+cd d:/dev/CompleteInvestmentInformationMarvis
+node .gitnexus/run.cjs analyze --index-only --skip-git
+```
+
+- `--index-only`：只刷新索引，不重写 `AGENTS.md` / `CLAUDE.md` 与技能文件。
+- `--skip-git`：本项目当前没有 `.git` 目录，必须带上；若日后 `git init`，可去掉该参数。
+- `.gitnexus/run.cjs` 是本地自带的 runner，优先用它，避免 npm 11 的 npx 崩溃问题。
+- 只有当 `run.cjs` 不存在时，才用全局 CLI 兜底：`gitnexus analyze --skip-git`（未安装则先 `npm install -g gitnexus`）。
+
+## 能用 GitNexus 查询，就必须用 GitNexus 查询
+
+只要 GitNexus MCP 工具可用，**所有关于代码结构、调用关系、执行流、影响面的问题都先走图谱查询**，不要先用 grep / 全文搜索 / 逐个读文件去猜。文本搜索只能作为兜底。
+
+工具选择：
+
+- 执行流 / 概念定位：MCP `query({search_query, task_context, goal})`；CLI 兜底 `gitnexus query "<关键词>"`
+- 某个符号的全部引用者、被调用者、所属流程：MCP `context({name})`
+- 改动影响面（编辑前必做）：MCP `impact({target, direction: "upstream"})`
+- 复杂结构查询：MCP `cypher({statement})`
+- 符号级追踪与改名：MCP `trace` / `rename`
+
+**只有以下情况才允许改用文本搜索或读文件兜底**：MCP 工具不可用或调用失败；索引未就绪（先刷新再试）；`query` 返回空结果或 `impact` 给出 `risk: UNKNOWN`（零结果不等于安全，必须用其它手段确认）；要找的是字面量、文案、注释或配置文本等图谱不索引的内容。
+
+> 当前状态：CodeBuddy 的 GitNexus MCP 已配置并验证连通（`cypher` / `context` / `impact` 可用）。`query` 也可用，但因 FTS 扩展尚未安装，关键词检索会降级并返回空结果——遇到这种情况先尝试 `context` / `cypher`，联网后可运行 `gitnexus analyze --repair-fts` 补全全文检索。
+
+更详细的编辑前后分析约束见根目录 `AGENTS.md` 的 GitNexus 段落。
+
+## 注意
+
+- `.gitnexus/` 是本地生成的索引目录（自带 `.gitignore`），不要手动删除。
+- 无 `.git` 时索引每次会全量重建（约 40-60 秒），属正常现象。

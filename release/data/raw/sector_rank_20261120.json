@@ -1,0 +1,65 @@
+{
+  "data_date": "2026-11-20",
+  "items": [
+    {
+      "name": "国有大型银行Ⅱ",
+      "code": "01801782.PT",
+      "pct": 2.52,
+      "pct_5d": 5.19,
+      "pct_20d": 10.46,
+      "pct_60d": 20.6,
+      "lead": "工商银行",
+      "style": "defensive"
+    },
+    {
+      "name": "保险Ⅱ",
+      "code": "01801194.PT",
+      "pct": 1.23,
+      "pct_5d": 2.82,
+      "pct_20d": 6.98,
+      "pct_60d": 4.7,
+      "lead": "中国太保",
+      "style": "defensive"
+    },
+    {
+      "name": "股份制银行Ⅱ",
+      "code": "01801783.PT",
+      "pct": 1.18,
+      "pct_5d": 2.32,
+      "pct_20d": 7.58,
+      "pct_60d": 10.86,
+      "lead": "中信银行",
+      "style": "defensive"
+    },
+    {
+      "name": "炼化及贸易",
+      "code": "01801963.PT",
+      "pct": 0.93,
+      "pct_5d": 1.11,
+      "pct_20d": -0.57,
+      "pct_60d": -2.03,
+      "lead": "恒通股份",
+      "style": "cyclical"
+    },
+    {
+      "name": "渔业",
+      "code": "01801015.PT",
+      "pct": 0.79,
+      "pct_5d": -6.74,
+      "pct_20d": -1.08,
+      "pct_60d": -5.51,
+      "lead": "好当家",
+      "style": "cyclical"
+    },
+    {
+      "name": "煤炭开采",
+      "code": "01801951.PT",
+      "pct": 0.45,
+      "pct_5d": 0.74,
+      "pct_20d": -0.66,
+      "pct_60d": -1.69,
+      "lead": "中国神华",
+      "style": "defensive"
+    }
+  ]
+}

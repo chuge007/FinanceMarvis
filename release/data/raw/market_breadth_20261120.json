@@ -1,0 +1,73 @@
+{
+  "data_date": "2026-11-20",
+  "market": "A股沪深两市",
+  "up": 313,
+  "down": 5236,
+  "flat": 31,
+  "limit_up": 30,
+  "limit_down": 68,
+  "suspension": 8,
+  "up_ratio_pct": 5.0,
+  "amount_yuan": 1422200422937.394,
+  "amount_change_yuan": 117053155514.884,
+  "up_over_2pct": 127,
+  "down_over_2pct": 4680,
+  "distribution": [
+    {
+      "range": "涨停",
+      "count": 30,
+      "side": "up"
+    },
+    {
+      "range": ">7%",
+      "count": 16,
+      "side": "up"
+    },
+    {
+      "range": "7~5%",
+      "count": 8,
+      "side": "up"
+    },
+    {
+      "range": "5~2%",
+      "count": 73,
+      "side": "up"
+    },
+    {
+      "range": "2~0%",
+      "count": 186,
+      "side": "up"
+    },
+    {
+      "range": "平",
+      "count": 31,
+      "side": "flat"
+    },
+    {
+      "range": "0~2%",
+      "count": 556,
+      "side": "down"
+    },
+    {
+      "range": "2~5%",
+      "count": 1820,
+      "side": "down"
+    },
+    {
+      "range": "5~7%",
+      "count": 1728,
+      "side": "down"
+    },
+    {
+      "range": "7%<",
+      "count": 1064,
+      "side": "down"
+    },
+    {
+      "range": "跌停",
+      "count": 68,
+      "side": "down"
+    }
+  ],
+  "raw_summary": "当前市场上涨家数占比全市场5%，市场情绪低。过去一年有36%交易日处于该热度区间。"
+}

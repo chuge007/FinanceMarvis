@@ -1,0 +1,16 @@
+{
+  "type": "sea",
+  "main": "D:\\dev\\CompleteInvestmentInformationMarvis\\desktop\\launcher.cjs",
+  "output": "D:\\dev\\CompleteInvestmentInformationMarvis\\desktop\\sea.blob",
+  "disableExperimentalSEAWarning": true,
+  "useSnapshot": false,
+  "useCodeCache": false,
+  "assets": {
+    "assets-manifest.json": "D:\\dev\\CompleteInvestmentInformationMarvis\\desktop\\assets-manifest.json",
+    "assets/index-BbP_-xHR.css": "D:\\dev\\CompleteInvestmentInformationMarvis\\dist\\assets\\index-BbP_-xHR.css",
+    "assets/index-DMLcKyNY.js": "D:\\dev\\CompleteInvestmentInformationMarvis\\dist\\assets\\index-DMLcKyNY.js",
+    "favicon.svg": "D:\\dev\\CompleteInvestmentInformationMarvis\\dist\\favicon.svg",
+    "icons.svg": "D:\\dev\\CompleteInvestmentInformationMarvis\\dist\\icons.svg",
+    "index.html": "D:\\dev\\CompleteInvestmentInformationMarvis\\dist\\index.html"
+  }
+}

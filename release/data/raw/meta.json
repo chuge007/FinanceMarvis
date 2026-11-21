@@ -1,0 +1,34 @@
+{
+  "built_at": "2026-11-21T13:05:40+08:00",
+  "datasets": {
+    "index_daily": {
+      "source": "腾讯金融科技 NeoData",
+      "endpoint": "quote_and_kline / day / 不复权",
+      "fetched_at": "2026-11-21T13:01:59+08:00",
+      "data_date": "2026-11-20",
+      "first_date": "2025-04-02",
+      "trading_days": 398,
+      "rows": 1592,
+      "market_status": "已休市",
+      "note": "接口对 2023-01-01 至 2025-04-01 返回省略占位，已剔除；仅保留 2025-04-02 起有效交易日。"
+    },
+    "market_breadth": {
+      "source": "腾讯金融科技 NeoData",
+      "endpoint": "market_breadth",
+      "fetched_at": "2026-11-21T12:22:26+08:00",
+      "data_date": "2026-11-20",
+      "rows": 11,
+      "market_status": "已休市",
+      "note": "接口在休市日标注“查询当日 2026-11-21”，但两市成交额 14,222.00 亿元与 11-20 日 K 线沪市 7,025.74 亿 + 深市 7,196.27 亿交叉校验一致，按 2026-11-20 收盘口径使用。"
+    },
+    "sector_rank": {
+      "source": "腾讯金融科技 NeoData",
+      "endpoint": "sector_rank / plate",
+      "fetched_at": "2026-11-21T12:22:26+08:00",
+      "data_date": "2026-11-20",
+      "rows": 6,
+      "market_status": "已休市",
+      "note": "接口无时间维度字段，仅有前 6 名涨幅榜，无法据此推断全行业上涨占比；按最近交易日收盘理解。"
+    }
+  }
+}

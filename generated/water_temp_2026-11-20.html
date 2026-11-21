@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>水温与做T门控 2026-11-20</title><style>
+:root{--bg:#f5f6f8;--card:#fff;--ink:#1b2430;--sub:#5d6877;--line:#e2e6ec;--accent:#1f4e79;--up:#c62828;--down:#1b8a5a}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:"Microsoft YaHei","PingFang SC",-apple-system,"Segoe UI",sans-serif;line-height:1.65}
+.wrap{max-width:1060px;margin:0 auto;padding:30px 22px 56px}
+.top{display:flex;justify-content:space-between;align-items:flex-end;gap:18px;flex-wrap:wrap;border-bottom:2px solid var(--ink);padding-bottom:14px}
+.kicker{font-size:12px;letter-spacing:2px;color:var(--sub);text-transform:uppercase}
+h1{font-size:27px;margin:4px 0 0;letter-spacing:.5px}
+.asofbox{text-align:right}
+.asofdate{font-size:22px;font-weight:700;font-variant-numeric:tabular-nums}
+.asoflabel{font-size:12px;color:var(--sub)}
+.meta{font-size:12.5px;color:var(--sub);margin:10px 0 22px}
+h2{font-size:18px;margin:34px 0 12px;padding-left:10px;border-left:4px solid var(--accent);display:flex;justify-content:space-between;align-items:baseline;gap:10px}
+h2 .asof{font-size:11.5px;font-weight:400;color:var(--sub);border:1px solid var(--line);border-radius:10px;padding:1px 8px;white-space:nowrap}
+h3{font-size:14.5px;margin:20px 0 8px;color:var(--accent)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:9px;padding:18px 20px;margin-bottom:14px;box-shadow:0 1px 2px rgba(20,30,45,.04)}
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+.kpi{background:#f8fafc;border:1px solid var(--line);border-radius:8px;padding:14px}
+.kpi .v{font-size:26px;font-weight:700;line-height:1.15;font-variant-numeric:tabular-nums}
+.kpi .l{font-size:12px;color:var(--sub);margin-top:3px}
+.kpi .n{font-size:11.5px;color:var(--sub);margin-top:6px}
+table{width:100%;border-collapse:collapse;font-size:13px;margin:8px 0}
+th,td{border:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:top}
+th{background:#f0f3f7;font-weight:600;font-size:12.5px}
+td.num{text-align:right;font-variant-numeric:tabular-nums}
+.badge{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11.5px;white-space:nowrap}
+.badge.ok{background:#e7f4ed;color:#1b8a5a}
+.badge.warn{background:#fff3df;color:#b26a00}
+.badge.stale{background:#fdeaea;color:#c62828}
+.bar{height:7px;background:#eef1f5;border-radius:4px;overflow:hidden;min-width:110px}
+.bar i{display:block;height:100%;border-radius:4px}
+.note{background:#fff9ee;border:1px solid #f0dcb8;border-radius:8px;padding:11px 14px;font-size:13px;margin:12px 0}
+.danger{background:#fdeeee;border:1px solid #f2c9c9;border-radius:8px;padding:11px 14px;font-size:13px;margin:12px 0}
+.strip{display:flex;gap:2px;flex-wrap:nowrap;margin:10px 0 4px}
+.strip i{display:block;width:12px;height:22px;border-radius:2px;opacity:.9}
+.legend{font-size:11.5px;color:var(--sub)}
+ul{margin:8px 0 8px 20px;padding:0}li{margin:4px 0;font-size:13.5px}
+.disc{background:#eef1f5;border:1px solid var(--line);border-radius:8px;padding:13px 15px;font-size:12.5px;color:#3b4552;margin-top:26px}
+.foot{font-size:11.5px;color:var(--sub);margin-top:14px;display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.small{font-size:11.5px;color:var(--sub)}
+</style></head><body><div class="wrap">
+<div class="top">
+  <div>
+    <div class="kicker">日内交易状态面板</div>
+    <h1>市场水温与做 T 门控</h1>
+  </div>
+  <div class="asofbox">
+    <div class="asofdate">2026-11-20</div>
+    <div class="asoflabel">数据截止 · 最近交易日收盘</div>
+  </div>
+</div>
+<div class="meta">生成时间 2026-11-21 13:35　|　数据年龄 1 个自然日 / 0 个交易日（已休市）　|　下次更新：下一交易日收盘后</div>
+
+<div class="card">
+  <div class="kpis">
+    <div class="kpi"><div class="v" style="color:#1b8a5a">20.7</div><div class="l">水温总分 / 100</div><div class="n">档位：<b>防守</b></div></div>
+    <div class="kpi"><div class="v">0%</div><div class="l">今日做 T 额度</div><div class="n">基础额度 0% × 状态系数 0.8</div></div>
+    <div class="kpi"><div class="v" style="color:#c98a00">震荡</div><div class="l">中周期状态</div><div class="n">后验概率 97%　|　2026-11-20</div></div>
+    <div class="kpi"><div class="v">已触发</div><div class="l">一票否决</div><div class="n">广度 5.6% &lt; 15% 且指数 -1.23% 下跌，一票否决 -&gt; 防守档，额度归零</div></div>
+  </div>
+</div>
+<h2>数据时效校验<span class="asof">生成于 2026-11-21 13:35</span></h2>
+<div class="card">
+  <table>
+    <tr><th>数据集</th><th>来源 / 接口</th><th>数据日期</th><th>抓取时间（北京）</th><th>距今</th><th>状态</th></tr>
+    <tr>
+<td>index_daily</td>
+<td>腾讯金融科技 NeoData<div class="small">quote_and_kline / day / 不复权</div></td>
+<td class="num">2026-11-20</td>
+<td class="num">2026-11-21 13:01</td>
+<td class="num">1 天 / 0 交易日</td>
+<td><span class="badge ok">最新（休市）</span></td>
+</tr><tr>
+<td>market_breadth</td>
+<td>腾讯金融科技 NeoData<div class="small">market_breadth</div></td>
+<td class="num">2026-11-20</td>
+<td class="num">2026-11-21 12:22</td>
+<td class="num">1 天 / 0 交易日</td>
+<td><span class="badge ok">最新（休市）</span></td>
+</tr><tr>
+<td>sector_rank</td>
+<td>腾讯金融科技 NeoData<div class="small">sector_rank / plate</div></td>
+<td class="num">2026-11-20</td>
+<td class="num">2026-11-21 12:22</td>
+<td class="num">1 天 / 0 交易日</td>
+<td><span class="badge ok">最新（休市）</span></td>
+</tr>
+  </table>
+  <div class="small">数据版本：2026-11-21 13:05。以上为本报告使用的全部数据快照，未使用任何估计值或训练数据中的历史数值。</div>
+</div>
+<h2>六维水温明细<span class="asof">数据日期 2026-11-20</span></h2>
+<div class="card">
+  <table>
+    <tr><th>维度</th><th>权重</th><th>得分</th><th>相对强度</th><th>原始值 / 口径</th></tr>
+    <tr>
+<td><b>市场广度</b></td>
+<td class="num">25%</td>
+<td class="num">5.6</td>
+<td><div class="bar"><i style="width:5.6%;background:#3f6f9f"></i></div></td>
+<td>上涨 313 / 下跌 5236 / 平 31，上涨占比 5.6%</td>
+</tr><tr>
+<td><b>量能</b></td>
+<td class="num">20%</td>
+<td class="num">50.1</td>
+<td><div class="bar"><i style="width:50.1%;background:#3f6f9f"></i></div></td>
+<td>两市 14,222 亿，20 日均值 12,182 亿，量比 1.17，60 日分位 73%<div class="small">当日指数 -1.23%，量价配合分 27；与广度接口成交额交叉校验一致（差 -0.00 亿）</div></td>
+</tr><tr>
+<td><b>趋势</b></td>
+<td class="num">20%</td>
+<td class="num">15.7</td>
+<td><div class="bar"><i style="width:15.7%;background:#3f6f9f"></i></div></td>
+<td>上证 20 日 -4.25%，收盘低于 MA20(3,636.54)<div class="small">四大指数同向 4/4</div></td>
+</tr><tr>
+<td><b>波动效率</b></td>
+<td class="num">15%</td>
+<td class="num">18.5</td>
+<td><div class="bar"><i style="width:18.5%;background:#3f6f9f"></i></div></td>
+<td>20 日均振幅 1.23%，波动充足度 82，方向中性度 0.23<div class="small">高波动但单边时该维度自动降分</div></td>
+</tr><tr>
+<td><b>情绪</b></td>
+<td class="num">10%</td>
+<td class="num">30.6</td>
+<td><div class="bar"><i style="width:30.6%;background:#3f6f9f"></i></div></td>
+<td>涨停 30 / 跌停 68，涨停占比 30.6%，活跃度 1.00</td>
+</tr><tr>
+<td><b>扩散</b></td>
+<td class="num">10%</td>
+<td class="num">2.6</td>
+<td><div class="bar"><i style="width:2.6%;background:#3f6f9f"></i></div></td>
+<td>涨超 2% 127 家 / 跌超 2% 4680 家<div class="small">涨幅榜前 6 名防御+周期占 100%，成长 0 席</div></td>
+</tr>
+  </table>
+  <div class="small">加权合成：20.7 分。档位阈值：≥70 进攻 / ≥50 震荡 / ≥30 切换 / &lt;30 防守。成交额口径：与广度接口成交额交叉校验一致（差 -0.00 亿）。</div>
+</div>
+<h2>中周期状态（高斯 HMM）<span class="asof">数据日期 2026-11-20</span></h2>
+<div class="card">
+  <table>
+    <tr><th>状态</th><th>样本占比</th><th>日均收益</th><th>年化收益</th><th>年化波动</th><th>平均持续</th></tr>
+    <tr>
+<td><span class="badge" style="background:#c628281a;color:#c62828">进攻</span></td>
+<td class="num">31%</td>
+<td class="num">+0.214%</td>
+<td class="num">+52.2%</td>
+<td class="num">8.1%</td>
+<td class="num">26.5 日</td>
+</tr><tr>
+<td><span class="badge" style="background:#c98a001a;color:#c98a00">震荡</span></td>
+<td class="num">27%</td>
+<td class="num">+0.108%</td>
+<td class="num">+26.3%</td>
+<td class="num">19.9%</td>
+<td class="num">21.5 日</td>
+</tr><tr>
+<td><span class="badge" style="background:#1b8a5a1a;color:#1b8a5a">防守</span></td>
+<td class="num">42%</td>
+<td class="num">-0.033%</td>
+<td class="num">-8.0%</td>
+<td class="num">12.8%</td>
+<td class="num">18.7 日</td>
+</tr>
+  </table>
+  <div class="small">年化收益 = 日均收益 × 244 的算术年化，不代表可实现收益；状态命名只用训练段（前 70%）统计。</div>
+  <h3>当前状态后验概率</h3>
+  <div style="margin:5px 0"><span class="small">进攻（S0） 0%</span><div class="bar" style="height:6px"><i style="width:0%;background:#c62828"></i></div></div><div style="margin:5px 0"><span class="small">震荡（S1） 97%</span><div class="bar" style="height:6px"><i style="width:97%;background:#c98a00"></i></div></div><div style="margin:5px 0"><span class="small">防守（S2） 3%</span><div class="bar" style="height:6px"><i style="width:3%;background:#1b8a5a"></i></div></div>
+  <h3>近 60 个交易日状态序列</h3>
+  <div class="strip"><i style="background:#1b8a5a" title="2026-08-21 防守"></i><i style="background:#1b8a5a" title="2026-08-24 防守"></i><i style="background:#1b8a5a" title="2026-08-25 防守"></i><i style="background:#1b8a5a" title="2026-08-26 防守"></i><i style="background:#1b8a5a" title="2026-08-27 防守"></i><i style="background:#1b8a5a" title="2026-08-28 防守"></i><i style="background:#1b8a5a" title="2026-08-31 防守"></i><i style="background:#1b8a5a" title="2026-09-01 防守"></i><i style="background:#1b8a5a" title="2026-09-02 防守"></i><i style="background:#1b8a5a" title="2026-09-03 防守"></i><i style="background:#1b8a5a" title="2026-09-04 防守"></i><i style="background:#1b8a5a" title="2026-09-07 防守"></i><i style="background:#1b8a5a" title="2026-09-08 防守"></i><i style="background:#1b8a5a" title="2026-09-09 防守"></i><i style="background:#1b8a5a" title="2026-09-10 防守"></i><i style="background:#1b8a5a" title="2026-09-11 防守"></i><i style="background:#1b8a5a" title="2026-09-14 防守"></i><i style="background:#1b8a5a" title="2026-09-15 防守"></i><i style="background:#c62828" title="2026-09-16 进攻"></i><i style="background:#c62828" title="2026-09-17 进攻"></i><i style="background:#c62828" title="2026-09-18 进攻"></i><i style="background:#c62828" title="2026-09-21 进攻"></i><i style="background:#c62828" title="2026-09-22 进攻"></i><i style="background:#c62828" title="2026-09-23 进攻"></i><i style="background:#c98a00" title="2026-09-24 震荡"></i><i style="background:#c98a00" title="2026-09-28 震荡"></i><i style="background:#c98a00" title="2026-09-29 震荡"></i><i style="background:#c98a00" title="2026-09-30 震荡"></i><i style="background:#c98a00" title="2026-10-08 震荡"></i><i style="background:#c98a00" title="2026-10-09 震荡"></i><i style="background:#c98a00" title="2026-10-12 震荡"></i><i style="background:#c98a00" title="2026-10-13 震荡"></i><i style="background:#c98a00" title="2026-10-14 震荡"></i><i style="background:#c98a00" title="2026-10-15 震荡"></i><i style="background:#c98a00" title="2026-10-16 震荡"></i><i style="background:#c98a00" title="2026-10-19 震荡"></i><i style="background:#c98a00" title="2026-10-20 震荡"></i><i style="background:#c98a00" title="2026-10-21 震荡"></i><i style="background:#c98a00" title="2026-10-22 震荡"></i><i style="background:#c98a00" title="2026-10-23 震荡"></i><i style="background:#c98a00" title="2026-10-26 震荡"></i><i style="background:#c98a00" title="2026-10-27 震荡"></i><i style="background:#c98a00" title="2026-10-28 震荡"></i><i style="background:#c98a00" title="2026-10-29 震荡"></i><i style="background:#c98a00" title="2026-10-30 震荡"></i><i style="background:#c98a00" title="2026-11-02 震荡"></i><i style="background:#c98a00" title="2026-11-03 震荡"></i><i style="background:#c98a00" title="2026-11-04 震荡"></i><i style="background:#c98a00" title="2026-11-05 震荡"></i><i style="background:#c98a00" title="2026-11-06 震荡"></i><i style="background:#c98a00" title="2026-11-09 震荡"></i><i style="background:#c98a00" title="2026-11-10 震荡"></i><i style="background:#c98a00" title="2026-11-11 震荡"></i><i style="background:#c98a00" title="2026-11-12 震荡"></i><i style="background:#c98a00" title="2026-11-13 震荡"></i><i style="background:#c98a00" title="2026-11-16 震荡"></i><i style="background:#c98a00" title="2026-11-17 震荡"></i><i style="background:#c98a00" title="2026-11-18 震荡"></i><i style="background:#c98a00" title="2026-11-19 震荡"></i><i style="background:#c98a00" title="2026-11-20 震荡"></i></div>
+  <div class="legend">绿色=防守　黄色=震荡　红色=进攻　灰色=过渡；悬停可见日期。状态命名只用训练段（前 70%）统计，避免前视。</div>
+  <h3>样本外检验（训练段后 30%）</h3>
+  <table><tr><th>状态</th><th>样本数</th><th>未来 5 日平均收益</th></tr><tr><td>S0</td><td>7</td><td style="color:#1b8a5a">-147.3 bp</td></tr><tr><td>S1</td><td>64</td><td style="color:#1b8a5a">-51.8 bp</td></tr><tr><td>S2</td><td>38</td><td style="color:#1b8a5a">-24.1 bp</td></tr></table>
+  <div class="small">状态间极差 123.2 bp；测试段最大状态占比 60.5%。样本量有限，只按方向解读，不当作可交易信号。</div>
+  <div class="small">Jump Model 与 HMM 状态一致率 68.3%；对数似然 -2283.7。状态模型只用于调节额度，不用于预测涨跌；样本量有限，结论按方向使用。</div>
+</div>
+<h2>做 T 信号回测<span class="asof">合成 5 分钟数据（引擎验证，非真实行情）</span></h2>
+<div class="card">
+  <div class="danger"><b>数据性质：合成 5 分钟 bar，不是真实行情。</b>本区块只验证信号与撮合逻辑（信号在 bar 收盘生成、下一根开盘成交、当日收盘强制复位），任何收益数字都不代表实盘能力。</div>
+  <div class="kpis">
+    <div class="kpi"><div class="v">9</div><div class="l">交易笔数</div><div class="n">信号触发 9 次</div></div>
+    <div class="kpi"><div class="v">67%</div><div class="l">胜率</div><div class="n">扣费后</div></div>
+    <div class="kpi"><div class="v">+9.4</div><div class="l">平均单笔（bp）</div><div class="n">往返成本 8 bp</div></div>
+    <div class="kpi"><div class="v">+84.9</div><div class="l">累计（bp）</div><div class="n">最大回撤 58.5 bp</div></div>
+  </div>
+  <table>
+    <tr><th>方向</th><th>开仓时间</th><th>平仓时间</th><th>开仓价</th><th>平仓价</th><th>盈亏(bp)</th><th>持仓 bar</th><th>平仓原因</th></tr>
+    <tr><td>正T(先买)</td><td>2026-11-02 14:00:00</td><td>2026-11-02 15:00:00</td>
+<td class="num">3.9141</td><td class="num">3.9131</td>
+<td class="num" style="color:#1b8a5a">-10.55</td>
+<td class="num">13</td><td>收盘复位</td></tr><tr><td>反T(先卖)</td><td>2026-11-09 14:35:00</td><td>2026-11-09 14:50:00</td>
+<td class="num">3.9997</td><td class="num">3.9875</td>
+<td class="num" style="color:#c62828">+22.50</td>
+<td class="num">3</td><td>回归</td></tr><tr><td>正T(先买)</td><td>2026-11-10 13:20:00</td><td>2026-11-10 14:05:00</td>
+<td class="num">3.9764</td><td class="num">3.9907</td>
+<td class="num" style="color:#c62828">+27.96</td>
+<td class="num">9</td><td>回归</td></tr><tr><td>反T(先卖)</td><td>2026-11-11 14:10:00</td><td>2026-11-11 14:25:00</td>
+<td class="num">4.0759</td><td class="num">4.0550</td>
+<td class="num" style="color:#c62828">+43.28</td>
+<td class="num">3</td><td>回归</td></tr><tr><td>正T(先买)</td><td>2026-11-12 11:05:00</td><td>2026-11-12 14:05:00</td>
+<td class="num">4.0868</td><td class="num">4.0950</td>
+<td class="num" style="color:#c62828">+12.06</td>
+<td class="num">18</td><td>回归</td></tr><tr><td>正T(先买)</td><td>2026-11-13 11:05:00</td><td>2026-11-13 14:10:00</td>
+<td class="num">4.0464</td><td class="num">4.0588</td>
+<td class="num" style="color:#c62828">+22.64</td>
+<td class="num">19</td><td>回归</td></tr><tr><td>正T(先买)</td><td>2026-11-17 10:20:00</td><td>2026-11-17 10:30:00</td>
+<td class="num">4.0899</td><td class="num">4.1036</td>
+<td class="num" style="color:#c62828">+25.50</td>
+<td class="num">2</td><td>回归</td></tr><tr><td>正T(先买)</td><td>2026-11-17 13:45:00</td><td>2026-11-17 15:00:00</td>
+<td class="num">4.0476</td><td class="num">4.0314</td>
+<td class="num" style="color:#1b8a5a">-48.02</td>
+<td class="num">16</td><td>收盘复位</td></tr><tr><td>反T(先卖)</td><td>2026-11-19 14:05:00</td><td>2026-11-19 15:00:00</td>
+<td class="num">4.0575</td><td class="num">4.0585</td>
+<td class="num" style="color:#1b8a5a">-10.46</td>
+<td class="num">12</td><td>收盘复位</td></tr>
+  </table>
+  <div class="small">平均持仓 10.6 根 bar。仅展示前 10 笔。</div>
+</div>
+<h2>系统边界与缺口</h2>
+<div class="card">
+  <table>
+    <tr><th>模块</th><th>状态</th><th>说明</th></tr>
+    <tr><td>六维水温打分</td><td><span class="badge ok">已实现</span></td><td>全部维度可计算、可追溯；缺字段时不估算。</td></tr>
+    <tr><td>中周期 HMM</td><td><span class="badge ok">已实现</span></td><td>EM + Viterbi + 后验概率；训练段命名；样本外单独拟合。样本仅 378 个交易日。</td></tr>
+    <tr><td>Jump Model 对照</td><td><span class="badge ok">已实现</span></td><td>KMeans 初始化 + 切换惩罚动态规划，输出与 HMM 的一致率。</td></tr>
+    <tr><td>做 T 信号与回测</td><td><span class="badge warn">部分实现</span></td><td>VWAP 偏离 + OFI 代理 + 成本门控 + 次日开盘撮合；OFI 为 bar 级代理，不是 Level-2 逐笔。</td></tr>
+    <tr><td>Level-2 订单流</td><td><span class="badge stale">未接入</span></td><td>VPIN/DPIN、真实 OFI、撤单博弈需要逐笔委托与成交数据，当前无数据权限。</td></tr>
+    <tr><td>个股交易约束</td><td><span class="badge stale">未建模</span></td><td>涨跌停、停牌、融券费率、冲击成本曲线、T+1 底仓校验均未纳入。</td></tr>
+    <tr><td>每日自动更新</td><td><span class="badge warn">半自动</span></td><td>需先由行情 MCP 拉取当日快照并运行 <code>tools/import_snapshot.py</code>，再执行 <code>python -m src.run_daily</code>；尚未配置无人值守调度。</td></tr>
+  </table>
+  <div class="note">本次未覆盖字段：连板高度、炸板率、高位股次日溢价、20 日成交额分位（已用 60 日分位近似）、Level-2 逐笔。缺项未参与打分，也未用估计值填充。</div>
+</div>
+<div class="disc"><b>免责声明</b>：以上内容基于公开数据和量化分析，仅供参考，不构成投资建议。市场有风险，投资需谨慎。任何投资决策应结合个人风险承受能力、资金状况和投资目标独立判断，必要时咨询持牌专业机构。过往表现不预示未来收益。</div>
+<div class="foot"><span>数据截止 2026-11-20　|　报告生成 2026-11-21 13:35　|　口径：A 股 T+1 底仓日内回转</span><span>颜色约定：红涨绿跌</span></div>
+</div></body></html>

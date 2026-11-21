@@ -1,0 +1,1 @@
+export { useVolatility } from './useMacroRisk';
