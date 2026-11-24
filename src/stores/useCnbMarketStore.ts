@@ -1,60 +1,81 @@
 import { create } from 'zustand';
-import { fetchConvexLatest } from '../services/api';
+import { fetchConvexSeries } from '../services/api';
+
+type MarketNumber = number | null;
 
 interface CNMarketState {
-  ssci: number;   // CSI 300 Index (沪深300)
-  sse: number;    // Shanghai Composite (上证指数)
-  szse: number;   // Shenzhen Component (深证成指)
-  cn10y: number;  // China 10Y Government Bond Yield
+  ssci: MarketNumber;   // CSI 300 Index (沪深300)
+  sse: MarketNumber;    // Shanghai Composite (上证指数)
+  szse: MarketNumber;   // Shenzhen Component (深证成指)
+  cn10y: MarketNumber;  // China 10Y Government Bond Yield
+  ssciSeries: number[];
+  sseSeries: number[];
+  szseSeries: number[];
+  cn10ySeries: number[];
   lastUpdate: string;
   loading: boolean;
   fetchCNData: () => Promise<void>;
 }
 
 // ConvexTrade series IDs for CN market indices
-const SSEC_SERIES = 'SSEC';     // Shanghai Composite via ConvexTrade
-const SZSEC_SERIES = 'SZSEC';   // Shenzhen Component
-const CN10Y_SERIES = 'CN10Y';   // China 10Y bond yield
+const CSI300_SERIES = 'CSI300';    // 沪深300，优先使用真实序列
+const SSEC_SERIES = 'SSEC';        // 上证指数
+const SZSEC_SERIES = 'SZSEC';      // 深证成指（此前定义但未使用）
+const CN10Y_SERIES = 'CN10Y';      // 中国10年国债收益率
 
-// Yahoo Finance symbols for CN indices
-const YH_CSI300 = '000300.SS';  // CSI 300 on Yahoo
+// Yahoo fallback symbol
+const YH_CSI300 = '000300.SS';
+
+const valid = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+const valuesOf = (series: { value: number }[]) => series.map((d) => d.value).filter(valid);
+const latestOf = (values: number[]) => (values.length ? values[values.length - 1] : null);
+const nowLabel = () => new Date().toLocaleTimeString('zh-CN', { hour12: false });
 
 export const useCnbMarketStore = create<CNMarketState>((set) => ({
-  ssci: 3953.0,
-  sse: 3187.5,
-  szse: 10823.2,
-  cn10y: 1.68,
+  ssci: null,
+  sse: null,
+  szse: null,
+  cn10y: null,
+  ssciSeries: [],
+  sseSeries: [],
+  szseSeries: [],
+  cn10ySeries: [],
   lastUpdate: '',
   loading: false,
 
   fetchCNData: async () => {
     set({ loading: true });
     try {
-      const timestamp = new Date().toLocaleTimeString('zh-CN', { hour12: false });
-
-      // Fetch CSI 300 from Yahoo Finance
-      const csi300 = await fetch(
-        `https://query1.finance.yahoo.com/v8/finance/chart/${YH_CSI300}?interval=1d&range=1d`,
-        { headers: { 'User-Agent': 'Mozilla/5.0' } },
-      )
-        .then(r => r.json())
-        .then(j => j?.chart?.result?.[0]?.meta?.regularMarketPrice ?? null)
-        .catch(() => null);
-
-      // Fetch SSE Composite from ConvexTrade
-      const [sse, cn10y] = await Promise.all([
-        fetchConvexLatest(SSEC_SERIES),
-        fetchConvexLatest(CN10Y_SERIES),
+      const [csi300Series, sseSeries, szseSeries, cn10ySeries] = await Promise.all([
+        fetchConvexSeries(CSI300_SERIES, 120),
+        fetchConvexSeries(SSEC_SERIES, 120),
+        fetchConvexSeries(SZSEC_SERIES, 120),
+        fetchConvexSeries(CN10Y_SERIES, 120),
       ]);
 
-      set({
-        ssci: csi300 ?? 3953.0,
-        sse: sse ?? 3187.5,
-        szse: 10823.2, // SZSE component as fallback/default
-        cn10y: cn10y ?? 1.68,
-        lastUpdate: timestamp,
-        loading: false,
-      });
+      let ssciValues = valuesOf(csi300Series);
+      if (!ssciValues.length) {
+        // ConvexTrade 无沪深300时再用 Yahoo 兜底，取不到就是 null。
+        const yahoo = await fetch(
+          `https://query1.finance.yahoo.com/v8/finance/chart/${YH_CSI300}?interval=1d&range=5d`,
+          { headers: { 'User-Agent': 'Mozilla/5.0' } },
+        ).then(r => r.json()).catch(() => null);
+        const price = Number(yahoo?.chart?.result?.[0]?.meta?.regularMarketPrice);
+        if (Number.isFinite(price)) ssciValues = [price];
+      }
+
+      const next = {
+        ssci: latestOf(ssciValues),
+        sse: latestOf(valuesOf(sseSeries)),
+        szse: latestOf(valuesOf(szseSeries)),
+        cn10y: latestOf(valuesOf(cn10ySeries)),
+        ssciSeries: ssciValues,
+        sseSeries: valuesOf(sseSeries),
+        szseSeries: valuesOf(szseSeries),
+        cn10ySeries: valuesOf(cn10ySeries),
+      };
+      const hasAny = [next.ssci, next.sse, next.szse, next.cn10y].some(valid);
+      set((state) => ({ ...next, lastUpdate: hasAny ? nowLabel() : state.lastUpdate, loading: false }));
     } catch {
       set({ loading: false });
     }

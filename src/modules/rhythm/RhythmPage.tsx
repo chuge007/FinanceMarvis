@@ -2,6 +2,11 @@ import { memo, useCallback, useEffect, useState } from 'react';
 import { fetchRhythm } from './services/rhythm';
 import type { RhythmSnapshot } from './services/rhythm';
 import { RegimeCard } from './components/RegimeCard';
+import { RegimeContribution } from './components/RegimeContribution';
+import { RiskTemperatureOverlay } from './components/RiskTemperatureOverlay';
+import { CorrelationMatrix } from './components/CorrelationMatrix';
+import { RegimeTimeline } from './components/RegimeTimeline';
+import { DivergenceAlert } from './components/DivergenceAlert';
 import { IndicatorTimeline } from './components/IndicatorTimeline';
 import { TodayThree } from './components/TodayThree';
 import { EventCalendar } from './components/EventCalendar';
@@ -39,6 +44,15 @@ export const RhythmPage = memo(function RhythmPage() {
       </div>
 
       <RegimeCard snapshot={snapshot} loading={loading} onRefresh={() => void load()} />
+      <RegimeContribution snapshot={snapshot} />
+      <RiskTemperatureOverlay snapshot={snapshot} />
+      <div className="grid grid-cols-2 gap-3 items-start">
+        <CorrelationMatrix snapshot={snapshot} />
+        <div className="space-y-3">
+          <RegimeTimeline snapshot={snapshot} />
+          <DivergenceAlert snapshot={snapshot} />
+        </div>
+      </div>
 
       <div className="grid grid-cols-3 gap-3 items-start">
         <div className="col-span-2">

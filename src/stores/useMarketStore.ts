@@ -1,53 +1,76 @@
 import { create } from 'zustand';
-import { fetchConvexLatest } from '../services/api';
+import { fetchConvexSeries } from '../services/api';
+
+type MarketNumber = number | null;
 
 interface MarketState {
-  spx: number;
-  vix: number;
-  dxy: number;
-  us10y: number;
+  spx: MarketNumber;
+  vix: MarketNumber;
+  dxy: MarketNumber;
+  us10y: MarketNumber;
+  vixSeries: number[];
+  dxySeries: number[];
+  us10ySeries: number[];
   lastUpdate: string;
   loading: boolean;
-  setSnapshot: (data: { spx: number; vix: number; dxy: number; us10y: number }) => void;
+  setSnapshot: (data: { spx: MarketNumber; vix: MarketNumber; dxy: MarketNumber; us10y: MarketNumber }) => void;
   fetchMarketData: () => Promise<void>;
 }
 
+const valid = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+const valuesOf = (series: { value: number }[]) => series.map((d) => d.value).filter(valid);
+const latestOf = (values: number[]) => (values.length ? values[values.length - 1] : null);
+const nowLabel = () => new Date().toLocaleTimeString('zh-CN', { hour12: false });
+
 export const useMarketStore = create<MarketState>((set) => ({
-  spx: 5804.25,
-  vix: 15.32,
-  dxy: 104.18,
-  us10y: 4.32,
+  spx: null,
+  vix: null,
+  dxy: null,
+  us10y: null,
+  vixSeries: [],
+  dxySeries: [],
+  us10ySeries: [],
   lastUpdate: '',
   loading: false,
 
   setSnapshot: (data) =>
-    set({
+    set((state) => ({
       ...data,
-      lastUpdate: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
-    }),
+      lastUpdate: Object.values(data).some(valid) ? nowLabel() : state.lastUpdate,
+    })),
 
   fetchMarketData: async () => {
     set({ loading: true });
     try {
-      const [vix, dgs10, dxy, spxData] = await Promise.all([
-        fetchConvexLatest('VIXCLS'),
-        fetchConvexLatest('DGS10'),
-        fetchConvexLatest('DTWEXBGS'),
+      const [vixSeries, dgs10Series, dxySeries, spxData] = await Promise.all([
+        fetchConvexSeries('VIXCLS', 120),
+        fetchConvexSeries('DGS10', 120),
+        fetchConvexSeries('DTWEXBGS', 120),
         // SPX via Yahoo Finance
         fetch('https://query1.finance.yahoo.com/v8/finance/chart/%5EGSPC?interval=1d&range=1d', {
           headers: { 'User-Agent': 'Mozilla/5.0' },
-        }).then(r => r.json()).then(j => j?.chart?.result?.[0]?.meta?.regularMarketPrice ?? null).catch(() => null),
+        }).then(r => r.json()).then(j => {
+          const v = Number(j?.chart?.result?.[0]?.meta?.regularMarketPrice);
+          return Number.isFinite(v) ? v : null;
+        }).catch(() => null),
       ]);
 
-      set({
-        spx: spxData ?? 5804.25,
-        vix: vix ?? 15.32,
-        dxy: dxy ?? 104.18,
-        us10y: dgs10 ?? 4.32,
-        lastUpdate: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
-        loading: false,
-      });
+      const vixValues = valuesOf(vixSeries);
+      const dxyValues = valuesOf(dxySeries);
+      const us10yValues = valuesOf(dgs10Series);
+      const next = {
+        spx: valid(spxData) ? spxData : null,
+        vix: latestOf(vixValues),
+        dxy: latestOf(dxyValues),
+        us10y: latestOf(us10yValues),
+        vixSeries: vixValues,
+        dxySeries: dxyValues,
+        us10ySeries: us10yValues,
+      };
+      const hasAny = [next.spx, next.vix, next.dxy, next.us10y].some(valid);
+      set((state) => ({ ...next, lastUpdate: hasAny ? nowLabel() : state.lastUpdate, loading: false }));
     } catch {
+      // 上游整体失败：只结束 loading，不回填任何写死数值、不刷新时间戳。
       set({ loading: false });
     }
   },

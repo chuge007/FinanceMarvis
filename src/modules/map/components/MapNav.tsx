@@ -16,7 +16,6 @@ const ADVANCED: Array<{ tab: ModuleTab; label: string; note: string }> = [
   { tab: 'strategy', label: '做T策略', note: '日内交易工具' },
   { tab: 'technical', label: '技术分析', note: '均线、MACD、RSI' },
   { tab: 'rotation', label: '板块轮动', note: '行业强弱' },
-  { tab: 'papertrading', label: '模拟交易', note: '零成本练习' },
   { tab: 'alerts', label: '告警', note: '价格与指标提醒' },
 ];
 

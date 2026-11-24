@@ -1,6 +1,7 @@
 import React, { useEffect } from 'react';
 import { useSectorRotationStore } from '../../stores/useSectorRotationStore';
 import { DemoBanner } from '../../shared/components/DemoBanner';
+import { ChartInsight } from '../../shared/components/ChartInsight';
 
 const SectorHeatmap: React.FC = () => {
   const currentRotation = useSectorRotationStore(state => state.currentRotation);
@@ -37,6 +38,13 @@ const SectorHeatmap: React.FC = () => {
           </div>
         ))}
       </div>
+      <div className="mt-4">
+        <ChartInsight
+          summary="红色代表板块上涨，绿色代表下跌；颜色深浅表示幅度大小，全部为演示数值。"
+          how="比较同一行的相对强弱，不要跨页面套用不同颜色习惯。"
+          pitfall="本页热力图与列表已统一为“红涨绿跌”；写死数据不代表真实行情。"
+        />
+      </div>
     </div>
   );
 };
@@ -45,15 +53,6 @@ const SectorRotationClock: React.FC = () => {
   const currentRotation = useSectorRotationStore(state => state.currentRotation);
   
   if (!currentRotation) return null;
-
-  const getQuadrantPosition = (sector: any) => {
-    // X轴：相对强度（涨跌幅）
-    // Y轴：动量（成交量变化）
-    const x = sector.change * 10; // 缩放到合适范围
-    const y = sector.volumeChange / 2;
-    
-    return { x, y };
-  };
 
   const getPhaseLabel = (phase: string) => {
     const labels = {
@@ -66,11 +65,12 @@ const SectorRotationClock: React.FC = () => {
   };
 
   const getPhaseColor = (phase: string) => {
+    // 与热力图统一：红=涨/强，绿=跌/弱，不再用绿=好、红=坏的另一套语义。
     const colors = {
-      leading: 'text-green-600',
-      strengthening: 'text-blue-600',
-      weakening: 'text-orange-600',
-      lagging: 'text-red-600',
+      leading: 'text-red-600',
+      strengthening: 'text-orange-600',
+      weakening: 'text-blue-600',
+      lagging: 'text-green-600',
     };
     return colors[phase as keyof typeof colors] || 'text-gray-600';
   };
@@ -81,34 +81,37 @@ const SectorRotationClock: React.FC = () => {
       
       {/* 四象限说明 */}
       <div className="grid grid-cols-2 gap-4 mb-6">
-        <div className="bg-green-50 dark:bg-green-900 p-3 rounded-lg">
-          <div className="font-medium text-green-700 dark:text-green-300">领先（Leading）</div>
+        <div className="bg-red-50 dark:bg-red-900 p-3 rounded-lg">
+          <div className="font-medium text-red-700 dark:text-red-300">领先（Leading）</div>
           <div className="text-xs text-gray-600 dark:text-gray-400 mt-1">
-            高涨幅 + 高成交量<br/>
-            ▶ 建议：持有或加仓
-          </div>
-        </div>
-        <div className="bg-blue-50 dark:bg-blue-900 p-3 rounded-lg">
-          <div className="font-medium text-blue-700 dark:text-blue-300">走强（Strengthening）</div>
-          <div className="text-xs text-gray-600 dark:text-gray-400 mt-1">
-            高涨幅 + 低成交量<br/>
-            ▶ 建议：关注买入机会
+            高涨幅 + 高成交量（示例位置）
           </div>
         </div>
         <div className="bg-orange-50 dark:bg-orange-900 p-3 rounded-lg">
-          <div className="font-medium text-orange-700 dark:text-orange-300">走弱（Weakening）</div>
+          <div className="font-medium text-orange-700 dark:text-orange-300">走强（Strengthening）</div>
           <div className="text-xs text-gray-600 dark:text-gray-400 mt-1">
-            低涨幅 + 高成交量<br/>
-            ▶ 建议：减仓或观望
+            高涨幅 + 低成交量（示例位置）
           </div>
         </div>
-        <div className="bg-red-50 dark:bg-red-900 p-3 rounded-lg">
-          <div className="font-medium text-red-700 dark:text-red-300">落后（Lagging）</div>
+        <div className="bg-blue-50 dark:bg-blue-900 p-3 rounded-lg">
+          <div className="font-medium text-blue-700 dark:text-blue-300">走弱（Weakening）</div>
           <div className="text-xs text-gray-600 dark:text-gray-400 mt-1">
-            低涨幅 + 低成交量<br/>
-            ▶ 建议：规避或轻仓
+            低涨幅 + 高成交量（示例位置）
           </div>
         </div>
+        <div className="bg-green-50 dark:bg-green-900 p-3 rounded-lg">
+          <div className="font-medium text-green-700 dark:text-green-300">落后（Lagging）</div>
+          <div className="text-xs text-gray-600 dark:text-gray-400 mt-1">
+            低涨幅 + 低成交量（示例位置）
+          </div>
+        </div>
+      </div>
+      <div className="mb-4">
+        <ChartInsight
+          summary="四象限只描述板块在“涨幅 × 成交量”上的位置，不给出买卖建议。"
+          how="把它当作观察框架：真实行业强弱请到「资金流」页看东方财富板块净额。"
+          pitfall="本页数据全部写死，所有颜色与位置均不代表当前市场，更不能据此加仓或减仓。"
+        />
       </div>
 
       {/* 板块列表 */}
@@ -122,7 +125,7 @@ const SectorRotationClock: React.FC = () => {
               <span className="font-medium">{sector.name}</span>
             </div>
             <div className="flex items-center gap-4 text-sm">
-              <span className={sector.change >= 0 ? 'text-green-600' : 'text-red-600'}>
+              <span className={sector.change >= 0 ? 'text-red-600' : 'text-green-600'}>
                 {sector.change >= 0 ? '+' : ''}{sector.change.toFixed(2)}%
               </span>
               <span className="text-gray-500">
@@ -166,13 +169,13 @@ const MoneyFlowTable: React.FC = () => {
                 <div className="text-xs text-gray-500">热度: {sector.hotness}</div>
               </td>
               <td className={`px-4 py-3 text-right font-medium ${
-                sector.change >= 0 ? 'text-green-600' : 'text-red-600'
+                sector.change >= 0 ? 'text-red-600' : 'text-green-600'
               }`}>
                 {sector.change >= 0 ? '+' : ''}{sector.change.toFixed(2)}%
               </td>
               <td className="px-4 py-3 text-right text-sm">{sector.turnover.toFixed(2)}%</td>
               <td className={`px-4 py-3 text-right font-medium ${
-                sector.mainInflow >= 0 ? 'text-green-600' : 'text-red-600'
+                sector.mainInflow >= 0 ? 'text-red-600' : 'text-green-600'
               }`}>
                 {sector.mainInflow >= 0 ? '+' : ''}{sector.mainInflow.toFixed(2)}亿
               </td>

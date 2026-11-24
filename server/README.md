@@ -29,13 +29,14 @@ npm run serve        # 启动生产服务，默认 http://localhost:8080
 单端口同时承担两部分：
 
 1. **静态托管** `dist/` 构建产物（SPA，非静态路径自动回源 index.html）；
-2. **同域转发** 五个数据源，规避 CORS / 反爬 / 地区封锁：
+2. **同域转发** 六个数据源，规避 CORS / 反爬 / 地区封锁：
 
 | 前端路径 | 上游 | 说明 |
 |---|---|---|
 | /convex | convextrade.com/api/public | 宏观序列；经 HTTPS_PROXY 出海 |
 | /eastmoney-news | np-listapi.eastmoney.com | 快讯；注入 eastmoney Referer 过 WAF |
-| /yahoo | query1.finance.yahoo.com | 美股行情/K线；注入浏览器 UA/Referer |
+| /yahoo | query1.finance.yahoo.com | 美股行情/K线、VIX/VVIX/SKEW；注入浏览器 UA/Referer |
+| /cboe | www.cboe.com | CBOE 官方日度 Put/Call 与成交量/持仓；注入浏览器 UA/Referer |
 | /eastmoney-kline | push2his.eastmoney.com | 东财 K线兜底 |
 | /eastmoney-quote | push2.eastmoney.com | 东财实时报价 |
 

@@ -13,7 +13,7 @@ export function useFearGreed() {
       const snapshot = await fetchSentiment(market);
       setData(snapshot);
       setError(null);
-    } catch (e) {
+    } catch {
       setError('情绪数据获取失败，请稍后重试');
     }
     setLoading(false);

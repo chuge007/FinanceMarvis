@@ -5,10 +5,11 @@
  *   CN: A股综合情绪（融资余额、成交量、涨跌比、北向资金）
  */
 import { fngApi, convexApi } from './api';
+import { fetchOptionsSentiment } from './optionsSentiment';
 import { fetchCNSentimentReal } from './cnSentiment';
 import type { SentimentSnapshot, SentimentSubIndex, FNGDay, FNGResponse } from '../types/sentiment';
 import type { Market } from '../stores/useAppStore';
-import { mockSentimentUS, mockSentimentCN } from '../data/mock';
+import { mockSentimentCN } from '../data/mock';
 
 // ─── A股情绪快照 ───
 async function fetchCNSentiment(): Promise<SentimentSnapshot> {
@@ -87,9 +88,10 @@ export async function fetchSentiment(market: Market = 'US'): Promise<SentimentSn
   }
 
   try {
-    const { data } = await fngApi.get<FNGResponse>('/fng/', {
-      params: { limit: 30 },
-    });
+    const [{ data }, options] = await Promise.all([
+      fngApi.get<FNGResponse>('/fng/', { params: { limit: 30 } }),
+      fetchOptionsSentiment().catch(() => null),
+    ]);
 
     if (!data?.data?.length) throw new Error('No FNG data');
 
@@ -99,7 +101,7 @@ export async function fetchSentiment(market: Market = 'US'): Promise<SentimentSn
     const classification = latest.value_classification;
 
     // 构建历史趋势
-    const trend: { date: string; value: number }[] = fngData
+    const trend: { date: string; value: number }[] = [...fngData]
       .reverse()
       .map((d) => ({
         date: new Date(parseInt(d.timestamp, 10) * 1000).toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' }),
@@ -109,17 +111,24 @@ export async function fetchSentiment(market: Market = 'US'): Promise<SentimentSn
     // 子指数来自最新一天
     const subIndices = await fetchSubIndices(latest, value);
 
-    // 获取 VIX 与 Put/Call Ratio
-    const [vixVal, pcRatio] = await Promise.all([
+    // ConvexTrade(FRED) 作为 VIX / 总量 PCR 的兜底；CBOE 与 Yahoo 数据优先。
+    const [vixFallback, pcFallback] = await Promise.all([
       convexApi.get('/data/VIXCLS', { params: { limit: 2, format: 'json' } }).then(r => {
         const d = r.data?.data;
-        return d?.length ? d[d.length - 1].value : null;
+        const v = d?.length ? Number(d[d.length - 1].value) : NaN;
+        return Number.isFinite(v) ? v : null;
       }).catch(() => null),
       convexApi.get('/data/TOTPUT', { params: { limit: 2, format: 'json' } }).then(r => {
         const d = r.data?.data;
-        return d?.length ? d[d.length - 1].value : null;
+        const v = d?.length ? Number(d[d.length - 1].value) : NaN;
+        return Number.isFinite(v) ? v : null;
       }).catch(() => null),
     ]);
+
+    const totalRatio = options?.ratios.find((r) => r.key === 'TOTAL PUT/CALL RATIO')?.value ?? null;
+    const yahooVix = options?.quotes['^VIX']?.price ?? null;
+    const putCall = totalRatio ?? pcFallback;
+    const verdict = options?.verdict;
 
     return {
       value,
@@ -127,9 +136,11 @@ export async function fetchSentiment(market: Market = 'US'): Promise<SentimentSn
       timestamp: new Date(parseInt(latest.timestamp, 10) * 1000).toISOString(),
       trend,
       subIndices,
-      vix: vixVal,
-      putCallRatio: pcRatio ? pcRatio.toFixed(2) : undefined,
-      reading: getReading(value, classification),
+      vix: yahooVix ?? vixFallback,
+      putCallRatio: putCall !== null ? putCall.toFixed(2) : undefined,
+      options,
+      optionsVerdict: verdict,
+      reading: `${getReading(value, classification)}${verdict ? ` 期权情绪：${verdict}` : ''}`,
     };
   } catch {
     // 降级：返回模拟数据
@@ -154,7 +165,7 @@ async function fetchSubIndices(
 
   // sub-index values from alternative.me are in latest data but not directly exposed
   // Use overall value with slight variations as approximation
-  return subKeys.map((sk, i) => {
+  return subKeys.map((sk) => {
     const variation = overallValue + (Math.random() * 20 - 10);
     const v = Math.max(0, Math.min(100, Math.round(variation)));
     return {

@@ -9,7 +9,14 @@ const TONE_COLOR: Record<string, string> = {
   进攻: '#f04452', 均衡: '#20c4d8', 防守: '#f59e4b', 观望: '#9b6efb',
 };
 
-interface LastState { tone: string; date: string; score: number | null }
+export interface LastRegimeState {
+  tone: string;
+  date: string;
+  score: number | null;
+  confidence: number;
+  readings: { id: string; name: string; percentile: number | null; z: number | null }[];
+}
+type LastState = LastRegimeState;
 const KEY = 'marvis.regime.last.v1';
 
 function ScoreGauge({ score, color }: { score: number | null; color: string }) {
@@ -42,8 +49,14 @@ export const RegimeCard = memo(function RegimeCard({ snapshot, loading, onRefres
 
   useEffect(() => {
     if (!regime || regime.confidence === 0) return;
-    writeJSON<LastState>(KEY, { tone: regime.tone, date: todayKey(), score: regime.score });
-  }, [regime]);
+    writeJSON<LastState>(KEY, {
+      tone: regime.tone,
+      date: todayKey(),
+      score: regime.score,
+      confidence: regime.confidence,
+      readings: (snapshot?.indicators ?? []).map((i) => ({ id: i.id, name: i.name, percentile: i.percentile, z: i.z })),
+    });
+  }, [regime, snapshot]);
 
   const color = TONE_COLOR[regime?.tone ?? '观望'] ?? '#636878';
   const changed = previous && regime && previous.tone !== regime.tone && regime.confidence > 0;

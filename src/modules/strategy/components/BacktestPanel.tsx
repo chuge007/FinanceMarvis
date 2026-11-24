@@ -1,6 +1,9 @@
 ﻿import { memo, useRef, useEffect, useState, useCallback } from 'react';
-import { createChart, LineSeries, type Time } from 'lightweight-charts';
+import { createChart, LineSeries, AreaSeries, LineStyle, type Time } from 'lightweight-charts';
 import { Panel } from '../../../shared/components/Panel';
+import { DemoBanner } from '../../../shared/components/DemoBanner';
+import { ChartHeader } from '../../../shared/components/ChartHeader';
+import { ChartInsight } from '../../../shared/components/ChartInsight';
 import { fetchStockCandles, type StockCandle } from '../../../services/api';
 import { generateMockCandles } from '../../../shared/utils/mockCandles';
 import type { BacktestStats, BacktestSignalBrief } from '../../../types/strategy';
@@ -116,20 +119,22 @@ function runClosedLoopBacktest(
   const finalNav = equityCurve.length ? equityCurve[equityCurve.length - 1].value : 1;
   const totalReturn = (finalNav - 1) * 100;
 
-  let peak = -Infinity, maxDrawdown = 0;
-  for (const p of equityCurve) {
+  let peak = -Infinity;
+  const drawdownCurve = equityCurve.map((p) => {
     peak = Math.max(peak, p.value);
-    maxDrawdown = Math.max(maxDrawdown, ((peak - p.value) / peak) * 100);
-  }
+    const dd = ((p.value - peak) / peak) * 100;
+    return { date: p.date, value: +dd.toFixed(4) };
+  });
+  const maxDrawdown = drawdownCurve.reduce((worst, p) => Math.max(worst, -p.value), 0);
 
   const modeVerdict =
     mode === 'long'
       ? totalReturn >= 0
-        ? `利好 · 当前个股处${ph.label}，正T（顺势低吸高抛）回测能实现正收益，趋势与做T方向一致`
-        : `中性偏警示 · ${ph.label}阶段正T回测为负，需等回踩缩量信号或降低 T 仓频率`
+        ? `正收益 · 当前个股处${ph.label}，正T（顺势低吸高抛）回测为正，趋势与做T方向一致`
+        : `负收益 · ${ph.label}阶段正T回测为负，需结合回撤曲线判断稳定性`
       : totalReturn >= 0
-        ? `利好 · 个股处${ph.label}，反T（高抛低开接回/避险）回测正收益，空头逻辑成立`
-        : `警示 · ${ph.label}阶段反T回测为负，反弹站回趋势前不宜重仓反T`;
+        ? `正收益 · 个股处${ph.label}，反T（高抛低接）回测为正`
+        : `负收益 · ${ph.label}阶段反T回测为负，需结合回撤曲线判断稳定性`;
 
   const signalsBrief: BacktestSignalBrief[] = signals.slice(-6).map((s) => ({
     time: s.time, type: s.type, reason: s.reason, price: s.price, meaning: s.meaning,
@@ -148,6 +153,7 @@ function runClosedLoopBacktest(
     avgWin: wins.length ? +(wins.reduce((a, b) => a + b, 0) / wins.length).toFixed(2) : 0,
     avgLoss: losses.length ? +(losses.reduce((a, b) => a + b, 0) / losses.length).toFixed(2) : 0,
     equityCurve,
+    drawdownCurve,
     mode,
     modeVerdict,
     phase: { kind: ph.kind, label: ph.label, hint: ph.hint },
@@ -171,6 +177,7 @@ function KpiItem({ label, value, color }: { label: string; value: string; color?
 
 export const BacktestPanel = memo(function BacktestPanel({ symbol, market }: Props) {
   const chartRef = useRef<HTMLDivElement>(null);
+  const drawdownRef = useRef<HTMLDivElement>(null);
   const [stats, setStats] = useState<BacktestStats | null>(null);
   const [usingMock, setUsingMock] = useState(false);
 
@@ -195,27 +202,62 @@ export const BacktestPanel = memo(function BacktestPanel({ symbol, market }: Pro
 
   useEffect(() => {
     const container = chartRef.current;
+    const ddContainer = drawdownRef.current;
     if (!container || !stats) return;
     container.innerHTML = '';
-    const chart = createChart(container, {
-      width: container.clientWidth,
-      height: 160,
+    if (ddContainer) ddContainer.innerHTML = '';
+
+    const common = {
       layout: { background: { color: '#0d1117' }, textColor: '#8a8f9c' },
       grid: { vertLines: { color: 'rgba(255,255,255,0.03)' }, horzLines: { color: 'rgba(255,255,255,0.03)' } },
-      rightPriceScale: { borderColor: '#1a1d26' },
       timeScale: { borderColor: '#1a1d26', timeVisible: false },
-      crosshair: { mode: 0, vertLine: { color: '#2a2d3a', labelBackgroundColor: '#1a1d26' }, horzLine: { color: '#2a2d3a', labelBackgroundColor: '#1a1d26' } },
+      crosshair: { mode: 0 as const, vertLine: { color: '#2a2d3a', labelBackgroundColor: '#1a1d26' }, horzLine: { color: '#2a2d3a', labelBackgroundColor: '#1a1d26' } },
+    };
+
+    const chart = createChart(container, {
+      ...common,
+      width: container.clientWidth,
+      height: 170,
+      rightPriceScale: { borderColor: '#1a1d26' },
     });
     const navSeries = chart.addSeries(LineSeries, {
       color: stats.mode === 'short' ? '#f04452' : '#4078ff',
       lineWidth: 2,
     });
     navSeries.setData(stats.equityCurve.map((p) => ({ time: p.date as Time, value: p.value })));
-    const handleResize = () => chart.applyOptions({ width: container.clientWidth });
+    // 显式画出 1.0 基准线，防止净值从起点自动缩放把微小波动填满画布。
+    const baseSeries = chart.addSeries(LineSeries, {
+      color: '#4d5364', lineWidth: 1, lineStyle: LineStyle.Dotted,
+      priceLineVisible: false, lastValueVisible: false,
+    });
+    baseSeries.setData(stats.equityCurve.map((p) => ({ time: p.date as Time, value: 1 })));
+
+    let ddChart: ReturnType<typeof createChart> | null = null;
+    if (ddContainer) {
+      ddChart = createChart(ddContainer, {
+        ...common,
+        width: ddContainer.clientWidth,
+        height: 110,
+        rightPriceScale: { borderColor: '#1a1d26' },
+      });
+      const ddSeries = ddChart.addSeries(AreaSeries, {
+        lineColor: '#f04452',
+        topColor: 'rgba(240,68,82,0.30)',
+        bottomColor: 'rgba(240,68,82,0.02)',
+        priceLineVisible: false,
+      });
+      ddSeries.setData(stats.drawdownCurve.map((p) => ({ time: p.date as Time, value: p.value })));
+    }
+
+    const handleResize = () => {
+      chart.applyOptions({ width: container.clientWidth });
+      ddChart?.applyOptions({ width: ddContainer?.clientWidth ?? container.clientWidth });
+    };
     window.addEventListener('resize', handleResize);
     return () => {
       window.removeEventListener('resize', handleResize);
       chart.remove();
+      ddChart?.remove();
     };
   }, [stats]);
 
@@ -242,13 +284,19 @@ export const BacktestPanel = memo(function BacktestPanel({ symbol, market }: Pro
   const retCol = stats.totalReturn >= 0 ? '#0ca678' : '#f04452';
   const winCol = stats.winRate >= 50 ? '#0ca678' : '#f59e4b';
   const phStyle = PHASE_STYLE[stats.phase.kind] ?? PHASE_STYLE.range;
-  const verdictCol = stats.modeVerdict.startsWith('利好') ? '#0ca678' : stats.modeVerdict.startsWith('中性') ? '#f59e4b' : '#f04452';
+  const verdictCol = stats.modeVerdict.startsWith('正收益') ? '#0ca678' : '#f04452';
 
   return (
     <Panel
       title="选股 → 做T → 回测收益"
       badge={`${stats.symbol} · ${stats.period}`}
+      extra={<ChartHeader source={usingMock ? 'demo' : 'real'} note="净值 1.0 基准 + 回撤同框；忽略滑点手续费" />}
     >
+      {usingMock && (
+        <DemoBanner title="当前回测基于本地模拟 K 线">
+          收益与回撤均为演示结果，不代表真实标的的历史表现。
+        </DemoBanner>
+      )}
       {/* 周期 + 策略模式 */}
       <div className="flex items-center gap-2 flex-wrap mb-2">
         <span className="px-1.5 py-0.5 rounded text-[10px] font-medium" style={{ color: phStyle.text, backgroundColor: phStyle.bg }}>
@@ -276,14 +324,27 @@ export const BacktestPanel = memo(function BacktestPanel({ symbol, market }: Pro
         <KpiItem label="胜率" value={`${stats.winRate}%`} color={winCol} />
         <KpiItem label="盈亏比" value={stats.profitFactor > 50 ? '∞' : String(stats.profitFactor)} />
         <KpiItem label="最大回撤" value={`-${stats.maxDrawdown}%`} color="#f04452" />
+        <KpiItem
+          label="收益/回撤比"
+          value={stats.maxDrawdown > 0 ? (stats.totalReturn / stats.maxDrawdown).toFixed(2) : '—'}
+        />
         <KpiItem label="平均持仓" value={`${stats.avgHoldDays}天`} />
         <KpiItem label="平均盈/亏" value={`+${stats.avgWin}% / -${stats.avgLoss}%`} />
       </div>
 
       <div ref={chartRef} className="w-full mt-2" />
-      <div className="mt-1 flex items-center gap-3 text-[11px] text-[#636878]">
-        <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ backgroundColor: stats.mode === 'short' ? '#f04452' : '#4078ff' }} />策略净值（1 为基准）</span>
+      <div ref={drawdownRef} className="w-full" />
+      <div className="mt-1 flex items-center gap-3 text-[11px] text-[#636878] flex-wrap">
+        <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ backgroundColor: stats.mode === 'short' ? '#f04452' : '#4078ff' }} />策略净值（虚线=1.0 基准）</span>
+        <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block bg-[#f04452]" />回撤（%）</span>
         <span>数据源: {usingMock ? '本地模拟K线' : `${market === 'CN' ? '腾讯行情日线' : 'Yahoo Finance'} 1y`}</span>
+      </div>
+      <div className="mt-2">
+        <ChartInsight
+          summary="上图画净值相对 1.0 的变化，下图画从历史高点回落的幅度；两张图必须一起看。"
+          how="收益接近时优先选回撤更浅、收益/回撤比更高的策略。"
+          pitfall="回测忽略滑点与手续费且满仓进出，历史结果不代表未来收益，也不构成投资建议。"
+        />
       </div>
 
       {/* 买卖点信号明细（与K线图同源） */}

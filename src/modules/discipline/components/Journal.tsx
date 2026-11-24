@@ -2,6 +2,7 @@ import { memo, useState } from 'react';
 import type { FormEvent } from 'react';
 import { Panel } from '../../../shared/components/Panel';
 import { readJSON, writeJSON, removeKey, todayKey } from '../../../shared/utils/localStore';
+import type { LastRegimeState } from '../../rhythm/components/RegimeCard';
 
 interface Entry {
   id: string;
@@ -14,6 +15,8 @@ interface Entry {
   followed: boolean;
   outcome: string;
   note: string;
+  /** 决策当时的市场体制与关键分位快照，自动写入，不可事后编造。 */
+  regime?: LastRegimeState | null;
 }
 
 type Draft = Omit<Entry, 'id'>;
@@ -21,15 +24,18 @@ const KEY = 'marvis.journal.v1';
 const BASES = ['领先', '同步', '滞后', '情绪', '事件'];
 const OUTCOMES = ['未平仓', '盈利', '亏损', '持平'];
 
-function draft(tone: string): Draft {
-  return { date: todayKey(), tone, thesis: '', basis: '同步', plan: '', actual: '', followed: true, outcome: '未平仓', note: '' };
+function draft(tone: string, regime: LastRegimeState | null): Draft {
+  return {
+    date: todayKey(), tone, thesis: '', basis: '同步', plan: '', actual: '',
+    followed: true, outcome: '未平仓', note: '', regime,
+  };
 }
 
 const fieldCls = 'w-full bg-[#090b0f] border border-[#1a1d26] rounded px-2 py-1.5 text-[11px] text-[#d8dce6] outline-none focus:border-[#4078ff]';
 
-export const Journal = memo(function Journal({ tone }: { tone: string }) {
+export const Journal = memo(function Journal({ tone, regime }: { tone: string; regime: LastRegimeState | null }) {
   const [entries, setEntries] = useState<Entry[]>(() => readJSON<Entry[]>(KEY, []));
-  const [form, setForm] = useState<Draft>(() => draft(tone));
+  const [form, setForm] = useState<Draft>(() => draft(tone, regime));
 
   const save = (next: Entry[]) => {
     setEntries(next);
@@ -41,7 +47,7 @@ export const Journal = memo(function Journal({ tone }: { tone: string }) {
     if (!form.thesis.trim() && !form.plan.trim() && !form.actual.trim()) return;
     const entry: Entry = { ...form, id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}` };
     save([entry, ...entries]);
-    setForm(draft(tone));
+    setForm(draft(tone, regime));
   };
 
   const exportJSON = () => {
@@ -65,6 +71,7 @@ export const Journal = memo(function Journal({ tone }: { tone: string }) {
   const lag = entries.filter((x) => x.basis === '滞后').length;
   const lucky = entries.filter((x) => !x.followed && x.outcome === '盈利').length;
   const unlucky = entries.filter((x) => x.followed && x.outcome === '亏损').length;
+  const inDefensive = entries.filter((x) => x.regime && ['防守', '观望'].includes(x.regime.tone)).length;
 
   return (
     <Panel
@@ -109,13 +116,14 @@ export const Journal = memo(function Journal({ tone }: { tone: string }) {
         </div>
       </form>
 
-      <div className="grid grid-cols-5 gap-2 mt-3">
+      <div className="grid grid-cols-6 gap-2 mt-3">
         {[
           { label: '总记录', value: `${total}`, color: '#d8dce6' },
           { label: '按规则执行率', value: total ? `${Math.round((followed / total) * 100)}%` : '—', color: '#0ca678' },
           { label: '依据滞后指标', value: `${lag} 次`, color: lag ? '#f59e4b' : '#d8dce6' },
           { label: '违规却盈利', value: `${lucky} 次`, color: lucky ? '#f04452' : '#d8dce6' },
           { label: '守规仍亏损', value: `${unlucky} 次`, color: '#d8dce6' },
+          { label: '防守/观望态决策', value: `${inDefensive} 次`, color: '#9b6efb' },
         ].map((k) => (
           <div key={k.label} className="bg-[rgba(255,255,255,0.02)] border border-[#1a1d26] rounded px-3 py-2">
             <div className="text-[10px] text-[#636878]">{k.label}</div>

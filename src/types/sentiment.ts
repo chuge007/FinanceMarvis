@@ -21,6 +21,46 @@ export interface SentimentSubIndex {
   reading: string;
 }
 
+// ─── 美股大盘期权情绪（CBOE + Yahoo） ───
+export interface OptionRatioItem {
+  key: string;
+  label: string;
+  officialName: string;
+  value: number | null;
+  norm: [number, number] | null;
+  reading: '偏高' | '偏低' | '常态' | '无数据';
+}
+
+export interface OptionVolumeOI {
+  call: number;
+  put: number;
+  total: number;
+  putCallRatio: number | null;
+}
+
+export interface OptionQuote {
+  symbol: string;
+  label: string;
+  price: number;
+  changePct: number | null;
+}
+
+export interface OptionsSentimentSnapshot {
+  generatedAt: string;
+  available: boolean;
+  ratios: OptionRatioItem[];
+  summary: Record<string, { volume: OptionVolumeOI; openInterest: OptionVolumeOI }>;
+  quotes: Record<string, OptionQuote>;
+  termStructure: {
+    ratio: number | null;
+    shape: 'contango' | 'backwardation' | 'flat' | null;
+    label: string;
+  };
+  verdict: string;
+  sources: string[];
+  errors: string[];
+}
+
 // ─── 情绪快照（合并 Fear & Greed + VIX + Put/Call） ───
 export interface SentimentSnapshot {
   value: number;
@@ -30,6 +70,9 @@ export interface SentimentSnapshot {
   subIndices: SentimentSubIndex[];
   vix: number | null;
   putCallRatio?: string;
+  /** 美股期权情绪明细；A 股为 null。 */
+  options?: OptionsSentimentSnapshot | null;
+  optionsVerdict?: string;
   reading: string;
 }
 
@@ -57,14 +100,9 @@ export interface McClellanData {
 }
 
 export interface PutCallData {
-  equityPC: number;
-  indexPC: number;
-  totalPC: number;
-  otmPutCall: number;
-  callVolumeDelta: number;
-  putVolumeDelta: number;
-  skew25Delta: number;
-  openInterestPC: number;
+  items: OptionRatioItem[];
+  volume: OptionVolumeOI | null;
+  openInterest: OptionVolumeOI | null;
 }
 
 export interface DarkPoolData {

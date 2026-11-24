@@ -1,6 +1,8 @@
 ﻿import { memo, useRef, useEffect, useState } from 'react';
 import * as d3 from 'd3';
 import { fetchConvexLatest } from '../../services/api';
+import { ChartHeader } from './ChartHeader';
+import { ChartInsight } from './ChartInsight';
 
 interface LinkageNode {
   id: string;
@@ -263,12 +265,20 @@ export const EventLinkageFlow = memo(function EventLinkageFlow({ module }: Event
     : '数据加载中...';
 
   return (
-    <div className="bg-[#0f1118] border border-[#1a1d26] rounded-[5px] p-3">
+    <div className="bg-[#0f1118] border border-dashed border-[rgba(155,110,251,0.45)] rounded-[5px] p-3">
       <div className="flex items-center justify-between mb-2">
         <div className="text-[10px] font-bold text-[#d8dce6]">指标事件联动关系图</div>
+        <ChartHeader source="demo" note="关系为写死示例，仅顶部 CRAI/VIX 为实时值" />
         <div className="text-[9.5px] text-[#636878] font-mono">{realDataNote}</div>
       </div>
       <div ref={containerRef} className="w-full" style={{ minHeight: 320 }} />
+      <div className="mt-2">
+        <ChartInsight
+          summary="这张图演示指标之间可能如何传导，连线强弱是预设规则，不是实时资金流。"
+          how="把它当作检查清单：看到 VIX 上升时，再去看情绪、资金和策略页是否同步变化。"
+          pitfall="不要按连线宽度或节点描述做交易决策；这里的金额、阈值与权重均为示例。"
+        />
+      </div>
       {activeNode && descriptions[activeNode] && (
         <div className="mt-2 p-2 bg-[rgba(64,120,255,0.08)] border border-[rgba(64,120,255,0.2)] rounded text-[10px] text-[#b0b5c0]">
           <span className="text-[#4078ff] font-medium">{LINKAGES[module].nodes.find(n => n.id === activeNode)?.label}: </span>

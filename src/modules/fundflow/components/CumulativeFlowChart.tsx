@@ -1,17 +1,22 @@
-﻿import { memo, useRef, useEffect } from 'react';
+﻿import { memo, useRef, useEffect, useState } from 'react';
 import { Chart, registerables } from 'chart.js';
 import { Panel } from '../../../shared/components/Panel';
+import { ChartHeader } from '../../../shared/components/ChartHeader';
+import { ChartInsight } from '../../../shared/components/ChartInsight';
 import { useMoneyFlow, useCapitalTrend } from '../hooks/useSectorFlow';
 import { useAppStore } from '../../../stores/useAppStore';
 
 Chart.register(...registerables);
 
+const PERIODS = [7, 30, 90] as const;
+
 export const CumulativeFlowChart = memo(function CumulativeFlowChart() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const { data: flowData, loading } = useMoneyFlow();
+  const { data: flowData } = useMoneyFlow();
   const { data: trend } = useCapitalTrend();
   const market = useAppStore((s) => s.market);
   const isCN = market === 'CN';
+  const [period, setPeriod] = useState<(typeof PERIODS)[number]>(30);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -20,7 +25,7 @@ export const CumulativeFlowChart = memo(function CumulativeFlowChart() {
     if (!ctx) return;
 
     if (isCN && trend?.length) {
-      const series = trend;
+      const series = period === 90 ? trend : trend.slice(-period);
       const labels = series.map((p) => p.date.slice(5)); // MM-DD
       const mains = series.map((p) => p.main);
       const smalls = series.map((p) => p.small);
@@ -75,8 +80,8 @@ export const CumulativeFlowChart = memo(function CumulativeFlowChart() {
               callbacks: {
                 afterBody: (items) => {
                   const i = items[0]?.dataIndex;
-                  if (i == null || !trend[i]) return [];
-                  const p = trend[i];
+                  if (i == null || !series[i]) return [];
+                  const p = series[i];
                   return `超大单 ${p.superLarge.toFixed(1)}亿 / 中单 ${p.medium.toFixed(1)}亿 / 小单 ${p.small.toFixed(1)}亿`;
                 },
               },
@@ -92,7 +97,7 @@ export const CumulativeFlowChart = memo(function CumulativeFlowChart() {
     }
 
     if (!flowData?.series.length) return;
-    const series = flowData.series;
+    const series = period === 90 ? flowData.series : flowData.series.slice(-period);
     const chart = new Chart(ctx, {
       type: 'line',
       data: {
@@ -114,16 +119,39 @@ export const CumulativeFlowChart = memo(function CumulativeFlowChart() {
     });
 
     return () => chart.destroy();
-  }, [flowData, trend, isCN]);
+  }, [flowData, trend, isCN, period]);
 
   return (
-    <Panel title="大盘资金趋势" badge={isCN ? '末日真实 · 其余模型估算' : '模型估算'}>
-      <div className="mb-2 text-[10.5px] text-[#b0b5c0]">{flowData?.reading ?? '加载中...'}</div>
+    <Panel
+      title="大盘资金趋势"
+      extra={<ChartHeader source="model" note="A股仅当日真实，其余为前端模型估算" />}
+    >
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <div className="text-[10.5px] text-[#b0b5c0] truncate">{flowData?.reading ?? '加载中...'}</div>
+        <div className="flex items-center gap-1 shrink-0">
+          {PERIODS.map((p) => (
+            <button
+              key={p}
+              onClick={() => setPeriod(p)}
+              className={`px-1.5 py-0.5 rounded text-[9.5px] ${period === p ? 'bg-[#4078ff] text-white' : 'text-[#636878] hover:text-[#b0b5c0]'}`}
+            >
+              {p}日
+            </button>
+          ))}
+        </div>
+      </div>
       <div style={{ height: 200 }}>
         <canvas ref={canvasRef} />
       </div>
+      <div className="mt-2">
+        <ChartInsight
+          summary="红/绿柱表示主力净流入/净流出，橙线为散户净流，蓝线为 5 日均线。"
+          how="切换 7/30/90 日看同一指标在短中长期是否一致；只看单日容易误判趋势。"
+          pitfall="A股仅最新一日来自东方财富，历史为模型估算；美股序列全部为模型估算，不能当真实资金流使用。"
+        />
+      </div>
       <div className="text-[10px] text-[#636878] mt-2">
-        {isCN ? '数据源: 东方财富仅当日真实，前 29 日为前端模型估算（非真实历史）· 红=净流入 蓝=主力5日均线' : '数据源: 前端模型估算 · 非真实资金流'}
+        {isCN ? '数据源: 东方财富仅当日真实，其余为前端模型估算 · 红=净流入 绿=净流出' : '数据源: 前端模型估算 · 非真实资金流'}
       </div>
     </Panel>
   );

@@ -2,6 +2,8 @@
 import * as d3 from 'd3';
 import { sankey as d3Sankey, sankeyLinkHorizontal } from 'd3-sankey';
 import { Panel } from '../../../shared/components/Panel';
+import { ChartHeader } from '../../../shared/components/ChartHeader';
+import { ChartInsight } from '../../../shared/components/ChartInsight';
 import { useSectorFlow } from '../hooks/useSectorFlow';
 import { useFundFlowOverview } from '../hooks/useSectorFlow';
 import { useMoneyFlow } from '../hooks/useSectorFlow';
@@ -36,13 +38,9 @@ export const SankeyFlowChart = memo(function SankeyFlowChart() {
     const outflowSectors = sortedSectors.filter(s => s.netFlow <= 1).slice(0, 6);
     const shownCount = inflowSectors.length + outflowSectors.length;
 
-    // ─── 按市场区分资金来源 ───
-    const sourceNames = isCN
-      ? ['主力资金', '散户资金']
-      : ['对冲基金', '机构资金', '散户资金'];
-
+    // ─── 只画真实板块净额，不再按写死系数推演“主力/散户”去向。 ───
+    const flowSource = sectors[0]?.source === 'eastmoney' ? 'real' : 'model';
     const nodes: SankeyNode[] = [
-      ...sourceNames.map(name => ({ name, category: 'source' })),
       ...inflowSectors.map(s => ({ name: s.name, category: 'sector' })),
       ...outflowSectors.map(s => ({ name: s.name, category: 'sector' })),
       { name: '净流入', category: 'outcome' },
@@ -55,61 +53,12 @@ export const SankeyFlowChart = memo(function SankeyFlowChart() {
     const links: SankeyLink[] = [];
     const inflowIdx = nodeIndex['净流入'];
     const outflowIdx = nodeIndex['净流出'];
-
-    if (isCN) {
-      // CN 真实数据：主力资金 + 散户资金 → 板块 → 流入/流出
-      const mainIdx = nodeIndex['主力资金'];
-      const retailIdx = nodeIndex['散户资金'];
-      const totalIn = inflowSectors.reduce((a, b) => a + Math.max(b.netFlow, 0), 0);
-      const totalOut = outflowSectors.reduce((a, b) => a + Math.max(-b.netFlow, 0), 0);
-      const mainAmt = Math.abs(overview?.institutionalFlow ?? 500);
-      const retailAmt = Math.abs(overview?.retailFlow ?? 150);
-      inflowSectors.forEach(s => {
-        const share = totalIn > 0 ? Math.max(s.netFlow, 0) / totalIn : 1 / inflowSectors.length;
-        links.push({ source: mainIdx, target: nodeIndex[s.name], value: Math.max(1, Math.round(mainAmt * share * 0.6)) });
-        links.push({ source: retailIdx, target: nodeIndex[s.name], value: Math.max(1, Math.round(retailAmt * share * 0.9)) });
-      });
-      outflowSectors.forEach(s => {
-        const share = totalOut > 0 ? Math.max(-s.netFlow, 0) / totalOut : 1 / outflowSectors.length;
-        links.push({ source: mainIdx, target: nodeIndex[s.name], value: Math.max(1, Math.round(mainAmt * share * 0.4)) });
-      });
-      inflowSectors.forEach(s => links.push({ source: nodeIndex[s.name], target: inflowIdx, value: Math.max(1, Math.round(Math.abs(s.netFlow))) }));
-      outflowSectors.forEach(s => links.push({ source: nodeIndex[s.name], target: outflowIdx, value: Math.max(1, Math.round(Math.abs(s.netFlow))) }));
-    } else {
-      // US 模型：对冲基金 + 机构 + 散户 → 板块 → 流入/流出
-      const src0Idx = nodeIndex[sourceNames[0]];
-      const instIdx = nodeIndex[sourceNames[1]];
-      const retailIdx = nodeIndex[sourceNames[2]];
-      const src0Total = Math.abs(overview?.institutionalFlow ?? 500) * 0.4;
-      inflowSectors.forEach(s => {
-        const share = s.netFlow / inflowSectors.reduce((a, b) => a + Math.max(b.netFlow, 1), 0.01);
-        links.push({ source: src0Idx, target: nodeIndex[s.name], value: Math.round(Math.max(1, src0Total * share * 0.6)) });
-      });
-      outflowSectors.forEach(s => {
-        const share = Math.abs(s.netFlow) / outflowSectors.reduce((a, b) => a + Math.max(Math.abs(b.netFlow), 1), 0.01);
-        links.push({ source: src0Idx, target: nodeIndex[s.name], value: Math.round(Math.max(1, Math.abs(src0Total) * 0.4 * share)) });
-      });
-      const instTotal = Math.abs(overview?.institutionalFlow ?? 500) * 0.6;
-      inflowSectors.forEach(s => {
-        const share = s.netFlow / inflowSectors.reduce((a, b) => a + Math.max(b.netFlow, 1), 0.01);
-        links.push({ source: instIdx, target: nodeIndex[s.name], value: Math.round(Math.max(1, instTotal * 0.5 * share)) });
-      });
-      outflowSectors.forEach(s => {
-        const share = Math.abs(s.netFlow) / outflowSectors.reduce((a, b) => a + Math.max(Math.abs(b.netFlow), 1), 0.01);
-        links.push({ source: instIdx, target: nodeIndex[s.name], value: Math.round(Math.max(1, instTotal * 0.5 * share)) });
-      });
-      const retailTotal = Math.abs(overview?.retailFlow ?? 200);
-      inflowSectors.forEach(s => {
-        const share = s.netFlow / inflowSectors.reduce((a, b) => a + Math.max(b.netFlow, 1), 0.01);
-        links.push({ source: retailIdx, target: nodeIndex[s.name], value: Math.round(Math.max(1, retailTotal * 0.5 * share)) });
-      });
-      outflowSectors.forEach(s => {
-        const share = Math.abs(s.netFlow) / outflowSectors.reduce((a, b) => a + Math.max(Math.abs(b.netFlow), 1), 0.01);
-        links.push({ source: retailIdx, target: nodeIndex[s.name], value: Math.round(Math.max(1, retailTotal * 0.5 * share)) });
-      });
-      inflowSectors.forEach(s => links.push({ source: nodeIndex[s.name], target: inflowIdx, value: Math.round(Math.abs(s.netFlow)) }));
-      outflowSectors.forEach(s => links.push({ source: nodeIndex[s.name], target: outflowIdx, value: Math.round(Math.abs(s.netFlow)) }));
-    }
+    inflowSectors.forEach(s => links.push({
+      source: nodeIndex[s.name], target: inflowIdx, value: Math.max(1, Math.round(s.netFlow)),
+    }));
+    outflowSectors.forEach(s => links.push({
+      source: nodeIndex[s.name], target: outflowIdx, value: Math.max(1, Math.round(-s.netFlow)),
+    }));
 
     const validLinks = links.filter(l => l.value > 0);
 
@@ -162,12 +111,8 @@ export const SankeyFlowChart = memo(function SankeyFlowChart() {
         d3.select(this).attr('stroke-opacity', 0.7);
         const src: any = d.source;
         const tgt: any = d.target;
-        const flowDir = tgt.name === '净流入' ? '→流入' : tgt.name === '净流出' ? '→流出' : '';
-        const fromLabel = sourceNames.includes(src.name) ? src.name : '';
         const unit = isCN ? '亿' : 'M';
-        setHoveredReason(fromLabel
-          ? `${fromLabel} ${flowDir ? flowDir : ''} ${tgt.name}: ${d.value}${unit}`
-          : `${src.name} → ${tgt.name}: ${d.value}${unit}`);
+        setHoveredReason(`${src.name} → ${tgt.name}: ${d.value}${unit}`);
       })
       .on('mouseout', function () {
         d3.select(this).attr('stroke-opacity', 0.35);
@@ -235,24 +180,33 @@ export const SankeyFlowChart = memo(function SankeyFlowChart() {
       ${topOutflow.length > 0 ? `<div class="text-[#0ca678]">流出 Top: ${topOutflow.map(s => s.name + '(' + s.pctChg.toFixed(2) + '%)').join(' | ')}</div>` : ''}
       <div class="flex items-center gap-3 text-[10px] text-[#636878] flex-wrap">
         <span>图例：</span>
-        ${sourceNames.map(n => `<span class="flex items-center gap-1"><span class="w-2.5 h-2.5 inline-block rounded-sm" style="background:${sourceColors[n]}"></span>${n}</span>`).join('')}
         <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 inline-block rounded-sm" style="background:#f04452"></span>净流入</span>
         <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 inline-block rounded-sm" style="background:#0ca678"></span>净流出</span>
         <span>| 连线越粗=资金额越大 · 悬停连线查看明细</span>
       </div>
-      <div class="text-[#636878] text-[10.5px]">数据源: ${isCN ? '东方财富 板块资金流(真实) · 主力/散户口径' : 'CONVEX CRAI 推导 · 确定性资金分配模型'}</div>
+      <div class="text-[#636878] text-[10.5px]">数据源: ${flowSource === 'real' ? '东方财富 板块资金流（真实净额）' : '前端模型估算（无可验证真实分项）'} · 不再推演主力/散户资金去向</div>
     `;
     container.appendChild(attributionDiv);
 
-  }, [sectors, overview, moneyFlow]);
+  }, [sectors, overview, moneyFlow, isCN]);
 
   return (
-    <Panel title="资金流向动态图" badge="桑基图" hint="只展示净流入 Top8 / 净流出 Top6 重点板块，总额与 Top 列表为全市场口径">
+    <Panel
+      title="资金流向动态图"
+      badge="桑基图"
+      hint="只展示净流入 Top8 / 净流出 Top6 重点板块"
+      extra={<ChartHeader source={sectors[0]?.source === 'eastmoney' ? 'real' : 'model'} note="宽度=板块净额，不推演资金来源" />}
+    >
       <div ref={containerRef} className="w-full" style={{ minHeight: 420 }}>
         {sectors.length === 0 && (
           <div className="h-80 flex items-center justify-center text-[#636878] text-[12px]">加载资金流数据...</div>
         )}
       </div>
+      <ChartInsight
+        summary="线条越粗代表板块净流入/净流出金额越大，红色为流入、绿色为流出。"
+        how="对比流入与流出前列板块，判断资金是否集中在一个主线。"
+        pitfall="本图不展示主力/散户拆分；美股板块净额来自模型估算，不能据线宽判断真实机构资金规模。"
+      />
       {hoveredReason && (
         <div className="fixed bottom-4 left-1/2 -translate-x-1/2 bg-[#1a1d26] border border-[#2a2d3a] rounded px-3 py-1.5 text-[11px] text-[#d8dce6] z-50 shadow-lg pointer-events-none">
           {hoveredReason}

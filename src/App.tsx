@@ -1,5 +1,6 @@
 import { memo, useEffect } from 'react';
 import { useAppStore, type Market, type ModuleTab } from './stores/useAppStore';
+import { BriefPage } from './modules/brief/BriefPage';
 import { InvestmentMapPage } from './modules/map/InvestmentMapPage';
 import { MacroPage } from './modules/macro/MacroPage';
 import { StrategyPage } from './modules/strategy/StrategyPage';
@@ -11,13 +12,13 @@ import { PortfolioPage } from './modules/portfolio/PortfolioPage';
 import { AlertPage } from './modules/alerts/AlertPage';
 import { TechnicalAnalysisPage } from './modules/technical/TechnicalAnalysisPage';
 import { SectorRotationPage } from './modules/rotation/SectorRotationPage';
-import { PaperTradingPage } from './modules/papertrading/PaperTradingPage';
 import { CORE_TABS, ADVANCED_TABS } from './shared/utils/constants';
 import { useMarketStore } from './stores/useMarketStore';
 import { useCnbMarketStore } from './stores/useCnbMarketStore';
 import { dbService } from './services/storage/indexedDB';
 
 const PAGES: Record<ModuleTab, React.ComponentType> = {
+  brief: BriefPage,
   map: InvestmentMapPage,
   rhythm: RhythmPage,
   macro: MacroPage,
@@ -29,7 +30,6 @@ const PAGES: Record<ModuleTab, React.ComponentType> = {
   alerts: AlertPage,
   technical: TechnicalAnalysisPage,
   rotation: SectorRotationPage,
-  papertrading: PaperTradingPage,
 };
 
 const MARKET_LABELS: Record<Market, string> = { US: '美股', CN: 'A股' };
@@ -38,7 +38,7 @@ const MARKET_LABELS: Record<Market, string> = { US: '美股', CN: 'A股' };
 const MARKET_SCOPED: ModuleTab[] = ['macro', 'sentiment', 'fundflow', 'strategy', 'technical', 'rotation'];
 
 const tabClass = (active: boolean) =>
-  `whitespace-nowrap rounded px-2.5 py-1.5 text-[12px] transition-colors ${
+  `shrink-0 whitespace-nowrap rounded px-2 py-1 text-left leading-tight transition-colors ${
     active
       ? 'bg-[rgba(255,255,255,0.08)] text-[#e8ebf0]'
       : 'text-[#787e8e] hover:bg-[rgba(255,255,255,0.03)] hover:text-[#d8dce6]'
@@ -63,15 +63,10 @@ export const App = memo(function App() {
 
   const toggleMarket = () => setMarket(market === 'US' ? 'CN' : 'US');
 
-  const closeMenu = (e: React.MouseEvent<HTMLButtonElement>) => {
-    const d = e.currentTarget.closest('details');
-    if (d) d.open = false;
-  };
-
   return (
     <div className="min-h-screen bg-[#090b0f] text-[#b0b5c0] font-['Inter','PingFang_SC','Microsoft_YaHei',sans-serif] text-[15px]">
       <header className="sticky top-0 z-50 border-b border-[#1a1d26] bg-[#0f1118]">
-        <div className="flex h-12 items-center justify-between gap-2 px-3">
+        <div className="flex min-h-[54px] items-center justify-between gap-2 px-3 py-1">
           <div className="flex shrink-0 items-center gap-2">
             <span className="text-[15px] font-bold text-[#d8dce6]">Marvis</span>
             <span className="hidden rounded bg-[rgba(255,255,255,0.03)] px-1.5 py-0.5 text-[10px] text-[#636878] sm:inline">
@@ -79,37 +74,31 @@ export const App = memo(function App() {
             </span>
           </div>
 
-          <nav className="flex min-w-0 items-center gap-0.5 overflow-x-auto">
-            {CORE_TABS.map(({ id, name, icon }) => (
-              <button key={id} onClick={() => setTab(id)} className={tabClass(activeTab === id)} title={name}>
-                <span className="mr-1 text-[11px] opacity-70">{icon}</span>
-                {name}
+          <nav
+            className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+            aria-label="模块导航"
+          >
+            {CORE_TABS.map(({ id, name, icon, desc }) => (
+              <button key={id} onClick={() => setTab(id)} className={tabClass(activeTab === id)} title={desc}>
+                <span className="flex items-center gap-1 text-[12px]">
+                  <span className="text-[11px] opacity-70">{icon}</span>
+                  {name}
+                </span>
+                <span className="mt-0.5 block pl-4 text-[9px] text-[#636878]">{desc}</span>
               </button>
             ))}
 
-            <details className="relative shrink-0">
-              <summary className="list-none cursor-pointer whitespace-nowrap rounded px-2.5 py-1.5 text-[12px] text-[#787e8e] transition-colors hover:bg-[rgba(255,255,255,0.03)] hover:text-[#d8dce6] [&::-webkit-details-marker]:hidden">
-                更多 <span className="text-[9px]">▾</span>
-              </summary>
-              <div className="absolute right-0 top-full z-10 mt-1 w-60 rounded-[5px] border border-[#1a1d26] bg-[#0f1118] p-1.5 shadow-xl">
-                <div className="px-2 py-1 text-[9.5px] text-[#4d5364]">专业工具 · 不理解就先别用</div>
-                {ADVANCED_TABS.map(({ id, name, icon, desc }) => (
-                  <button
-                    key={id}
-                    onClick={(e) => { setTab(id); closeMenu(e); }}
-                    className={`block w-full rounded px-2 py-1.5 text-left transition-colors ${
-                      activeTab === id ? 'bg-[rgba(64,120,255,0.12)]' : 'hover:bg-[rgba(255,255,255,0.04)]'
-                    }`}
-                  >
-                    <span className="text-[11.5px] text-[#d8dce6]">
-                      <span className="mr-1.5 text-[10px] opacity-60">{icon}</span>
-                      {name}
-                    </span>
-                    <span className="block pl-4 text-[9.5px] text-[#636878]">{desc}</span>
-                  </button>
-                ))}
-              </div>
-            </details>
+            <span className="mx-0.5 h-6 w-px shrink-0 bg-[#1a1d26]" aria-hidden="true" />
+
+            {ADVANCED_TABS.map(({ id, name, icon, desc }) => (
+              <button key={id} onClick={() => setTab(id)} className={tabClass(activeTab === id)} title={desc}>
+                <span className="flex items-center gap-1 text-[12px]">
+                  <span className="text-[11px] opacity-70">{icon}</span>
+                  {name}
+                </span>
+                <span className="mt-0.5 block pl-4 text-[9px] text-[#636878]">{desc}</span>
+              </button>
+            ))}
           </nav>
 
           {MARKET_SCOPED.includes(activeTab) && (

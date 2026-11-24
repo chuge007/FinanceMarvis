@@ -11,8 +11,9 @@ export interface TabDef {
 }
 
 /** 导航分两层：core 是普通人走的路径，advanced 是专业工具。
- *  core 直接显示在顶栏，advanced 收进「更多」下拉。 */
+ *  两层都在顶栏平铺展示，每项带一行副标题；窄屏可横向滚动。 */
 export const TABS: TabDef[] = [
+  { id: 'brief', name: '作战简报', icon: '◉', group: 'core', desc: '盘前30秒读完市场' },
   { id: 'map', name: '投资地图', icon: '◎', group: 'core', desc: '先安排钱，再谈投资' },
   { id: 'rhythm', name: '节奏总览', icon: '◐', group: 'core', desc: '今天的风险环境' },
   { id: 'discipline', name: '纪律复盘', icon: '✓', group: 'core', desc: '仓位、清单、复盘' },
@@ -23,7 +24,6 @@ export const TABS: TabDef[] = [
   { id: 'strategy', name: '做T策略', icon: '◇', group: 'advanced', desc: '日内交易工具（高风险）' },
   { id: 'technical', name: '技术分析', icon: '／', group: 'advanced', desc: '均线、MACD、RSI' },
   { id: 'rotation', name: '板块轮动', icon: '◈', group: 'advanced', desc: '行业强弱' },
-  { id: 'papertrading', name: '模拟交易', icon: '▷', group: 'advanced', desc: '零成本练习' },
   { id: 'alerts', name: '告警', icon: '！', group: 'advanced', desc: '价格与指标提醒' },
 ];
 

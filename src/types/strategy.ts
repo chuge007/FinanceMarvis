@@ -105,6 +105,7 @@ export interface BacktestStats {
   avgWin: number;       // 平均单笔盈利 %
   avgLoss: number;      // 平均单笔亏损 %
   equityCurve: { date: string; value: number }[]; // 净值曲线
+  drawdownCurve: { date: string; value: number }[]; // 回撤曲线（负值，%）
   mode: 'long' | 'short';       // 正T / 反T
   modeVerdict: string;          // 模式结论（利好/利空一句话）
   phase: BacktestPhase;         // 周期阶段

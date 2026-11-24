@@ -4,6 +4,7 @@ import { BarWithLabel } from '../../../shared/components/BarWithLabel';
 import { useFearGreed } from '../hooks/useFearGreed';
 import { useAppStore } from '../../../stores/useAppStore';
 import { FG_COLORS } from '../../../shared/utils/colors';
+import { PercentileThermometer } from '../../../shared/components/PercentileThermometer';
 
 const STATE_MAP: Record<string, string> = {
   'Extreme Fear': '极度恐惧',
@@ -55,7 +56,7 @@ export const FearGreedIndexPanel = memo(function FearGreedIndexPanel() {
   const title = isCN ? 'A股情绪温度计' : 'CNN Fear & Greed (alternative.me)';
   const sourceLine = isCN
     ? '数据源: 东方财富A股指数日K + 沪深两市涨跌家数（实时）· 每 5 分钟更新'
-    : '数据源: alternative.me / ConvexTrade · 每 5 分钟更新';
+    : '数据源: alternative.me / CBOE / Yahoo / ConvexTrade · 每 30 秒轮询';
 
   return (
     <Panel title={title} badge={stateLabel}>
@@ -80,6 +81,12 @@ export const FearGreedIndexPanel = memo(function FearGreedIndexPanel() {
           ))}
         </div>
       </div>
+
+      <PercentileThermometer
+        value={data.value}
+        values={data.trend.map((p) => p.value)}
+        windowLabel={`近${data.trend.length}日`}
+      />
 
       {/* Trend sparkline */}
       {data.trend.length > 0 && (

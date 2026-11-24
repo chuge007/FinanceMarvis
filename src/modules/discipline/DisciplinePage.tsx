@@ -4,13 +4,12 @@ import { Checklist } from './components/Checklist';
 import { Rebalance } from './components/Rebalance';
 import { Journal } from './components/Journal';
 import { readJSON } from '../../shared/utils/localStore';
+import type { LastRegimeState } from '../rhythm/components/RegimeCard';
 
 export const DisciplinePage = memo(function DisciplinePage() {
   // 复用节奏页已写入的本机状态，避免重复请求上游
-  const tone = useMemo(() => {
-    const last = readJSON<{ tone?: string } | null>('marvis.regime.last.v1', null);
-    return last?.tone ?? '—';
-  }, []);
+  const lastRegime = useMemo(() => readJSON<LastRegimeState | null>('marvis.regime.last.v1', null), []);
+  const tone = lastRegime?.tone ?? '—';
 
   return (
     <div className="space-y-3 p-3">
@@ -21,14 +20,14 @@ export const DisciplinePage = memo(function DisciplinePage() {
         </p>
       </div>
 
-      <PositionSizer />
+      <PositionSizer tone={tone} />
 
       <div className="grid grid-cols-2 gap-3 items-start">
         <Checklist />
         <Rebalance />
       </div>
 
-      <Journal tone={tone} />
+      <Journal tone={tone} regime={lastRegime} />
 
       <p className="text-center text-[10px] text-[#636878] pb-2">
         StrategyLab · 纪律复盘模块 · 所有记录仅存本机浏览器 · 仓位与再平衡数值为通用风控口径，不构成投资建议

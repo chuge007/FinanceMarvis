@@ -8,6 +8,8 @@ export interface RiskIndicator {
   level: RiskLevel;
   reading: string;
   history?: number[];
+  /** 数据真实性：真实接口 / 演示快照 / 数据不可用 */
+  source?: 'real' | 'demo' | 'missing';
 }
 
 export interface CreditRateIndicator {
@@ -21,10 +23,10 @@ export interface CreditRateIndicator {
 
 export interface VolatilityPoint {
   timestamp: string;
-  vix: number;
-  vvix: number;
-  skew: number;
-  move: number;
+  vix: number | null;
+  vvix: number | null;
+  skew: number | null;
+  move: number | null;
 }
 
 export interface VolatilitySnapshot {

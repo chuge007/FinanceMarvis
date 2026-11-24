@@ -1,49 +1,74 @@
 ﻿import { memo } from 'react';
 import { Panel } from '../../../shared/components/Panel';
 import { usePutCall } from '../hooks/index';
+import type { OptionVolumeOI, OptionRatioItem } from '../../../types/sentiment';
+
+const READING_COLOR: Record<OptionRatioItem['reading'], string> = {
+  偏高: '#f04452',
+  偏低: '#0ca678',
+  常态: '#d8dce6',
+  无数据: '#636878',
+};
+
+const compact = (n: number) => new Intl.NumberFormat('zh-CN', {
+  notation: 'compact',
+  maximumFractionDigits: 1,
+}).format(n);
+
+function VolumeRow({ label, value }: { label: string; value: OptionVolumeOI | null }) {
+  return (
+    <div>
+      <div className="text-[9.5px] text-[#636878] mb-0.5">{label}</div>
+      {value ? (
+        <div className="text-[10px] font-['JetBrains_Mono',Consolas,monospace] text-[#b0b5c0] tabular-nums">
+          总 {compact(value.total)} · C {compact(value.call)} / P {compact(value.put)} · P/C {value.putCallRatio?.toFixed(2) ?? '—'}
+        </div>
+      ) : (
+        <div className="text-[10px] text-[#636878]">—</div>
+      )}
+    </div>
+  );
+}
 
 export const PutCallDetail = memo(function PutCallDetail() {
   const data = usePutCall();
-  const items = [
-    { label: 'Equity P/C', value: data.equityPC.toFixed(2), bar: data.equityPC / 1.5 * 100 },
-    { label: 'Index P/C', value: data.indexPC.toFixed(2), bar: data.indexPC / 1.5 * 100 },
-    { label: 'Total P/C', value: data.totalPC.toFixed(2), bar: data.totalPC / 1.5 * 100 },
-    { label: 'OTM P/C', value: data.otmPutCall.toFixed(2), bar: data.otmPutCall / 1.5 * 100 },
-    { label: 'Call Vol Δ', value: `${data.callVolumeDelta > 0 ? '+' : ''}${data.callVolumeDelta}%`, delta: data.callVolumeDelta },
-    { label: 'Put Vol Δ', value: `${data.putVolumeDelta > 0 ? '+' : ''}${data.putVolumeDelta}%`, delta: data.putVolumeDelta },
-    { label: '25Δ Skew', value: data.skew25Delta.toFixed(1), bar: Math.min(100, Math.abs(data.skew25Delta) * 4) },
-    { label: 'OI P/C', value: data.openInterestPC.toFixed(2), bar: data.openInterestPC / 1.5 * 100 },
-  ];
+  const hasValues = data.items.some((item) => item.value !== null);
 
   return (
-    <Panel title="Put/Call 细项">
-      <div className="grid grid-cols-4 gap-2">
-        {items.map((item) => {
-          const isDelta = item.delta !== undefined;
-          const color = isDelta ? (item.delta! >= 0 ? '#0ca678' : '#f04452') : '#4078ff';
-          const w = isDelta
-            ? Math.min(50, Math.abs(item.delta!) / 15 * 50)
-            : Math.max(2, Math.min(100, item.bar ?? 0));
-          return (
-            <div key={item.label} className="bg-[rgba(255,255,255,0.02)] rounded p-2 text-center">
+    <Panel
+      title="CBOE Put/Call 明细"
+      hint="官方每日市场统计"
+      badge={hasValues ? '真实数据' : '数据不可用'}
+    >
+      {hasValues ? (
+        <div className="grid grid-cols-3 gap-2">
+          {data.items.map((item) => (
+            <div key={item.key} className="bg-[rgba(255,255,255,0.02)] rounded p-2" title={item.officialName}>
               <div className="text-[9.5px] text-[#636878] mb-0.5">{item.label}</div>
-              <div className="text-[11px] font-['JetBrains_Mono',Consolas,monospace] text-[#d8dce6] tabular-nums">{item.value}</div>
-              <div className="relative h-[4px] mt-1.5 rounded-full bg-[#1a1d26]">
-                {isDelta && <div className="absolute left-1/2 top-[-1px] w-px h-[6px] bg-[#4d5364]" />}
-                <div
-                  className="absolute top-0 h-full rounded-full"
-                  style={{
-                    background: color,
-                    opacity: 0.85,
-                    left: isDelta ? (item.delta! >= 0 ? '50%' : `${50 - w}%`) : '0%',
-                    width: `${w}%`,
-                  }}
-                />
+              <div
+                className="text-[12px] font-['JetBrains_Mono',Consolas,monospace] tabular-nums"
+                style={{ color: READING_COLOR[item.reading] }}
+              >
+                {item.value !== null ? item.value.toFixed(2) : '—'}
+              </div>
+              <div className="text-[9px] text-[#636878] mt-0.5">
+                {item.reading}{item.norm ? ` · 常态 ${item.norm[0]}–${item.norm[1]}` : ''}
               </div>
             </div>
-          );
-        })}
-      </div>
+          ))}
+        </div>
+      ) : (
+        <div className="h-16 flex items-center justify-center text-[10px] text-[#636878]">
+          CBOE 数据暂不可用，未展示模拟值
+        </div>
+      )}
+
+      {(data.volume || data.openInterest) && (
+        <div className="mt-3 pt-2 border-t border-[#1a1d26] grid grid-cols-2 gap-3">
+          <VolumeRow label="全市场成交量" value={data.volume} />
+          <VolumeRow label="全市场未平仓" value={data.openInterest} />
+        </div>
+      )}
     </Panel>
   );
 });

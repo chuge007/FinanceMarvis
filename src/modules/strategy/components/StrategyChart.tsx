@@ -9,6 +9,8 @@ import {
   type Time,
 } from 'lightweight-charts';
 import { Panel } from '../../../shared/components/Panel';
+import { DemoBanner } from '../../../shared/components/DemoBanner';
+import { ChartHeader } from '../../../shared/components/ChartHeader';
 import { fetchStockCandles, fetchStockQuote, type StockCandle, type StockQuote } from '../../../services/api';
 import { generateMockCandles } from '../../../shared/utils/mockCandles';
 import type { Market } from '../../../stores/useAppStore';
@@ -325,7 +327,7 @@ export const StrategyChart = memo(function StrategyChart({ symbol, market }: Pro
         const mockCandles = generateMockCandles(symbol, 60);
         setCandles(mockCandles);
         setUsingMock(true);
-        setError(null);
+        setError(`真实行情不足（仅 ${data.length} 条），当前显示本地模拟 K 线，不可用于实盘决策`);
       } else {
         setCandles(data);
         setUsingMock(false);
@@ -335,7 +337,7 @@ export const StrategyChart = memo(function StrategyChart({ symbol, market }: Pro
       const mockCandles = generateMockCandles(symbol, 60);
       setCandles(mockCandles);
       setUsingMock(true);
-      setError(null);
+      setError('真实行情获取失败，当前显示本地模拟 K 线，不可用于实盘决策');
     }
     setLoading(false);
   }, [symbol, market, range, interval]);
@@ -543,16 +545,13 @@ export const StrategyChart = memo(function StrategyChart({ symbol, market }: Pro
     );
   }
 
-  if (error) {
-    return (
-      <Panel title={title} badge="获取失败">
-        <div className="h-64 flex items-center justify-center text-[#f04452] text-[12px]">{error}</div>
-      </Panel>
-    );
-  }
-
   return (
     <div className="space-y-3">
+      {usingMock && (
+        <DemoBanner title="当前为本地模拟 K 线">
+          {error || '真实行情不可用，图形仅用于演示功能，不代表任何真实标的价格。'}
+        </DemoBanner>
+      )}
       {quote && (
         <Panel title={quote.name ? `${quote.name} (${quote.symbol})` : quote.symbol} badge={market === 'US' ? '美股' : 'A股'}>
           <div className="flex flex-wrap items-end gap-x-6 gap-y-2">
@@ -565,7 +564,7 @@ export const StrategyChart = memo(function StrategyChart({ symbol, market }: Pro
               </div>
             </div>
             <InfoItem label="昨收" value={quote.previousClose.toFixed(2)} />
-            <InfoItem label="数据源" value="Yahoo Finance" highlight />
+            <InfoItem label="数据源" value={usingMock ? '本地模拟（演示）' : 'Yahoo / 腾讯 / 东财'} highlight />
           </div>
         </Panel>
       )}
@@ -575,14 +574,17 @@ export const StrategyChart = memo(function StrategyChart({ symbol, market }: Pro
         title={title}
         badge={`${INTERVALS.find(i => i.key === interval)?.label} · ${candles.length}根`}
         extra={
-          phase ? (
-            <span
-              className="px-2 py-0.5 rounded text-[10px] font-medium"
-              style={{ color: PHASE_STYLE[phase.kind].text, backgroundColor: PHASE_STYLE[phase.kind].bg, border: `1px solid ${PHASE_STYLE[phase.kind].border}` }}
-            >
-              当前情绪周期：{phase.label}
-            </span>
-          ) : undefined
+          <div className="flex items-center gap-2">
+            <ChartHeader source={usingMock ? 'demo' : 'real'} note={usingMock ? '本地模拟K线' : 'Yahoo / 腾讯 / 东财行情'} />
+            {phase ? (
+              <span
+                className="px-2 py-0.5 rounded text-[10px] font-medium"
+                style={{ color: PHASE_STYLE[phase.kind].text, backgroundColor: PHASE_STYLE[phase.kind].bg, border: `1px solid ${PHASE_STYLE[phase.kind].border}` }}
+              >
+                当前情绪周期：{phase.label}
+              </span>
+            ) : null}
+          </div>
         }
       >
         {/* 周期切换 */}
@@ -646,9 +648,10 @@ export const StrategyChart = memo(function StrategyChart({ symbol, market }: Pro
               <span className="text-[#636878]">操作：</span>{selectedSignal.action}
             </div>
             <div className="mt-1 flex gap-4 text-[10px] font-mono">
-              <span className="text-[#0ca678]">参考止损 {fmtPrice(selectedSignal.stopLine)}</span>
-              <span className="text-[#4078ff]">参考目标 {fmtPrice(selectedSignal.targetLine)}</span>
+              <span className="text-[#0ca678]">技术区间下沿 {fmtPrice(selectedSignal.stopLine)}</span>
+              <span className="text-[#4078ff]">技术区间上沿 {fmtPrice(selectedSignal.targetLine)}</span>
             </div>
+            <div className="mt-1 text-[9.5px] text-[#636878]">以上区间为指标计算结果，不构成买卖建议或目标价。</div>
           </div>
         )}
 

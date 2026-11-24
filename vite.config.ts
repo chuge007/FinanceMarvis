@@ -8,6 +8,7 @@ import { HttpsProxyAgent } from 'https-proxy-agent'
 // 本机 7897 是 Clash 类本地代理，其出海节点可正常访问，故 /convex 请求经该代理转发。
 const LOCAL_PROXY = 'http://127.0.0.1:7897'
 const CONVEX_UPSTREAM = 'https://convextrade.com/api/public'
+const OUTBOUND_PROXY = process.env.HTTPS_PROXY || process.env.ALL_PROXY || ''
 
 function convexProxyViaLocalPlugin(): Plugin {
   if (!process.env.MARVIS_DISABLE_CONVEX_PROXY) {
@@ -81,6 +82,21 @@ export default defineConfig({
             proxyReq.setHeader('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36');
             proxyReq.setHeader('Referer', 'https://finance.yahoo.com/');
             proxyReq.setHeader('Origin', 'https://finance.yahoo.com');
+          });
+        },
+      },
+      // CBOE 官网日度市场统计页面内嵌 JSON，无浏览器直连 CORS；本域转发并注入浏览器头。
+      // 若设置 HTTPS_PROXY / ALL_PROXY，则经出海代理访问（大陆环境需要）。
+      '/cboe': {
+        target: 'https://www.cboe.com',
+        changeOrigin: true,
+        rewrite: (p) => p.replace(/^\/cboe/, ''),
+        agent: OUTBOUND_PROXY ? new HttpsProxyAgent(OUTBOUND_PROXY) : undefined,
+        configure: (proxy) => {
+          proxy.on('proxyReq', (proxyReq) => {
+            proxyReq.setHeader('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36');
+            proxyReq.setHeader('Referer', 'https://www.cboe.com/');
+            proxyReq.setHeader('Origin', 'https://www.cboe.com');
           });
         },
       },

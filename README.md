@@ -39,11 +39,24 @@ npm run serve        # 默认 http://127.0.0.1:8080
 
 > `npm run serve` 只监听回环地址，局域网其它设备访问不到。
 
+### Windows 一键启动（不用敲命令）
+
+打开项目里的 `一键启动` 文件夹：
+
+| 双击文件 | 作用 |
+|---|---|
+| `Marvis 桌面版.lnk` | 单文件程序，自动启动本地服务并打开浏览器；页面右下角「退出程序」可关闭 |
+| `启动软件.bat` | 用源码方式构建并启动正式版（`http://127.0.0.1:8080`），关闭黑色窗口即停止 |
+| `启动开发模式.bat` | 开发模式热更新（`http://localhost:5173`），改代码后自动刷新 |
+
+首次运行 `.bat` 会自动安装依赖并构建。`Marvis.exe` 已生成在项目根目录；如需重新打包，运行 `desktop/build-exe.bat`。
+
 ### 数据源的前置条件（重要）
 
 部分宏观数据（FRED / CBOE 序列）经 ConvexTrade 获取，该服务对中国大陆按地区封锁。没有出海代理时：
 
 - `/convex` 返回 403 → 宏观、节奏、策略等页面会显示**数据不可用**或标注为**演示/估算**；
+- `/cboe` 不可达 → 情绪页的 CBOE Put/Call 明细显示“数据不可用”，不会回退到模拟值；设置 `HTTPS_PROXY` 后可经代理访问；
 - 程序不会用随机数伪装成真实行情，但**演示数据仍然只是界面示例，不能用于决策**。
 
 如需完整数据，可在启动前设置本地代理：
@@ -88,13 +101,16 @@ A 股/美股个股行情与东财快讯为公开接口，通常无需代理。
 
 ```
 src/
-  modules/map/        投资地图首页（画像、分桶、配置结论）
-  modules/rhythm/     市场节奏（唯一以真实序列为主的模块）
-  modules/discipline/ 纪律复盘（仓位、清单、再平衡、日志）
+  modules/brief/      每日作战简报（老用户默认首页，盘前30秒）
+  modules/map/        投资地图（画像、分桶、配置结论，新用户默认首页）
+  modules/rhythm/     市场节奏（叠加图 + 相关性 + 体制带 + 背离）
+  modules/discipline/ 纪律复盘（仓位、清单、再平衡、决策归因）
   modules/portfolio/  持仓跟踪（手动记账）
+  modules/sentiment/  情绪引擎（F&G + CBOE 期权情绪，已移除写死面板）
   modules/technical/  技术分析（真实日线 + 指标）
   modules/rotation/   板块轮动（演示数据，已标注）
   services/           investmentPlan.ts 配置引擎、行情与数据服务
-server/proxy.mjs      生产静态托管 + 五个上游同域转发
+server/proxy.mjs      生产静态托管 + 六个上游同域转发
 desktop/              桌面壳打包脚本（未签名）
+一键启动/              Windows 双击启动入口与桌面版快捷方式
 ```

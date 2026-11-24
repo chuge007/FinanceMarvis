@@ -12,27 +12,30 @@ import { ModuleRelationshipFooter } from '../../shared/components/ModuleRelation
 import { useMarketStore } from '../../stores/useMarketStore';
 import { useAppStore } from '../../stores/useAppStore';
 import { useCnbMarketStore } from '../../stores/useCnbMarketStore';
+import { percentileOf } from '../../shared/utils/seriesStats';
+
+const fmt = (v: number | null, digits = 1) => (v === null ? '—' : v.toFixed(digits));
 
 export const MacroPage = memo(function MacroPage() {
   const { market } = useAppStore();
-  const { spx, vix, dxy, us10y, lastUpdate } = useMarketStore();
-  const { ssci, sse, szse, cn10y, lastUpdate: cnLastUpdate } = useCnbMarketStore();
+  const { spx, vix, dxy, us10y, vixSeries, dxySeries, us10ySeries, lastUpdate } = useMarketStore();
+  const { ssci, sse, szse, cn10y, ssciSeries, sseSeries, szseSeries, cn10ySeries, lastUpdate: cnLastUpdate } = useCnbMarketStore();
 
   const isCN = market === 'CN';
   const displayUpdate = isCN ? cnLastUpdate : lastUpdate;
 
   const kpis = isCN
     ? [
-        { value: ssci.toFixed(1), label: '沪深300', direction: 'up' as const },
-        { value: sse.toFixed(1), label: '上证指数', direction: 'up' as const },
-        { value: szse.toFixed(1), label: '深证成指', direction: 'flat' as const },
-        { value: cn10y.toFixed(2), label: 'CN10Y', unit: '%', direction: 'flat' as const },
+        { value: fmt(ssci), raw: ssci, label: '沪深300', direction: 'flat' as const, series: ssciSeries },
+        { value: fmt(sse), raw: sse, label: '上证指数', direction: 'flat' as const, series: sseSeries },
+        { value: fmt(szse), raw: szse, label: '深证成指', direction: 'flat' as const, series: szseSeries },
+        { value: fmt(cn10y, 2), raw: cn10y, label: 'CN10Y', unit: '%', direction: 'flat' as const, series: cn10ySeries },
       ]
     : [
-        { value: spx.toFixed(1), label: 'SPX', direction: 'up' as const },
-        { value: vix.toFixed(1), label: 'VIX', direction: 'down' as const },
-        { value: dxy.toFixed(2), label: 'DXY', direction: 'flat' as const },
-        { value: us10y.toFixed(2), label: 'US10Y', unit: '%', direction: 'flat' as const },
+        { value: fmt(spx), raw: spx, label: 'SPX', direction: 'flat' as const, series: [] as number[] },
+        { value: fmt(vix), raw: vix, label: 'VIX', direction: 'flat' as const, series: vixSeries },
+        { value: fmt(dxy, 2), raw: dxy, label: 'DXY', direction: 'flat' as const, series: dxySeries },
+        { value: fmt(us10y, 2), raw: us10y, label: 'US10Y', unit: '%', direction: 'flat' as const, series: us10ySeries },
       ];
 
   return (
@@ -49,7 +52,16 @@ export const MacroPage = memo(function MacroPage() {
 
       <div className="grid grid-cols-4 gap-2">
         {kpis.map((k) => (
-          <KpiCard key={k.label} value={k.value} label={k.label} unit={k.unit} direction={k.direction} />
+          <KpiCard
+            key={k.label}
+            value={k.value}
+            label={k.label}
+            unit={k.unit}
+            direction={k.direction}
+            sparkline={k.series}
+            percentile={k.raw !== null && k.series.length >= 8 ? percentileOf(k.series, k.raw) : undefined}
+            percentileLabel="近120日"
+          />
         ))}
       </div>
 

@@ -3,6 +3,7 @@
  * 覆盖: VIX、利率、利差、CPI、流动性、衰退概率、风险偏好
  */
 import { fetchConvexSeries, fetchConvexLatest } from './api';
+import { fetchOptionsSentiment } from './optionsSentiment';
 import type {
   RiskIndicator,
   CreditRateIndicator,
@@ -14,10 +15,7 @@ import type {
 import {
   mockRiskIndicators,
   mockCreditRates,
-  mockVolatility,
   mockBullBearForces,
-  mockInstitutionViews,
-  mockNewsFeed,
 } from '../data/mock';
 
 // ─── 风险热力图指标 ───
@@ -41,7 +39,8 @@ export async function fetchRiskIndicators(): Promise<RiskIndicator[]> {
       fetchConvexLatest('DCOILWTICO'),
     ]);
 
-  const allNull = [vix, effr, dgs10, t10y2y, hySpread, cpi, unrate, crpi, cnli, crai, dxy, wti].every(v => v === null);
+  const rawValues = [vix, effr, dgs10, t10y2y, hySpread, cpi, unrate, crpi, cnli, crai, dxy, wti];
+  const allNull = rawValues.every(v => v === null);
   if (allNull) {
     console.log('[macro] ConvexTrade 全部返回 null，使用本地快照兜底');
     return mockRiskIndicators;
@@ -65,9 +64,7 @@ export async function fetchRiskIndicators(): Promise<RiskIndicator[]> {
   // 净流动性指数：量级大(百万级)，展示缩写为万
   const cnliDisp = cnli !== null ? (Math.abs(cnli) >= 10000 ? (cnli / 10000).toFixed(2) + '万' : (cnli / 100).toFixed(2)) : null;
 
-  const now = new Date().toLocaleString('zh-CN');
-
-  return [
+  const indicators: RiskIndicator[] = [
     {
       id: 'vix', icon: '📊', label: 'VIX 恐慌指数',
       value: vix?.toFixed(2) ?? '—',
@@ -165,6 +162,10 @@ export async function fetchRiskIndicators(): Promise<RiskIndicator[]> {
         : '数据获取中',
     },
   ];
+  return indicators.map((item, i) => ({
+    ...item,
+    source: rawValues[i] !== null ? 'real' : 'missing',
+  }));
   } catch {
     console.log('[macro] fetchRiskIndicators 异常，使用本地快照兜底');
     return mockRiskIndicators;
@@ -205,34 +206,34 @@ export async function fetchCreditRates(): Promise<CreditRateIndicator[]> {
 
 // ─── 波动率全景 ───
 export async function fetchVolatility(): Promise<VolatilitySnapshot> {
-  try {
-  const vixSeries = await fetchConvexSeries('VIXCLS', 120);
-  const values = vixSeries.map((d) => d.value);
-  const latest = values.length > 0 ? values[values.length - 1] : 15;
-  if (values.length === 0) throw new Error('Empty series');
+  const [vixSeries, options] = await Promise.all([
+    fetchConvexSeries('VIXCLS', 120),
+    fetchOptionsSentiment().catch(() => null),
+  ]);
+  const values = vixSeries.map((d) => d.value).filter((v) => Number.isFinite(v));
+  const latest = values.length ? values[values.length - 1] : null;
 
   return {
     current: {
       timestamp: new Date().toISOString(),
       vix: latest,
-      vvix: latest * 1.25,  // VVIX 通常高于 VIX
-      skew: -3.5 + Math.random() * 2,
-      move: 95 + Math.random() * 15,
+      // 以下两项来自 Yahoo 真实指数；取不到就是 null，不再用 VIX 乘系数或随机数伪造。
+      vvix: options?.quotes['^VVIX']?.price ?? null,
+      skew: options?.quotes['^SKEW']?.price ?? null,
+      move: null, // 免费源没有可靠 MOVE 序列，明确留空。
     },
     vixSparkline: values.slice(-30),
-    vvixSparkline: values.slice(-30).map((v) => v * 1.25),
-    skewSparkline: Array.from({ length: 30 }, () => -3 + Math.random() * 2),
-    moveSparkline: Array.from({ length: 30 }, () => 95 + Math.random() * 20),
-    interpretation: latest > 25
-      ? 'VIX 高于 25，市场处于恐慌状态，波动率期限结构可能倒挂，避险情绪浓厚'
-      : latest > 18
-      ? 'VIX 处于中等偏高水平，短期波动加剧，需关注尾部风险'
-      : 'VIX 处于低位，市场情绪平稳，但需警惕低波动率环境下的突然爆发',
+    vvixSparkline: [],
+    skewSparkline: [],
+    moveSparkline: [],
+    interpretation: latest === null
+      ? 'VIX 序列不可用，本页不展示模拟值。'
+      : latest > 25
+        ? 'VIX 高于 25，市场处于恐慌状态，波动率期限结构可能倒挂，避险情绪浓厚'
+        : latest > 18
+          ? 'VIX 处于中等偏高水平，短期波动加剧，需关注尾部风险'
+          : 'VIX 处于低位，市场情绪平稳，但需警惕低波动率环境下的突然爆发',
   };
-  } catch {
-    console.log('[macro] fetchVolatility 异常，使用本地快照兜底');
-    return mockVolatility;
-  }
 }
 
 // ─── 多空力量 ───

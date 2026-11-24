@@ -28,6 +28,21 @@ function run(cmd, cmdArgs, opts = {}) {
   if (r.status !== 0) throw new Error(`${cmd} ${cmdArgs.join(' ')} 失败，退出码 ${r.status}`)
 }
 
+async function writeWithRetry(file, data, label = file, tries = 10) {
+  for (let i = 0; i < tries; i++) {
+    try {
+      fs.writeFileSync(file, data)
+      return
+    } catch (e) {
+      const retryable = ['EBUSY', 'EPERM', 'EACCES'].includes(e.code)
+      if (!retryable || i === tries - 1) throw e
+      const wait = 300 * (i + 1)
+      console.log(`      ${label} 被占用，${wait}ms 后重试（${i + 1}/${tries - 1}）...`)
+      await new Promise((resolve) => setTimeout(resolve, wait))
+    }
+  }
+}
+
 function walk(dir, base = '') {
   const out = []
   for (const name of fs.readdirSync(dir)) {
@@ -82,7 +97,7 @@ if (fs.existsSync(EXE)) {
   try { fs.rmSync(EXE) } catch { /* 忽略，走覆盖路径 */ }
 }
 try {
-  fs.copyFileSync(process.execPath, EXE)
+  await writeWithRetry(EXE, fs.readFileSync(process.execPath), 'Marvis.exe')
 } catch (e) {
   throw new Error('无法写入 Marvis.exe，请先关闭正在运行的 Marvis 实例：' + e.message)
 }
@@ -108,7 +123,7 @@ if (!keepConsole) {
   const subsystemOffset = opt + 68
   console.log('      原 subsystem=' + buf.readUInt16LE(subsystemOffset) + ' → 2 (GUI)')
   buf.writeUInt16LE(2, subsystemOffset)
-  fs.writeFileSync(EXE, buf)
+  await writeWithRetry(EXE, buf, 'Marvis.exe')
 } else {
   console.log('[6/6] 保留控制台窗口')
 }

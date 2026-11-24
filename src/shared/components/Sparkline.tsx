@@ -1,5 +1,7 @@
 ﻿import { memo, useRef, useEffect } from 'react';
 
+type Baseline = 'first' | 'zero' | 'min';
+
 interface SparklineProps {
   data: number[];
   width?: number;
@@ -7,6 +9,8 @@ interface SparklineProps {
   color?: string;
   lineWidth?: number;
   fillBelow?: boolean;
+  /** first=相对首值变化（默认，避免 min-max 夸大波动）；zero=零基线；min=旧版极值拉伸 */
+  baseline?: Baseline;
 }
 
 export const Sparkline = memo(function Sparkline({
@@ -16,6 +20,7 @@ export const Sparkline = memo(function Sparkline({
   color = '#4078ff',
   lineWidth = 1.5,
   fillBelow = true,
+  baseline = 'first',
 }: SparklineProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -30,21 +35,44 @@ export const Sparkline = memo(function Sparkline({
     canvas.height = height * dpr;
     ctx.scale(dpr, dpr);
 
-    const min = Math.min(...data);
-    const max = Math.max(...data);
-    const range = max - min || 1;
+    const first = data[0] || 1;
+    const scaled = data.map((v) => (baseline === 'first' ? v / first - 1 : v));
+    let lo: number;
+    let hi: number;
+    if (baseline === 'min') {
+      const rawMin = Math.min(...scaled);
+      const rawMax = Math.max(...scaled);
+      const pad = (rawMax - rawMin || 1) * 0.08;
+      lo = rawMin - pad;
+      hi = rawMax + pad;
+    } else {
+      const extent = Math.max(...scaled.map((v) => Math.abs(v)), 0.0001) * 1.05;
+      lo = -extent;
+      hi = extent;
+    }
+    const range = hi - lo || 1;
     const stepX = (width - 2) / (data.length - 1);
+    const yOf = (v: number) => height - 2 - ((v - lo) / range) * (height - 6);
 
     ctx.clearRect(0, 0, width, height);
+
+    // 零线：相对首值/零基线时保留参照，避免把微小波动画成大起大落。
+    if (baseline !== 'min') {
+      const y0 = yOf(0);
+      ctx.beginPath();
+      ctx.setLineDash([2, 2]);
+      ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+      ctx.lineWidth = 1;
+      ctx.moveTo(1, y0);
+      ctx.lineTo(width - 1, y0);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
 
     if (fillBelow) {
       ctx.beginPath();
       ctx.moveTo(1, height);
-      data.forEach((v, i) => {
-        const x = 1 + i * stepX;
-        const y = height - 2 - ((v - min) / range) * (height - 6);
-        ctx.lineTo(x, y);
-      });
+      scaled.forEach((v, i) => ctx.lineTo(1 + i * stepX, yOf(v)));
       ctx.lineTo(1 + (data.length - 1) * stepX, height);
       ctx.closePath();
       const gradient = ctx.createLinearGradient(0, 0, 0, height);
@@ -57,14 +85,14 @@ export const Sparkline = memo(function Sparkline({
     ctx.beginPath();
     ctx.strokeStyle = color;
     ctx.lineWidth = lineWidth;
-    data.forEach((v, i) => {
+    scaled.forEach((v, i) => {
       const x = 1 + i * stepX;
-      const y = height - 2 - ((v - min) / range) * (height - 6);
+      const y = yOf(v);
       if (i === 0) ctx.moveTo(x, y);
       else ctx.lineTo(x, y);
     });
     ctx.stroke();
-  }, [data, width, height, color, lineWidth, fillBelow]);
+  }, [data, width, height, color, lineWidth, fillBelow, baseline]);
 
   return <canvas ref={canvasRef} style={{ width, height }} className="inline-block" />;
 });

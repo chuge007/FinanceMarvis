@@ -1,5 +1,6 @@
 import { memo } from 'react';
 import type { Plan } from '../../../services/investmentPlan';
+import { AllocationTree } from '../../../shared/components/AllocationTree';
 
 const money = (n: number) => `¥${Math.round(n).toLocaleString('zh-CN')}`;
 
@@ -96,6 +97,8 @@ export const PlanResult = memo(function PlanResult({ plan }: { plan: Plan }) {
           </div>
         ))}
       </div>
+
+      <AllocationTree plan={plan} />
 
       <div className="rounded-[5px] border border-[#1a1d26] bg-[#0f1118] p-4">
         <div className="flex items-baseline justify-between">

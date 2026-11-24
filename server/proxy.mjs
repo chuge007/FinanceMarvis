@@ -3,9 +3,10 @@
  *
  * 职责：
  *  1. 静态托管 `dist/` 构建产物（SPA，非 API 请求回源 index.html）；
- *  2. 将五个上游数据源同域转发，规避浏览器 CORS / 反爬 / 地区封锁：
+ *  2. 将六个上游数据源同域转发，规避浏览器 CORS / 反爬 / 地区封锁：
  *     - /eastmoney-news    → np-listapi.eastmoney.com（注入 eastmoney Referer）
  *     - /yahoo             → query1.finance.yahoo.com（注入 UA/Referer）
+ *     - /cboe              → www.cboe.com（CBOE 官方期权统计，注入 UA/Referer）
  *     - /eastmoney-kline   → push2his.eastmoney.com
  *     - /eastmoney-quote   → push2.eastmoney.com
  *     - /convex            → convextrade.com/api/public
@@ -64,6 +65,11 @@ const ROUTES = [
     prefix: '/yahoo',
     origin: 'https://query1.finance.yahoo.com',
     headers: { 'User-Agent': UA, Referer: 'https://finance.yahoo.com/', Origin: 'https://finance.yahoo.com' },
+  },
+  {
+    prefix: '/cboe',
+    origin: 'https://www.cboe.com',
+    headers: { 'User-Agent': UA, Referer: 'https://www.cboe.com/', Origin: 'https://www.cboe.com' },
   },
   {
     prefix: '/eastmoney-kline',
@@ -183,5 +189,5 @@ server.listen(PORT, '127.0.0.1', () => {
   console.log(`[StrategyLab] 生产服务已启动: http://127.0.0.1:${PORT}`)
   console.log(`[StrategyLab] 仅监听回环地址，局域网其它设备无法访问`)
   console.log(`[StrategyLab] 静态目录: ${DIST}`)
-  console.log(`[StrategyLab] 转发: /convex /eastmoney-news /yahoo /eastmoney-kline /eastmoney-quote${via}`)
+  console.log(`[StrategyLab] 转发: /convex /eastmoney-news /yahoo /cboe /eastmoney-kline /eastmoney-quote${via}`)
 })

@@ -1,7 +1,7 @@
 import type { RiskIndicator, CreditRateIndicator, VolatilitySnapshot, BullBearForces, InstitutionView, NewsItem } from '../types/macro';
 import type { Strategy, Candidate, ExecutionRule } from '../types/strategy';
 import type { SectorFlowData, CumulativeFlowPoint, OrderTick, DepthData } from '../types/fundflow';
-import type { FearGreedIndex, NAAIMData, McClellanData, PutCallData, DarkPoolData, GEXData, AlgoSentimentRow, SentimentSnapshot } from '../types/sentiment';
+import type { FearGreedIndex, NAAIMData, McClellanData, DarkPoolData, GEXData, AlgoSentimentRow, SentimentSnapshot } from '../types/sentiment';
 
 function rng(base: number, spread: number) {
   return +(base + (Math.random() - 0.5) * spread).toFixed(2);
@@ -26,7 +26,12 @@ export const mockRiskIndicators: RiskIndicator[] = [
   { id: '14', icon: '📦', label: 'PPI', value: rng(2.2, 0.3), level: 'normal', reading: 'PPI温和，上游压力可控', history: Array.from({ length: 20 }, () => rng(2.2, 0.5)) },
   { id: '15', icon: '🗣️', label: 'FOMC Tone', value: 'Neutral', level: 'neutral', reading: '鲍威尔最新讲话偏中性，数据依赖', history: [] },
   { id: '16', icon: '⚔️', label: 'Geo Risk', value: rng(32, 8), level: 'warning', reading: '地缘风险指数略高，关注中东局势', history: Array.from({ length: 20 }, () => rng(30, 15)) },
-];
+].map((item) => ({
+  ...item,
+  source: 'demo' as const,
+  history: [] as number[],
+  level: item.level as RiskIndicator['level'],
+}));
 
 export const mockCreditRates: CreditRateIndicator[] = [
   { name: 'IG OAS', current: rng(92, 8), direction: 'up', unit: 'bp', reading: '投资级利差小幅走阔' },
@@ -41,12 +46,12 @@ export const mockCreditRates: CreditRateIndicator[] = [
 ];
 
 export const mockVolatility: VolatilitySnapshot = {
-  current: { timestamp: new Date().toISOString(), vix: rng(15.3, 2), vvix: rng(92, 8), skew: rng(-5.5, 2), move: rng(97, 10) },
-  vixSparkline: Array.from({ length: 30 }, () => rng(15, 4)),
-  vvixSparkline: Array.from({ length: 30 }, () => rng(92, 12)),
-  skewSparkline: Array.from({ length: 30 }, () => rng(-5, 4)),
-  moveSparkline: Array.from({ length: 30 }, () => rng(97, 15)),
-  interpretation: '波动率整体处于低位，VIX 15附近，SKEW略偏负，市场尾部风险定价温和。',
+  current: { timestamp: new Date().toISOString(), vix: null, vvix: null, skew: null, move: null },
+  vixSparkline: [],
+  vvixSparkline: [],
+  skewSparkline: [],
+  moveSparkline: [],
+  interpretation: '波动率数据不可用，不展示模拟值。',
 };
 
 export const mockBullBearForces: BullBearForces = {
@@ -232,17 +237,6 @@ export const mockMcClellan: McClellanData = {
     oscillator: Array.from({ length: 30 }, () => rng(20, 40)),
     summation: Array.from({ length: 30 }, (_, i) => 300 + i * 5 + rng(0, 20)),
   },
-};
-
-export const mockPutCall: PutCallData = {
-  equityPC: 0.62,
-  indexPC: 0.88,
-  totalPC: 0.74,
-  otmPutCall: 0.55,
-  callVolumeDelta: 15.2,
-  putVolumeDelta: -8.5,
-  skew25Delta: -5.4,
-  openInterestPC: 0.78,
 };
 
 export const mockDarkPool: DarkPoolData = {

@@ -4,7 +4,7 @@
  *
  * 一个 exe 同时承担：
  *  1. 内嵌 dist/ 全部静态资源并托管（SPA 回源）；
- *  2. 同域转发 5 个上游数据源，绕开 CORS / 反爬 / 地区封锁；
+ *  2. 同域转发 6 个上游数据源，绕开 CORS / 反爬 / 地区封锁；
  *  3. 自动挑选可用端口、自动打开默认浏览器、单实例复用；
  *  4. 页面右下角提供「退出程序」按钮，优雅关闭服务。
  *
@@ -123,6 +123,8 @@ const ROUTES = [
     headers: { Referer: 'https://www.eastmoney.com/', Origin: 'https://www.eastmoney.com' }, viaProxy: false },
   { prefix: '/yahoo', origin: 'https://query1.finance.yahoo.com',
     headers: { 'User-Agent': UA, Referer: 'https://finance.yahoo.com/', Origin: 'https://finance.yahoo.com' }, viaProxy: true },
+  { prefix: '/cboe', origin: 'https://www.cboe.com',
+    headers: { 'User-Agent': UA, Referer: 'https://www.cboe.com/', Origin: 'https://www.cboe.com' }, viaProxy: true },
   { prefix: '/eastmoney-kline', origin: 'https://push2his.eastmoney.com',
     headers: { Referer: 'https://quote.eastmoney.com/', Origin: 'https://quote.eastmoney.com' }, viaProxy: false },
   { prefix: '/eastmoney-quote', origin: 'https://push2.eastmoney.com',
@@ -166,7 +168,7 @@ async function detectProxy() {
     log('使用系统代理: ' + PROXY_URL)
     return
   }
-  log('未检测到出海代理，/convex 与 /yahoo 走直连（可能有地区限制，页面已有兜底数据源）')
+  log('未检测到出海代理，/convex、/yahoo、/cboe 走直连（可能有地区限制，页面已有兜底数据源）')
 }
 
 function currentProxy() { return PROXY_URL }

@@ -15,9 +15,10 @@ function NumberField({ label, value, onChange, hint }: { label: string; value: s
 }
 
 /** 固定风险比例仓位换算：把「我能亏多少」翻译成「能买多少」，不做收益预测。 */
-export const PositionSizer = memo(function PositionSizer() {
+export const PositionSizer = memo(function PositionSizer({ tone }: { tone: string }) {
+  const defensive = tone === '防守' || tone === '观望';
   const [capital, setCapital] = useState('100000');
-  const [riskPct, setRiskPct] = useState('1');
+  const [riskPct, setRiskPct] = useState(defensive ? '1' : '2');
   const [entry, setEntry] = useState('10.00');
   const [stop, setStop] = useState('9.40');
   const [lot, setLot] = useState('100');
@@ -37,7 +38,12 @@ export const PositionSizer = memo(function PositionSizer() {
     <Panel title="仓位计算器" hint="固定风险比例 · 只做风险预算换算">
       <div className="grid grid-cols-5 gap-2">
         <NumberField label="账户资金 (¥)" value={capital} onChange={setCapital} />
-        <NumberField label="单笔风险 (%)" value={riskPct} onChange={setRiskPct} hint="常见 1%~2%" />
+        <NumberField
+          label="单笔风险 (%)"
+          value={riskPct}
+          onChange={setRiskPct}
+          hint={defensive ? `当前${tone}态，默认 1%（可手动改）` : '常见 1%~2%'}
+        />
         <NumberField label="入场价" value={entry} onChange={setEntry} />
         <NumberField label="止损价" value={stop} onChange={setStop} />
         <NumberField label="每手股数" value={lot} onChange={setLot} hint="A股 100 / 美股 1" />

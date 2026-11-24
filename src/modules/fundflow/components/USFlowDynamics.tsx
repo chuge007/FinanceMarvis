@@ -1,24 +1,14 @@
 ﻿import { memo, useRef, useEffect } from 'react';
 import { Chart, registerables } from 'chart.js';
 import { Panel } from '../../../shared/components/Panel';
+import { ChartHeader } from '../../../shared/components/ChartHeader';
+import { ChartInsight } from '../../../shared/components/ChartInsight';
 import { useSectorFlow, useUSFlowDynamics } from '../hooks/useSectorFlow';
 import type { SectorFlow } from '../../../types/fundflow';
 
 Chart.register(...registerables);
 
-const MOMENTUM_UI: Record<string, { label: string; color: string; bg: string; hint: string }> = {
-  inflow_boost: { label: '资金加速·多头', color: '#f04452', bg: 'rgba(240,68,82,0.14)', hint: '资金加速涌入且涨跌配合，趋势最顺，做T顺势为主' },
-  inflow_slow: { label: '温和回流', color: '#ff9f9f', bg: 'rgba(255,159,159,0.12)', hint: '小幅回流，动量不足，等放量确认再追' },
-  balanced: { label: '多空平衡', color: '#9aa0ad', bg: 'rgba(154,160,173,0.12)', hint: '方向未明，控制仓位，高抛低吸' },
-  outflow: { label: '资金流出·转弱', color: '#0ca678', bg: 'rgba(12,166,120,0.14)', hint: '持续离场，趋势转弱，反T为主或规避' },
-};
-
-function GroupBadge({ label, color, bg }: { label: string; color: string; bg: string }) {
-  return <span className="px-1.5 py-0.5 rounded text-[10.5px] font-medium" style={{ color, backgroundColor: bg }}>{label}</span>;
-}
-
 function SectionRow({ s }: { s: SectorFlow }) {
-  const mt = MOMENTUM_UI[s.usMomentum ?? 'balanced'];
   const strength = s.usStrength ?? 50;
   const flows = [
     { label: '机构', v: s.usInstitution ?? 0, color: '#4078ff' },
@@ -71,12 +61,15 @@ export const USFlowDynamics = memo(function USFlowDynamics() {
     if (!ctx) return;
     const labels = dyn.points.map((p) => p.time);
     const colors: Record<string, string> = { tech: '#4078ff', finance: '#0ca678', cons_disc: '#9b6efb', comm: '#20c4d8', health: '#f59e4b', industrials: '#e8590c', energy: '#f04452', utilities: '#748ffc' };
-    const datasets = Object.keys(colors).map((id) => ({
-      label: id.toUpperCase(),
+    const SECTOR_LABELS: Record<string, string> = { tech: '科技', finance: '金融', cons_disc: '可选消费', comm: '通信', health: '医疗', industrials: '工业', energy: '能源', utilities: '公用事业' };
+    const datasets = Object.keys(colors).map((id, i) => ({
+      label: SECTOR_LABELS[id] ?? id.toUpperCase(),
       data: dyn.points.map((p) => p.values[id] ?? 0),
       borderColor: colors[id],
       backgroundColor: colors[id] + '1f',
       borderWidth: 1.4,
+      // 实线/虚线交替，避免仅靠颜色区分 8 条线（色盲友好）。
+      borderDash: i % 2 ? [5, 3] : undefined,
       pointRadius: 0,
       tension: 0.35,
     }));
@@ -114,7 +107,11 @@ export const USFlowDynamics = memo(function USFlowDynamics() {
   }
 
   return (
-    <Panel title="美股资金动态 · 板块轮动雷达" badge={loading ? '加载中' : '模型估算 · 45s刷新'}>
+    <Panel
+      title="美股资金动态 · 板块轮动雷达"
+      badge={loading ? '加载中' : '模型估算 · 45s刷新'}
+      extra={<ChartHeader source="model" note="CRAI + 板块权重推演，非真实资金流" />}
+    >
       {/* 轮动结论解读 */}
       <div
         className="rounded px-3 py-2 text-[10.5px] leading-relaxed mb-2"
@@ -146,6 +143,13 @@ export const USFlowDynamics = memo(function USFlowDynamics() {
 
       <div style={{ height: 210 }}>
         <canvas ref={canvasRef} />
+      </div>
+      <div className="mt-2">
+        <ChartInsight
+          summary="曲线是模拟的日内累计净流入；实线/虚线交替区分板块，不只看颜色。"
+          how="关注曲线斜率变化而不是绝对值；斜率变陡代表模型判断资金加速。"
+          pitfall="全部由 CRAI + 板块权重推演，没有真实逐笔资金数据，不能作为下单依据。"
+        />
       </div>
       <div className="text-[10px] text-[#636878] mt-1.5 leading-relaxed">
         日内累计净流入演变（开盘 09:30 → 收盘 16:00 每 30 分钟模拟）。美股无北向资金披露，采用「CRAI情绪 + 板块权重 + 成长/防御轮动偏好」模型估算，分机构/对冲/散户口径用于判断资金方向与轮动强度，非下单依据。

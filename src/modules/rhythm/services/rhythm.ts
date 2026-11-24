@@ -10,14 +10,14 @@
  * 数据源：ConvexTrade（/convex 同域转发，真实 FRED/CBOE 序列）+ alternative.me 恐惧贪婪指数。
  */
 import { convexApi, fngApi } from '../../../services/api';
-import { clamp, percentileOf, zScore, trendSlope, toYearOverYear, daysSince } from '../../../shared/utils/seriesStats';
+import { clamp, percentileOf, zScore, trendSlope, toYearOverYear, daysSince, rollingZScores } from '../../../shared/utils/seriesStats';
 
 export type Phase = '领先' | '同步' | '滞后' | '情绪·同步';
 export type Tone = '进攻' | '均衡' | '防守' | '观望';
 
-interface SeriesPoint { date: string; value: number }
+export interface SeriesPoint { date: string; value: number }
 
-interface SeriesConfig {
+export interface SeriesConfig {
   id: string;
   name: string;
   unit: string;
@@ -34,7 +34,7 @@ interface SeriesConfig {
   pitfall: string;
 }
 
-const CONFIG: SeriesConfig[] = [
+export const CONFIG: SeriesConfig[] = [
   {
     id: 'VIXCLS', name: 'VIX 波动率指数', unit: '', dimension: '波动', phase: '同步',
     weight: 0.20, limit: 250, frequency: '日度', higherIsRisk: true,
@@ -130,9 +130,21 @@ export interface RegimeResult {
   asOf: string | null;
 }
 
+/** 归一化后的原始序列：供叠加图、相关性矩阵与体制回溯使用，全部只含真实上游点。 */
+export interface NormalizedSeries {
+  id: string;
+  name: string;
+  phase: Phase;
+  frequency: '日度' | '月度';
+  unit: string;
+  weight: number;
+  points: { date: string; value: number; z: number | null }[];
+}
+
 export interface RhythmSnapshot {
   indicators: IndicatorReading[];
   regime: RegimeResult;
+  series: Record<string, NormalizedSeries>;
   fetchedAt: string;
 }
 
@@ -178,7 +190,7 @@ async function loadFearGreed(): Promise<SeriesPoint[]> {
   }
 }
 
-function scoreOf(cfg: SeriesConfig, value: number, pct: number | null, slope: number | null): number | null {
+export function scoreOf(cfg: SeriesConfig, value: number, pct: number | null, slope: number | null): number | null {
   if (cfg.scoreMode === 'neutral') return 50;
   if (pct === null) return null;
   let base: number;
@@ -286,6 +298,7 @@ function buildRegime(indicators: IndicatorReading[]): RegimeResult {
 
 export async function fetchRhythm(): Promise<RhythmSnapshot> {
   const lists = await Promise.all(CONFIG.map((cfg) => (cfg.id === 'FG' ? loadFearGreed() : loadConvex(cfg.id, cfg.limit))));
+  const series: Record<string, NormalizedSeries> = {};
 
   const indicators: IndicatorReading[] = CONFIG.map((cfg, idx) => {
     const points = lists[idx];
@@ -294,6 +307,13 @@ export async function fetchRhythm(): Promise<RhythmSnapshot> {
     if (cfg.transform === 'cpiYoY') {
       values = toYearOverYear(values);
     }
+    const aligned = points.slice(Math.max(0, points.length - values.length));
+    const zs = rollingZScores(values, cfg.frequency === '月度' ? 24 : 250);
+    series[cfg.id] = {
+      id: cfg.id, name: cfg.name, phase: cfg.phase, frequency: cfg.frequency,
+      unit: cfg.unit, weight: cfg.weight,
+      points: aligned.map((p, i) => ({ date: p.date, value: values[i], z: zs[i] })),
+    };
     const value = values.length ? values[values.length - 1] : null;
     const pct = value === null ? null : percentileOf(values, value);
     const z = value === null ? null : zScore(values, value);
@@ -308,5 +328,5 @@ export async function fetchRhythm(): Promise<RhythmSnapshot> {
     };
   });
 
-  return { indicators, regime: buildRegime(indicators), fetchedAt: new Date().toISOString() };
+  return { indicators, regime: buildRegime(indicators), series, fetchedAt: new Date().toISOString() };
 }
