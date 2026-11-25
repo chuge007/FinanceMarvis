@@ -81,46 +81,46 @@ export const EventCalendar = memo(function EventCalendar() {
     <Panel title="事件节奏日历" hint="未来 75 天 · 只列规则可推算的窗口" extra={<SourceBadge kind="rule" text="规则推算 · 非官方日历" />}>
       <div className="grid grid-cols-2 gap-4">
         <div className="space-y-2">
-          {events.length === 0 && <p className="text-[11px] text-[#636878]">近期无可推算的固定窗口。</p>}
+          {events.length === 0 && <p className="text-[0.6875rem] text-[#636878]">近期无可推算的固定窗口。</p>}
           {events.map((e) => {
             const near = e.days <= 7;
             return (
               <div
                 key={e.date}
-                className="border rounded-[4px] px-3 py-2"
+                className="border rounded-[0.25rem] px-3 py-2"
                 style={{ borderColor: near ? '#f7d44c66' : '#1a1d26', background: near ? 'rgba(247,212,76,0.05)' : 'rgba(255,255,255,0.015)' }}
               >
                 <div className="flex items-center justify-between gap-2">
-                  <span className="text-[12px] text-[#d8dce6]">{e.name}</span>
-                  <span className="text-[10px] whitespace-nowrap" style={{ color: near ? '#f7d44c' : '#636878' }}>
+                  <span className="text-[0.75rem] text-[#d8dce6]">{e.name}</span>
+                  <span className="text-[0.625rem] whitespace-nowrap" style={{ color: near ? '#f7d44c' : '#636878' }}>
                     {e.date} · {e.days === 0 ? '今天' : `${e.days} 天后`}
                   </span>
                 </div>
-                <p className="text-[10px] leading-relaxed text-[#b0b5c0] mt-1.5">为什么影响节奏：{e.why}</p>
-                <p className="text-[10px] leading-relaxed mt-1" style={{ color: '#20c4d8' }}>建议：{e.action}</p>
+                <p className="text-[0.625rem] leading-relaxed text-[#b0b5c0] mt-1.5">为什么影响节奏：{e.why}</p>
+                <p className="text-[0.625rem] leading-relaxed mt-1" style={{ color: '#20c4d8' }}>建议：{e.action}</p>
               </div>
             );
           })}
         </div>
 
         <div className="space-y-3">
-          <div className="border border-[#1a1d26] rounded-[4px] p-3">
+          <div className="border border-[#1a1d26] rounded-[0.25rem] p-3">
             <div className="flex items-center gap-2 mb-2">
-              <span className="text-[12px] font-bold text-[#d8dce6]">必须由官方日历确认</span>
+              <span className="text-[0.75rem] font-bold text-[#d8dce6]">必须由官方日历确认</span>
               <SourceBadge kind="official" />
             </div>
             <ul className="space-y-1.5">
               {OFFICIAL.map((o) => (
-                <li key={o.name} className="text-[10px] leading-relaxed">
+                <li key={o.name} className="text-[0.625rem] leading-relaxed">
                   <span className="text-[#b0b5c0]">{o.name}：</span><span className="text-[#636878]">{o.note}</span>
                 </li>
               ))}
             </ul>
-            <p className="text-[10px] text-[#636878] mt-2 border-t border-[#1a1d26] pt-2">
+            <p className="text-[0.625rem] text-[#636878] mt-2 border-t border-[#1a1d26] pt-2">
               每月例行节奏大致为「上旬非农、中旬 CPI、月末 PMI」，但本工具不编造具体日期，请在官方日历确认后再安排。
             </p>
           </div>
-          <p className="text-[10px] leading-relaxed text-[#636878]">
+          <p className="text-[0.625rem] leading-relaxed text-[#636878]">
             风险提示：日历效应（如「春季躁动」「持股过节」）只是历史统计描述，会失效；政策与突发消息可以在任何月份出现。
             事件窗口的正确用法是「提前安排、事后确认」，不是按日期押方向。
           </p>

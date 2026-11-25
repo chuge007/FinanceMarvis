@@ -243,7 +243,12 @@ export async function fetchStrategyFactors(
     composite,
     bias,
     updatedAt: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
-    source: market === 'CN' && overview && overview.source === 'eastmoney' ? 'realtime' : 'mock',
+    source:
+      market === 'CN' &&
+      overview &&
+      (overview.source === 'eastmoney' || overview.source === 'tencent' || overview.source === 'sina')
+        ? 'realtime'
+        : 'mock',
   };
 }
 

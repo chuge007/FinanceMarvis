@@ -17,6 +17,11 @@ interface MarketState {
   fetchMarketData: () => Promise<void>;
 }
 
+// 经同域 /yahoo 代理（生产由 server/proxy.mjs 转发），避免浏览器直连被 CORS/449 拦截。
+const YAHOO_BASE = import.meta.env.VITE_UPSTREAM === 'direct'
+  ? 'https://query1.finance.yahoo.com'
+  : '/yahoo';
+
 const valid = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
 const valuesOf = (series: { value: number }[]) => series.map((d) => d.value).filter(valid);
 const latestOf = (values: number[]) => (values.length ? values[values.length - 1] : null);
@@ -47,7 +52,7 @@ export const useMarketStore = create<MarketState>((set) => ({
         fetchConvexSeries('DGS10', 120),
         fetchConvexSeries('DTWEXBGS', 120),
         // SPX via Yahoo Finance
-        fetch('https://query1.finance.yahoo.com/v8/finance/chart/%5EGSPC?interval=1d&range=1d', {
+        fetch(`${YAHOO_BASE}/v8/finance/chart/%5EGSPC?interval=1d&range=1d`, {
           headers: { 'User-Agent': 'Mozilla/5.0' },
         }).then(r => r.json()).then(j => {
           const v = Number(j?.chart?.result?.[0]?.meta?.regularMarketPrice);

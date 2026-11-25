@@ -17,7 +17,7 @@ function Field(props: {
   const { label, hint, value, unit, step = 1, min = 0, max, onChange } = props;
   return (
     <label className="block">
-      <span className="text-[10px] text-[#636878]">{label}</span>
+      <span className="text-[0.625rem] text-[#636878]">{label}</span>
       <div className="mt-1 flex items-center gap-1.5">
         <input
           type="number"
@@ -26,11 +26,11 @@ function Field(props: {
           min={min}
           max={max}
           onChange={(e) => onChange(Number(e.target.value))}
-          className="w-full rounded-[4px] border border-[#1a1d26] bg-[#0b0e14] px-2 py-1.5 text-[12px] tabular-nums text-[#d8dce6] outline-none focus:border-[#4078ff]"
+          className="w-full rounded-[0.25rem] border border-[#1a1d26] bg-[#0b0e14] px-2 py-1.5 text-[0.75rem] tabular-nums text-[#d8dce6] outline-none focus:border-[#4078ff]"
         />
-        <span className="shrink-0 text-[10px] text-[#636878]">{unit}</span>
+        <span className="shrink-0 text-[0.625rem] text-[#636878]">{unit}</span>
       </div>
-      {hint && <span className="mt-0.5 block text-[9.5px] leading-snug text-[#4d5364]">{hint}</span>}
+      {hint && <span className="mt-0.5 block text-[0.5938rem] leading-snug text-[#4d5364]">{hint}</span>}
     </label>
   );
 }
@@ -39,8 +39,8 @@ function Section({ title, hint, children }: { title: string; hint?: string; chil
   return (
     <div>
       <div className="mb-2 flex items-baseline gap-2">
-        <h3 className="text-[12px] font-bold text-[#d8dce6]">{title}</h3>
-        {hint && <span className="text-[9.5px] text-[#636878]">{hint}</span>}
+        <h3 className="text-[0.75rem] font-bold text-[#d8dce6]">{title}</h3>
+        {hint && <span className="text-[0.5938rem] text-[#636878]">{hint}</span>}
       </div>
       {children}
     </div>
@@ -55,7 +55,7 @@ function Choice(props: {
 }) {
   return (
     <div>
-      <span className="text-[10px] text-[#636878]">{props.label}</span>
+      <span className="text-[0.625rem] text-[#636878]">{props.label}</span>
       <div className="mt-1 flex flex-wrap gap-1">
         {props.options.map((o) => {
           const active = o.v === props.value;
@@ -64,7 +64,7 @@ function Choice(props: {
               key={String(o.v)}
               type="button"
               onClick={() => props.onChange(o.v)}
-              className={`rounded-[4px] border px-2 py-1 text-[10.5px] transition-colors ${
+              className={`rounded-[0.25rem] border px-2 py-1 text-[0.6563rem] transition-colors ${
                 active
                   ? 'border-[#4078ff] bg-[rgba(64,120,255,0.14)] text-[#d8dce6]'
                   : 'border-[#1a1d26] bg-[#0b0e14] text-[#9aa0ae] hover:border-[#2a3040]'
@@ -146,7 +146,7 @@ export const ProfileForm = memo(function ProfileForm() {
             hint="低于 3 年不配权益"
             onChange={(v) => setProfile({ horizonYears: Math.min(40, Math.max(0, v)) })}
           />
-          <label className="mt-5 flex items-center gap-2 text-[11px] text-[#b0b5c0]">
+          <label className="mt-5 flex items-center gap-2 text-[0.6875rem] text-[#b0b5c0]">
             <input
               type="checkbox"
               checked={profile.hasInsurance}
@@ -215,7 +215,7 @@ export const ProfileForm = memo(function ProfileForm() {
             onChange={(v) => setAnswers({ ...answers, goal: v as typeof answers.goal })}
           />
         </div>
-        <div className="mt-2 rounded-[4px] bg-[rgba(255,255,255,0.025)] px-2.5 py-2 text-[10px] text-[#9aa0ae]">
+        <div className="mt-2 rounded-[0.25rem] bg-[rgba(255,255,255,0.025)] px-2.5 py-2 text-[0.625rem] text-[#9aa0ae]">
           得分 {risk.score}/100 · 意愿等级「{LEVEL_LABEL[level]}」
           <span className="text-[#636878]">　最终等级还会被「能接受的最大浮亏」与投资期限压制。</span>
         </div>

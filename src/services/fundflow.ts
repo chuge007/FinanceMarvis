@@ -6,6 +6,8 @@
  */
 import axios from 'axios';
 import { fetchConvexLatest } from './api';
+import { fetchTencentSectorFlows } from './tencentSector';
+import { fetchSinaSectorFlows } from './sinaSector';
 import { getMarketState } from '../shared/utils/marketHours';
 import type {
   SectorFlow,
@@ -77,21 +79,6 @@ const US_SECTORS = [
   { id: 'realestate', name: 'Real Estate', color: '#da77f2', weight: 0.04, cn: '房地产', growth: false },
 ];
 
-// ─── A股板块 ───
-const CN_SECTORS = [
-  { id: 'electronics', name: '电子', color: '#4078ff', weight: 0.16, cn: '电子' },
-  { id: 'pharma', name: '医药生物', color: '#f59e4b', weight: 0.12, cn: '医药生物' },
-  { id: 'food_beverage', name: '食品饮料', color: '#9b6efb', weight: 0.12, cn: '食品饮料' },
-  { id: 'bank', name: '银行', color: '#0ca678', weight: 0.10, cn: '银行' },
-  { id: 'nonbank_fin', name: '非银金融', color: '#20c4d8', weight: 0.08, cn: '非银金融' },
-  { id: 'power_equip', name: '电力设备', color: '#ff922b', weight: 0.09, cn: '电力设备' },
-  { id: 'auto', name: '汽车', color: '#e8590c', weight: 0.07, cn: '汽车' },
-  { id: 'realestate_cn', name: '房地产', color: '#da77f2', weight: 0.06, cn: '房地产' },
-  { id: 'basic_chem', name: '基础化工', color: '#38d9a9', weight: 0.05, cn: '基础化工' },
-  { id: 'defense', name: '国防军工', color: '#f04452', weight: 0.05, cn: '国防军工' },
-  { id: 'computer', name: '计算机', color: '#748ffc', weight: 0.10, cn: '计算机' },
-];
-
 // ─── 东财真实数据源：板块资金流 ───
 interface EMClistItem {
   f12?: string;
@@ -140,14 +127,14 @@ function buildCNSectorFlows(items: EMClistItem[]): SectorFlow[] {
       medium: +((it.f78 ?? 0) / YI).toFixed(2),
       small: +((it.f84 ?? 0) / YI).toFixed(2),
       source: 'eastmoney',
-      reading: eastmoneySectorReading(netFlow, pctChg),
+      reading: eastmoneySectorReading(netFlow),
     };
   });
   // 主力净流入为正的在前（资金流入板块），负的在后（资金流出板块）
   return flows.sort((a, b) => b.netFlow - a.netFlow);
 }
 
-function eastmoneySectorReading(netFlow: number, pctChg: number): string {
+function eastmoneySectorReading(netFlow: number): string {
   const signed = `${netFlow >= 0 ? '净流入' : '净流出'} ${Math.abs(netFlow).toFixed(1)} 亿`;
   if (netFlow > 50) return `${signed}，主力大举做多，板块领涨，趋势强势`;
   if (netFlow > 10) return `${signed}，资金明显回流，动能向上`;
@@ -276,12 +263,70 @@ async function fetchEastmoneyBreadth(): Promise<{ up: number; down: number; flat
   };
 }
 
+/** 腾讯行业榜 → 全市场资金全景：只有板块主力合计与板块涨跌数，家数/分单口径不可用。 */
+function buildTencentOverview(flows: SectorFlow[]): MarketCapitalOverview {
+  const totalMain = flows.reduce((sum, f) => sum + f.netFlow, 0);
+  const sectorUp = flows.filter((f) => f.pctChg > 0).length;
+  const sectorDown = flows.filter((f) => f.pctChg < 0).length;
+  const sectorFlat = flows.length - sectorUp - sectorDown;
+  const trend: 'up' | 'down' | 'flat' = totalMain > 1000 ? 'up' : totalMain < -500 ? 'down' : 'flat';
+  return {
+    totalMain: +totalMain.toFixed(1),
+    superLarge: 0,
+    large: 0,
+    medium: 0,
+    small: 0,
+    totalAmount: 0,
+    mainRatio: 0,
+    upCount: 0,
+    downCount: 0,
+    flatCount: 0,
+    source: 'tencent',
+    breadthBasis: 'sector',
+    sectorUp,
+    sectorDown,
+    trend,
+    reading: `腾讯 ${flows.length} 个行业：${sectorUp} 涨、${sectorDown} 跌、${sectorFlat} 平，主力净流入合计 ${totalMain.toFixed(0)} 亿。东财不可达，超大/大/中/小单与股票涨跌家数不可用。`,
+  };
+}
+
+/** 新浪板块 → 全市场资金全景：只有价格口径，主力净流入记为不可用。 */
+function buildSinaOverview(flows: SectorFlow[]): MarketCapitalOverview {
+  const sectorUp = flows.filter((f) => f.pctChg > 0).length;
+  const sectorDown = flows.filter((f) => f.pctChg < 0).length;
+  const sectorFlat = flows.length - sectorUp - sectorDown;
+  return {
+    totalMain: 0,
+    superLarge: 0,
+    large: 0,
+    medium: 0,
+    small: 0,
+    totalAmount: 0,
+    mainRatio: 0,
+    upCount: 0,
+    downCount: 0,
+    flatCount: 0,
+    source: 'sina',
+    breadthBasis: 'sector',
+    sectorUp,
+    sectorDown,
+    trend: 'flat',
+    reading: `新浪 ${flows.length} 个板块：${sectorUp} 涨、${sectorDown} 跌、${sectorFlat} 平。东财与腾讯均不可达，本页只有价格口径，主力净流入不可用。`,
+  };
+}
+
 // ─── CN 全市场资金全景（真实：板块汇总 + 涨跌家数） ───
 export async function fetchMarketCapitalOverview(market: Market = 'CN'): Promise<MarketCapitalOverview | null> {
   // CN：东财板块汇总 = 全市场主力净流入近似；涨跌家数为真实
   if (market === 'CN') {
     const items = await fetchEastmoneySectorList();
-    if (!items.length) return null;
+    if (!items.length) {
+      const tencent = await fetchTencentSectorFlows();
+      if (tencent.length) return buildTencentOverview(tencent);
+      const sina = await fetchSinaSectorFlows();
+      if (sina.length) return buildSinaOverview(sina);
+      return null;
+    }
     const sum = (get: (it: EMClistItem) => number | null | undefined) => items.reduce((s, it) => s + (get(it) ?? 0), 0);
     const totalMain = sum((it) => it.f62) / YI;
     const superLarge = sum((it) => it.f66) / YI;
@@ -290,8 +335,6 @@ export async function fetchMarketCapitalOverview(market: Market = 'CN'): Promise
     const small = sum((it) => it.f84) / YI;
     const totalAmount = sum((it) => it.f6) / YI;
     const breadth = await fetchEastmoneyBreadth();
-    const instFlow = superLarge + large; // 机构口径 ≈ 超大单+大单
-    const retailFlow = medium + small;   // 散户口径 ≈ 中单+小单
     const mainRatio = totalAmount > 0 ? (totalMain / totalAmount) * 100 : 0;
     const trend: 'up' | 'down' | 'flat' = totalMain > 1000 ? 'up' : totalMain < -500 ? 'down' : 'flat';
     const reading =
@@ -354,10 +397,16 @@ export async function fetchSectorFlows(market: Market = 'US'): Promise<{ flows: 
   if (market === 'CN') {
     const items = await fetchEastmoneySectorList();
     if (items.length) return { flows: buildCNSectorFlows(items), marketState };
-    console.log('[fundflow] 东财板块源失败，回退 CN 模型');
+    // 东财被网络重置时，用腾讯行业榜（含 5/20/60 日与主力净流入），再退新浪（仅价格）。
+    const tencent = await fetchTencentSectorFlows();
+    if (tencent.length) return { flows: tencent, marketState };
+    const sina = await fetchSinaSectorFlows();
+    if (sina.length) return { flows: sina, marketState };
+    console.log('[fundflow] 东财/腾讯/新浪板块均不可用，CN 资金流显示不可用');
+    return { flows: [], marketState };
   }
   const crai = await fetchConvexLatest('CONVEX_CRAI');
-  const bias = crai ?? (market === 'CN' ? 0.2 : 0.3);
+  const bias = crai ?? 0.3;
   const rng = seededRandom(todaySeed() * 13);
   return { flows: buildUSModelFlows(bias, rng), marketState };
 }
@@ -365,15 +414,19 @@ export async function fetchSectorFlows(market: Market = 'US'): Promise<{ flows: 
 // ─── 资金流全景 ───
 export async function fetchFundFlowOverview(market: Market = 'US'): Promise<FundFlowOverview> {
   const overview = await fetchMarketCapitalOverview(market);
-  if (market === 'CN' && overview && overview.source === 'eastmoney') {
+  if (
+    market === 'CN' &&
+    overview &&
+    (overview.source === 'eastmoney' || overview.source === 'tencent' || overview.source === 'sina')
+  ) {
     // 北向资金自 2024-09 起沪深港通改披露口径，不再实时公开，此处如实标注
     return {
       totalNetFlow: Math.round(overview.totalMain),
       northBoundFlow: 0,
-      institutionalFlow: Math.round(overview.superLarge + overview.large),
-      retailFlow: Math.round(overview.small),
+      institutionalFlow: Math.round((overview.superLarge ?? 0) + (overview.large ?? 0)),
+      retailFlow: Math.round(overview.small ?? 0),
       marginBalance: 0,
-      reading: `${overview.reading}。注：北向资金实时数据已停止公开披露（沪深港通调整口径），本页采用全市场主力资金口径。`,
+      reading: `${overview.reading}。注：北向资金实时数据已停止公开披露（沪深港通调整口径），本页采用板块主力口径。`,
     };
   }
 

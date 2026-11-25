@@ -14,7 +14,7 @@ export const CreditRateTable = memo(function CreditRateTable({ market }: Props) 
   return (
     <Panel title={title} badge={loading ? '加载中' : `${rows.length}项`}>
       <div className="overflow-x-auto">
-        <table className="w-full text-[11px]">
+        <table className="w-full text-[0.6875rem]">
           <thead>
             <tr className="text-[#636878] border-b border-[#1a1d26]">
               <th className="text-left py-1.5 font-medium">指标</th>
@@ -39,7 +39,7 @@ export const CreditRateTable = memo(function CreditRateTable({ market }: Props) 
           </tbody>
         </table>
       </div>
-      <div className="text-[10px] text-[#636878] mt-2">数据源: ConvexTrade (FRED / CBOE) · 每 5 分钟更新</div>
+      <div className="text-[0.625rem] text-[#636878] mt-2">数据源: ConvexTrade (FRED / CBOE) · 每 5 分钟更新</div>
     </Panel>
   );
 });

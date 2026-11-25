@@ -264,8 +264,8 @@ const ALGO_RESULTS = [
 function InfoItem({ label, value, highlight }: { label: string; value: string; highlight?: boolean }) {
   return (
     <div className="flex flex-col">
-      <span className="text-[10px] text-[#636878]">{label}</span>
-      <span className={`text-[13px] font-['JetBrains_Mono',Consolas,monospace] tabular-nums ${highlight ? 'text-[#4078ff]' : 'text-[#d8dce6]'}`}>{value}</span>
+      <span className="text-[0.625rem] text-[#636878]">{label}</span>
+      <span className={`text-[0.8125rem] font-['JetBrains_Mono',Consolas,monospace] tabular-nums ${highlight ? 'text-[#4078ff]' : 'text-[#d8dce6]'}`}>{value}</span>
     </div>
   );
 }
@@ -528,7 +528,7 @@ export const StrategyChart = memo(function StrategyChart({ symbol, market }: Pro
   if (!symbol) {
     return (
       <Panel title={title}>
-        <div className="h-64 flex items-center justify-center text-[#636878] text-[12px]">
+        <div className="h-64 flex items-center justify-center text-[#636878] text-[0.75rem]">
           点击候选池任一行，立即查看该股K线盘面、买卖点信号与做T解读
         </div>
       </Panel>
@@ -538,7 +538,7 @@ export const StrategyChart = memo(function StrategyChart({ symbol, market }: Pro
   if (loading) {
     return (
       <Panel title={title} badge="加载中">
-        <div className="h-64 flex items-center justify-center text-[#636878] text-[12px]">
+        <div className="h-64 flex items-center justify-center text-[#636878] text-[0.75rem]">
           正在获取 {symbol} 行情数据...
         </div>
       </Panel>
@@ -556,10 +556,10 @@ export const StrategyChart = memo(function StrategyChart({ symbol, market }: Pro
         <Panel title={quote.name ? `${quote.name} (${quote.symbol})` : quote.symbol} badge={market === 'US' ? '美股' : 'A股'}>
           <div className="flex flex-wrap items-end gap-x-6 gap-y-2">
             <div>
-              <div className="text-[22px] font-['JetBrains_Mono',Consolas,monospace] font-semibold tabular-nums" style={{ color: directionColor(quote.change >= 0 ? 'up' : 'down') }}>
+              <div className="text-[1.375rem] font-['JetBrains_Mono',Consolas,monospace] font-semibold tabular-nums" style={{ color: directionColor(quote.change >= 0 ? 'up' : 'down') }}>
                 {quote.price.toFixed(2)}
               </div>
-              <div className="text-[11px] font-['JetBrains_Mono',Consolas,monospace] tabular-nums" style={{ color: directionColor(quote.change >= 0 ? 'up' : 'down') }}>
+              <div className="text-[0.6875rem] font-['JetBrains_Mono',Consolas,monospace] tabular-nums" style={{ color: directionColor(quote.change >= 0 ? 'up' : 'down') }}>
                 {quote.change >= 0 ? '+' : ''}{quote.change.toFixed(2)} ({quote.changePercent >= 0 ? '+' : ''}{quote.changePercent.toFixed(2)}%)
               </div>
             </div>
@@ -578,7 +578,7 @@ export const StrategyChart = memo(function StrategyChart({ symbol, market }: Pro
             <ChartHeader source={usingMock ? 'demo' : 'real'} note={usingMock ? '本地模拟K线' : 'Yahoo / 腾讯 / 东财行情'} />
             {phase ? (
               <span
-                className="px-2 py-0.5 rounded text-[10px] font-medium"
+                className="px-2 py-0.5 rounded text-[0.625rem] font-medium"
                 style={{ color: PHASE_STYLE[phase.kind].text, backgroundColor: PHASE_STYLE[phase.kind].bg, border: `1px solid ${PHASE_STYLE[phase.kind].border}` }}
               >
                 当前情绪周期：{phase.label}
@@ -588,7 +588,7 @@ export const StrategyChart = memo(function StrategyChart({ symbol, market }: Pro
         }
       >
         {/* 周期切换 */}
-        <div className="mb-2 flex items-center gap-4 text-[10px]">
+        <div className="mb-2 flex items-center gap-4 text-[0.625rem]">
           <div className="flex items-center gap-1">
             <span className="text-[#636878]">周期</span>
             {RANGES.map((r) => (
@@ -618,7 +618,7 @@ export const StrategyChart = memo(function StrategyChart({ symbol, market }: Pro
         {/* 当前情绪周期解读条 */}
         {phase && (
           <div
-            className="mb-2 rounded px-3 py-2 text-[10.5px] leading-relaxed"
+            className="mb-2 rounded px-3 py-2 text-[0.6563rem] leading-relaxed"
             style={{ backgroundColor: `${PHASE_STYLE[phase.kind].bg}`, border: `1px solid ${PHASE_STYLE[phase.kind].border}` }}
           >
             <span style={{ color: PHASE_STYLE[phase.kind].text }} className="font-medium">{phase.label} &nbsp;</span>
@@ -635,27 +635,27 @@ export const StrategyChart = memo(function StrategyChart({ symbol, market }: Pro
           <div className="mt-2 p-2.5 bg-[rgba(64,120,255,0.06)] border border-[rgba(64,120,255,0.18)] rounded">
             <div className="flex items-center gap-2 mb-1">
               <span
-                className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${selectedSignal.type === 'buy' ? 'bg-[rgba(12,166,120,0.15)] text-[#0ca678]' : 'bg-[rgba(240,68,82,0.15)] text-[#f04452]'}`}
+                className={`px-1.5 py-0.5 rounded text-[0.625rem] font-medium ${selectedSignal.type === 'buy' ? 'bg-[rgba(12,166,120,0.15)] text-[#0ca678]' : 'bg-[rgba(240,68,82,0.15)] text-[#f04452]'}`}
               >
                 {selectedSignal.type === 'buy' ? '买入信号' : '卖出信号'}
               </span>
-              <span className="text-[11px] font-mono text-[#d8dce6]">{selectedSignal.reason}</span>
+              <span className="text-[0.6875rem] font-mono text-[#d8dce6]">{selectedSignal.reason}</span>
             </div>
-            <div className="text-[10px] text-[#b0b5c0] leading-relaxed">
+            <div className="text-[0.625rem] text-[#b0b5c0] leading-relaxed">
               <span className="text-[#636878]">意义：</span>{selectedSignal.meaning}
             </div>
-            <div className="mt-1 text-[10px] text-[#b0b5c0] leading-relaxed">
+            <div className="mt-1 text-[0.625rem] text-[#b0b5c0] leading-relaxed">
               <span className="text-[#636878]">操作：</span>{selectedSignal.action}
             </div>
-            <div className="mt-1 flex gap-4 text-[10px] font-mono">
+            <div className="mt-1 flex gap-4 text-[0.625rem] font-mono">
               <span className="text-[#0ca678]">技术区间下沿 {fmtPrice(selectedSignal.stopLine)}</span>
               <span className="text-[#4078ff]">技术区间上沿 {fmtPrice(selectedSignal.targetLine)}</span>
             </div>
-            <div className="mt-1 text-[9.5px] text-[#636878]">以上区间为指标计算结果，不构成买卖建议或目标价。</div>
+            <div className="mt-1 text-[0.5938rem] text-[#636878]">以上区间为指标计算结果，不构成买卖建议或目标价。</div>
           </div>
         )}
 
-        <div className="mt-2 flex items-center gap-3 text-[11px] text-[#636878] flex-wrap">
+        <div className="mt-2 flex items-center gap-3 text-[0.6875rem] text-[#636878] flex-wrap">
           <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-[#f59e4b] inline-block" />MA10</span>
           <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-[#4078ff] inline-block" />MA30</span>
           <span className="flex items-center gap-1"><span className="w-3 h-px bg-[rgba(160,170,200,0.5)] inline-block" />布林中轨</span>
@@ -671,7 +671,7 @@ export const StrategyChart = memo(function StrategyChart({ symbol, market }: Pro
       {/* 算法对比面板 */}
       <Panel title="算法对比评估" badge="回测参考">
         <div className="overflow-x-auto">
-          <table className="w-full text-[11px]">
+          <table className="w-full text-[0.6875rem]">
             <thead>
               <tr className="text-[#636878] border-b border-[#1a1d26]">
                 <th className="text-left py-2 font-medium">算法</th>
@@ -680,7 +680,7 @@ export const StrategyChart = memo(function StrategyChart({ symbol, market }: Pro
                 <th className="text-right py-2 font-medium">最大回撤</th>
                 <th className="text-right py-2 font-medium">胜率</th>
                 <th className="text-right py-2 font-medium">信号数</th>
-                <th className="text-left py-2 font-medium w-[220px]">适用场景解读</th>
+                <th className="text-left py-2 font-medium w-[13.75rem]">适用场景解读</th>
               </tr>
             </thead>
             <tbody>
@@ -688,7 +688,7 @@ export const StrategyChart = memo(function StrategyChart({ symbol, market }: Pro
                 <tr key={algo.name} className={`border-b border-[rgba(255,255,255,0.02)] ${algo.rank === 1 ? 'bg-[rgba(64,120,255,0.05)]' : ''}`}>
                   <td className="py-2 font-medium text-[#d8dce6]">
                     {algo.name}
-                    {algo.rank === 1 && <span className="ml-1 text-[10.5px] text-[#4078ff]">★最优</span>}
+                    {algo.rank === 1 && <span className="ml-1 text-[0.6563rem] text-[#4078ff]">★最优</span>}
                   </td>
                   <td className="py-2 text-right font-mono" style={{ color: algo.annualReturn > 0 ? '#0ca678' : '#f04452' }}>
                     {algo.annualReturn > 0 ? '+' : ''}{algo.annualReturn}%
@@ -697,13 +697,13 @@ export const StrategyChart = memo(function StrategyChart({ symbol, market }: Pro
                   <td className="py-2 text-right font-mono text-[#f04452]">{algo.maxDrawdown}%</td>
                   <td className="py-2 text-right font-mono text-[#b0b5c0]">{algo.winRate}%</td>
                   <td className="py-2 text-right font-mono text-[#636878]">{algo.signalCount}</td>
-                  <td className="py-2 text-[#636878] text-[10px] leading-snug">{algo.advice}</td>
+                  <td className="py-2 text-[#636878] text-[0.625rem] leading-snug">{algo.advice}</td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
-        <div className="mt-2 text-[11px] text-[#636878]">
+        <div className="mt-2 text-[0.6875rem] text-[#636878]">
           注: 以上为历史回测模拟数据，非实盘结果。多因子共振 = 趋势+动量+波动+RSI+MA 五维加权，与上方选股引擎维度一致。
         </div>
       </Panel>

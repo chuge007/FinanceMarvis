@@ -9,7 +9,7 @@ export const OrderFlowTape = memo(function OrderFlowTape() {
   return (
     <Panel title="逐笔大单流" badge={`${ticks.length}笔`}>
       <div className="overflow-y-auto" style={{ maxHeight: 240 }}>
-        <table className="w-full text-[10px]">
+        <table className="w-full text-[0.625rem]">
           <thead className="sticky top-0 bg-[#0f1118]">
             <tr className="text-[#636878] border-b border-[#1a1d26]">
               <th className="text-left py-1 font-medium">时间</th>

@@ -69,11 +69,11 @@ export const VolatilityPanel = memo(function VolatilityPanel({ market }: Props) 
           { label: 'MOVE 趋势', values: data.moveSparkline, color: '#f04452' },
         ].map((s) => (
           <div key={s.label}>
-            <div className="text-[10px] text-[#636878] mb-1">{s.label}</div>
+            <div className="text-[0.625rem] text-[#636878] mb-1">{s.label}</div>
             {s.values.length >= 2 ? (
               <Sparkline data={s.values} width={150} height={32} color={s.color} />
             ) : (
-              <div className="h-[32px] flex items-center text-[9.5px] text-[#4d5364]">暂无真实序列</div>
+              <div className="h-[2rem] flex items-center text-[0.5938rem] text-[#4d5364]">暂无真实序列</div>
             )}
           </div>
         ))}
@@ -84,7 +84,7 @@ export const VolatilityPanel = memo(function VolatilityPanel({ market }: Props) 
         how="VIX 看绝对水平，也看历史分位；SKEW >140 表示尾部看跌保护需求偏强。"
         pitfall="VVIX/SKEW 仅为当前点位，本地无历史序列；MOVE 无可靠免费源，显示“—”，不要用随机数代替。"
       />
-      <div className="mt-2 text-[10px] text-[#636878]">
+      <div className="mt-2 text-[0.625rem] text-[#636878]">
         {market === 'CN' ? '注意：本组为美股波动率指标，不代表 A 股波动率。' : ''}
         {' '}数据源：ConvexTrade / Yahoo Finance · VIX 序列 120 日，迷你图按相对首值绘制。
       </div>

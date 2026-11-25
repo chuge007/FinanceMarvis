@@ -27,12 +27,12 @@ export const TodayThree = memo(function TodayThree({ regime }: { regime: RegimeR
   const done = state.checked.filter(Boolean).length;
 
   return (
-    <Panel title="今日三件事" hint="计划 vs 执行 · 只存本机" extra={<span className="text-[10px] text-[#636878]">{todayKey()}</span>}>
+    <Panel title="今日三件事" hint="计划 vs 执行 · 只存本机" extra={<span className="text-[0.625rem] text-[#636878]">{todayKey()}</span>}>
       <div className="space-y-2">
         {items.map((text, i) => (
           <label
             key={i}
-            className="flex gap-2.5 border border-[#1a1d26] rounded-[4px] px-3 py-2.5 cursor-pointer hover:bg-[rgba(255,255,255,0.02)]"
+            className="flex gap-2.5 border border-[#1a1d26] rounded-[0.25rem] px-3 py-2.5 cursor-pointer hover:bg-[rgba(255,255,255,0.02)]"
             style={{ background: state.checked[i] ? 'rgba(12,166,120,0.05)' : 'rgba(255,255,255,0.015)' }}
           >
             <input
@@ -42,8 +42,8 @@ export const TodayThree = memo(function TodayThree({ regime }: { regime: RegimeR
               className="mt-0.5 accent-[#0ca678]"
             />
             <span>
-              <span className="block text-[11px] font-bold text-[#d8dce6] mb-1">{TITLES[i]}</span>
-              <span className="block text-[11px] leading-relaxed" style={{ color: state.checked[i] ? '#636878' : '#b0b5c0' }}>
+              <span className="block text-[0.6875rem] font-bold text-[#d8dce6] mb-1">{TITLES[i]}</span>
+              <span className="block text-[0.6875rem] leading-relaxed" style={{ color: state.checked[i] ? '#636878' : '#b0b5c0' }}>
                 {text}
               </span>
             </span>
@@ -52,13 +52,13 @@ export const TodayThree = memo(function TodayThree({ regime }: { regime: RegimeR
       </div>
 
       {regime && (
-        <p className="text-[10px] leading-relaxed text-[#636878] mt-3 border-t border-[#1a1d26] pt-2">
+        <p className="text-[0.625rem] leading-relaxed text-[#636878] mt-3 border-t border-[#1a1d26] pt-2">
           风险预算：{regime.riskBudget}
         </p>
       )}
 
       <div
-        className="mt-3 rounded-[4px] px-3 py-2 text-[11px] leading-relaxed"
+        className="mt-3 rounded-[0.25rem] px-3 py-2 text-[0.6875rem] leading-relaxed"
         style={{ background: done === 3 ? 'rgba(12,166,120,0.08)' : 'rgba(247,212,76,0.07)', color: done === 3 ? '#0ca678' : '#f7d44c' }}
       >
         {done === 3
@@ -66,7 +66,7 @@ export const TodayThree = memo(function TodayThree({ regime }: { regime: RegimeR
           : `还有 ${3 - done} 项未确认。刻意保留一步「隔夜再决定」，用来对抗追涨杀跌与过度交易；未完成前不建议新增敞口。`}
       </div>
 
-      <p className="text-[10px] text-[#636878] mt-3">
+      <p className="text-[0.625rem] text-[#636878] mt-3">
         更完整的下单前检查清单、仓位计算与复盘记录在「纪律复盘」页。勾选状态按日期保存，只存本机浏览器。
       </p>
     </Panel>

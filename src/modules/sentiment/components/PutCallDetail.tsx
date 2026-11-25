@@ -18,13 +18,13 @@ const compact = (n: number) => new Intl.NumberFormat('zh-CN', {
 function VolumeRow({ label, value }: { label: string; value: OptionVolumeOI | null }) {
   return (
     <div>
-      <div className="text-[9.5px] text-[#636878] mb-0.5">{label}</div>
+      <div className="text-[0.5938rem] text-[#636878] mb-0.5">{label}</div>
       {value ? (
-        <div className="text-[10px] font-['JetBrains_Mono',Consolas,monospace] text-[#b0b5c0] tabular-nums">
+        <div className="text-[0.625rem] font-['JetBrains_Mono',Consolas,monospace] text-[#b0b5c0] tabular-nums">
           总 {compact(value.total)} · C {compact(value.call)} / P {compact(value.put)} · P/C {value.putCallRatio?.toFixed(2) ?? '—'}
         </div>
       ) : (
-        <div className="text-[10px] text-[#636878]">—</div>
+        <div className="text-[0.625rem] text-[#636878]">—</div>
       )}
     </div>
   );
@@ -44,21 +44,21 @@ export const PutCallDetail = memo(function PutCallDetail() {
         <div className="grid grid-cols-3 gap-2">
           {data.items.map((item) => (
             <div key={item.key} className="bg-[rgba(255,255,255,0.02)] rounded p-2" title={item.officialName}>
-              <div className="text-[9.5px] text-[#636878] mb-0.5">{item.label}</div>
+              <div className="text-[0.5938rem] text-[#636878] mb-0.5">{item.label}</div>
               <div
-                className="text-[12px] font-['JetBrains_Mono',Consolas,monospace] tabular-nums"
+                className="text-[0.75rem] font-['JetBrains_Mono',Consolas,monospace] tabular-nums"
                 style={{ color: READING_COLOR[item.reading] }}
               >
                 {item.value !== null ? item.value.toFixed(2) : '—'}
               </div>
-              <div className="text-[9px] text-[#636878] mt-0.5">
+              <div className="text-[0.5625rem] text-[#636878] mt-0.5">
                 {item.reading}{item.norm ? ` · 常态 ${item.norm[0]}–${item.norm[1]}` : ''}
               </div>
             </div>
           ))}
         </div>
       ) : (
-        <div className="h-16 flex items-center justify-center text-[10px] text-[#636878]">
+        <div className="h-16 flex items-center justify-center text-[0.625rem] text-[#636878]">
           CBOE 数据暂不可用，未展示模拟值
         </div>
       )}

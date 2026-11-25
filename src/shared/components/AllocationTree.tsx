@@ -19,7 +19,7 @@ export const AllocationTree = memo(function AllocationTree({ plan }: { plan: Pla
       hint="宽度=金额"
       extra={<ChartHeader source="rule" note="按公开规则推算，非投资建议" />}
     >
-      <div className="text-[10px] text-[#636878] mb-1">
+      <div className="text-[0.625rem] text-[#636878] mb-1">
         可投资资产 {money(plan.totalAssets)} · 规则推算，不是预测
       </div>
       <div className="space-y-1.5">
@@ -27,15 +27,15 @@ export const AllocationTree = memo(function AllocationTree({ plan }: { plan: Pla
           const pct = (b.amount / total) * 100;
           return (
             <div key={b.key}>
-              <div className="flex items-center justify-between text-[10px]">
+              <div className="flex items-center justify-between text-[0.625rem]">
                 <span className="text-[#b0b5c0] truncate">{b.name.replace(/^[①②③④]\s*/, '')}</span>
                 <span className="tabular-nums text-[#636878] shrink-0">{money(b.amount)} · {pct.toFixed(1)}%</span>
               </div>
-              <div className="mt-0.5 h-3 w-full rounded-[2px] bg-[#1a1d26] overflow-hidden">
+              <div className="mt-0.5 h-3 w-full rounded-[0.125rem] bg-[#1a1d26] overflow-hidden">
                 <div className="h-full" style={{ width: `${pct}%`, background: BUCKET_COLOR[b.key], opacity: 0.85 }} />
               </div>
               {b.key === 'long' && b.amount > 0 && (
-                <div className="ml-4 mt-1 flex h-2 w-[calc(100%-1rem)] overflow-hidden rounded-[2px] bg-[#14161d]">
+                <div className="ml-4 mt-1 flex h-2 w-[calc(100%-1rem)] overflow-hidden rounded-[0.125rem] bg-[#14161d]">
                   {[
                     { p: plan.equityPct, c: '#f04452' },
                     { p: plan.bondPct, c: '#4078ff' },

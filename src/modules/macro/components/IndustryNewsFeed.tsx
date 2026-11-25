@@ -30,21 +30,21 @@ export const IndustryNewsFeed = memo(function IndustryNewsFeed({ market }: Props
       <div className="space-y-0">
         {items.map((item) => (
           <div key={item.id} className="flex items-start gap-2 py-1.5 border-b border-[rgba(255,255,255,0.02)] last:border-0">
-            <span className="text-[10px] font-['JetBrains_Mono',Consolas,monospace] text-[#636878] w-9 shrink-0 tabular-nums pt-0.5">
+            <span className="text-[0.625rem] font-['JetBrains_Mono',Consolas,monospace] text-[#636878] w-9 shrink-0 tabular-nums pt-0.5">
               {item.time}
             </span>
             <span
-              className="text-[10.5px] px-1.5 py-0.5 rounded font-medium shrink-0 mt-0.5"
+              className="text-[0.6563rem] px-1.5 py-0.5 rounded font-medium shrink-0 mt-0.5"
               style={{ backgroundColor: `${TAG_COLORS[item.tag]}20`, color: TAG_COLORS[item.tag] }}
             >
               {TAG_NAMES[item.tag] || item.tag}
             </span>
-            <span className="text-[11px] text-[#b0b5c0] leading-relaxed flex-1">{item.content}</span>
-            <span className="text-[10.5px] text-[#636878] px-1 py-0.5 bg-[#1a1d26] rounded shrink-0 mt-0.5">{item.impact}</span>
+            <span className="text-[0.6875rem] text-[#b0b5c0] leading-relaxed flex-1">{item.content}</span>
+            <span className="text-[0.6563rem] text-[#636878] px-1 py-0.5 bg-[#1a1d26] rounded shrink-0 mt-0.5">{item.impact}</span>
           </div>
         ))}
       </div>
-      <div className="text-[11px] text-[#636878] mt-2">
+      <div className="text-[0.6875rem] text-[#636878] mt-2">
         数据源: {isRealtime ? '东方财富快讯 · 实时抓取' : '本地实时研报快照'} · 每 30 秒更新 · 末列=影响层面 · {market === 'CN' ? 'A股视角' : '美股视角'}
       </div>
     </Panel>

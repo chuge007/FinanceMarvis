@@ -40,6 +40,34 @@ npm run serve        # 启动生产服务，默认 http://localhost:8080
 | /eastmoney-kline | push2his.eastmoney.com | 东财 K线兜底 |
 | /eastmoney-quote | push2.eastmoney.com | 东财实时报价 |
 
+## 内置 AI 网关（/ai）
+
+页面右上角「AI 分析」把当前已抓到的风险体制、环境指标、结构与网页快讯交给模型做总结。
+浏览器不直连上游模型，统一走同域接口，由本服务转发（`server/ai-gateway.mjs`）：
+
+| 前端路径 | 方法 | 作用 |
+|---|---|---|
+| /ai/config | GET | 返回服务端是否已统一配置模型（不回显 Key） |
+| /ai/models | GET | 代拉上游 `/models`，供设置面板选模型 |
+| /ai/chat | POST | 转发到上游 `/chat/completions`，SSE 原样回传 |
+
+凭证两种来源，优先级从高到低：
+
+1. **服务端环境变量**（部署方统一提供，使用者打开即用，本地无需配置）：
+
+```powershell
+$env:AI_BASE_URL='https://tokenhub.tencentmaas.com/plan/v3'
+$env:AI_API_KEY='sk-tp-xxx'
+$env:AI_MODEL='你的模型名'
+npm run serve
+```
+
+2. **使用者在界面里自填**：存本机 localStorage，随请求头 `x-ai-base / x-ai-key / x-ai-model` 带过来，服务端不落盘。
+   设置 `AI_BASE_URL` 后请求头会被忽略，避免公网部署时被改成任意内网地址。
+
+若本机跑着 codebuddy2api，Base URL 填 `http://127.0.0.1:8001/v1` 即可直接用 CodeBuddy 账号里的模型
+（模型名以 `/ai/models` 返回为准）。`npm run dev` 下同样的路由由 `vite.config.ts` 的插件接管，无需另起后端。
+
 ## 前端代理模式开关（src/services/api.ts / macro.ts）
 
 - 默认（推荐）：构建与运行时都走同域相对路径 `/{x}`，由本服务转发。

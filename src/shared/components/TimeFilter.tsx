@@ -12,7 +12,7 @@ export const TimeFilter = memo(function TimeFilter() {
         <button
           key={tf}
           onClick={() => setTimeframe(tf as TimeFrame)}
-          className={`text-[10.5px] px-2.5 py-1 rounded font-medium transition-colors ${
+          className={`text-[0.6563rem] px-2.5 py-1 rounded font-medium transition-colors ${
             timeframe === tf
               ? 'bg-[#4078ff] text-white'
               : 'bg-[rgba(255,255,255,0.03)] text-[#636878] hover:text-[#b0b5c0]'

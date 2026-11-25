@@ -7,9 +7,11 @@
  *  3. 数据缺失就显示缺失并降低置信度，绝不编造；
  *  4. 输出是「风险预算倾向」而非买卖建议，且不预测收益。
  *
- * 数据源：ConvexTrade（/convex 同域转发，真实 FRED/CBOE 序列）+ alternative.me 恐惧贪婪指数。
+ * 数据源：FRED 官方 CSV（/fred 同域转发，免 key）+ Yahoo 同口径兜底 + alternative.me 恐惧贪婪指数。
  */
-import { convexApi, fngApi } from '../../../services/api';
+import { convexApi, fngApi, fetchStockCandles } from '../../../services/api';
+import { fetchFredSeries } from '../../../services/fred';
+import { canRequest, recordFailure, recordSuccess } from '../../../shared/utils/circuitBreaker';
 import { clamp, percentileOf, zScore, trendSlope, toYearOverYear, daysSince, rollingZScores } from '../../../shared/utils/seriesStats';
 
 export type Phase = '领先' | '同步' | '滞后' | '情绪·同步';
@@ -151,20 +153,76 @@ export interface RhythmSnapshot {
 // 独立缓存：避开 services/api.ts 中按 seriesId 缓存短序列（limit=2）造成的污染
 const cache = new Map<string, { ts: number; data: SeriesPoint[] }>();
 
-async function loadConvex(id: string, limit: number): Promise<SeriesPoint[]> {
+/**
+ * 上游兜底：ConvexTrade 不可达时，用 Yahoo 的同口径序列补齐。
+ * 只对“同一标的、同一口径”的序列做兜底，绝不把不同指标改名冒充。
+ *  - VIXCLS  ← ^VIX
+ *  - DGS10   ← ^TNX / 10（Yahoo 的 ^TNX 是收益率 ×100 报价）
+ */
+const YAHOO_FALLBACK: Record<string, { symbol: string; scale: number }> = {
+  VIXCLS: { symbol: '%5EVIX', scale: 1 },
+  DGS10: { symbol: '%5ETNX', scale: 0.1 },
+};
+
+async function loadYahooFallback(id: string, limit: number): Promise<SeriesPoint[]> {
+  const cfg = YAHOO_FALLBACK[id];
+  if (!cfg) return [];
+  try {
+    const candles = await fetchStockCandles(cfg.symbol, 'US', '2y', '1d');
+    return candles
+      .filter((c) => Number.isFinite(c.close) && c.close > 0)
+      .slice(-limit)
+      .map((c) => ({ date: c.time, value: c.close * cfg.scale }));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 取一条宏观序列。
+ *
+ * 主链路换成 FRED 官方 CSV 直链（免 key、单次请求、不依赖出海代理），
+ * 只有 FRED 也失败时才走 Yahoo 同口径兜底（仅 VIXCLS / DGS10 有对应标的）。
+ * 这样「ConvexTrade 超时 10s + 串行兜底 7s」那条最慢的路径被彻底移除。
+ */
+async function loadSeries(id: string, limit: number): Promise<SeriesPoint[]> {
   const key = `${id}:${limit}`;
   const hit = cache.get(key);
   if (hit && Date.now() - hit.ts < 60_000) return hit.data;
+
+  // 主链路回到 ConvexTrade：它在多数家庭网络下经本机代理可通，
+  // 而 FRED 官方站在部分网络完全不可达（实测 15s 超时），当主链路会导致「全缺」。
+  const viaConvex = await loadConvexMirror(id, limit);
+  if (viaConvex.length) {
+    cache.set(key, { ts: Date.now(), data: viaConvex });
+    return viaConvex;
+  }
+
+  const arr = await fetchFredSeries(id, limit);
+  if (arr.length) {
+    cache.set(key, { ts: Date.now(), data: arr });
+    return arr;
+  }
+
+  const fb = await loadYahooFallback(id, limit);
+  cache.set(key, { ts: Date.now(), data: fb });
+  return fb;
+}
+
+/** 兜底镜像：ConvexTrade 的 FRED 副本，超时压到 3s，失败立刻放弃。 */
+async function loadConvexMirror(id: string, limit: number): Promise<SeriesPoint[]> {
+  if (!canRequest('convex-mirror')) return [];
   try {
-    const { data } = await convexApi.get(`/data/${id}`, { params: { limit, format: 'json' }, timeout: 10_000 });
+    const { data } = await convexApi.get(`/data/${id}`, { params: { limit, format: 'json' }, timeout: 3_000 });
     const arr: SeriesPoint[] = Array.isArray(data?.data)
       ? data.data
           .filter((p: { date?: string; value?: number }) => p && p.date && typeof p.value === 'number' && Number.isFinite(p.value))
           .map((p: { date: string; value: number }) => ({ date: String(p.date), value: Number(p.value) }))
       : [];
-    cache.set(key, { ts: Date.now(), data: arr });
+    recordSuccess('convex-mirror');
     return arr;
-  } catch {
+  } catch (err) {
+    recordFailure('convex-mirror', err instanceof Error ? err.message : '不可达');
     return [];
   }
 }
@@ -297,7 +355,7 @@ function buildRegime(indicators: IndicatorReading[]): RegimeResult {
 }
 
 export async function fetchRhythm(): Promise<RhythmSnapshot> {
-  const lists = await Promise.all(CONFIG.map((cfg) => (cfg.id === 'FG' ? loadFearGreed() : loadConvex(cfg.id, cfg.limit))));
+  const lists = await Promise.all(CONFIG.map((cfg) => (cfg.id === 'FG' ? loadFearGreed() : loadSeries(cfg.id, cfg.limit))));
   const series: Record<string, NormalizedSeries> = {};
 
   const indicators: IndicatorReading[] = CONFIG.map((cfg, idx) => {

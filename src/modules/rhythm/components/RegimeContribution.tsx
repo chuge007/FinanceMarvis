@@ -21,12 +21,12 @@ export const RegimeContribution = memo(function RegimeContribution({ snapshot }:
       extra={<ChartHeader source={snapshot ? 'real' : 'missing'} note="仅计入取到真实序列的指标" />}
     >
       {!scored.length || usedWeight <= 0 ? (
-        <div className="h-16 flex items-center justify-center text-[10.5px] text-[#636878]">
+        <div className="h-16 flex items-center justify-center text-[0.6563rem] text-[#636878]">
           真实指标不足，不做贡献分解。
         </div>
       ) : (
         <>
-          <div className="flex h-5 w-full overflow-hidden rounded-[3px] bg-[#1a1d26]">
+          <div className="flex h-5 w-full overflow-hidden rounded-[0.1875rem] bg-[#1a1d26]">
             {scored.map((item, i) => {
               const contribution = ((item.score as number) * item.weight) / usedWeight;
               return (
@@ -44,7 +44,7 @@ export const RegimeContribution = memo(function RegimeContribution({ snapshot }:
               const active = item.source === 'real' && item.score !== null;
               const contribution = active ? ((item.score as number) * item.weight) / usedWeight : null;
               return (
-                <div key={item.id} className="flex items-center justify-between text-[10px]">
+                <div key={item.id} className="flex items-center justify-between text-[0.625rem]">
                   <div className="flex items-center gap-1.5 min-w-0">
                     <span
                       className="w-2 h-2 rounded-sm shrink-0"

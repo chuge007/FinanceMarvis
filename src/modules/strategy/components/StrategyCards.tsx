@@ -167,7 +167,7 @@ export const StrategyCards = memo(function StrategyCards({ symbol, market }: Pro
   if (loading || !decision) {
     return (
       <Panel title={title}>
-        <div className="h-16 flex items-center justify-center text-[#636878] text-[12px]">信号计算中...</div>
+        <div className="h-16 flex items-center justify-center text-[#636878] text-[0.75rem]">信号计算中...</div>
       </Panel>
     );
   }
@@ -182,18 +182,18 @@ export const StrategyCards = memo(function StrategyCards({ symbol, market }: Pro
 
   return (
     <div className="space-y-2">
-      <div className="bg-[#0f1118] border border-[#1a1d26] rounded-[5px] p-3">
+      <div className="bg-[#0f1118] border border-[#1a1d26] rounded-[0.3125rem] p-3">
         <div className="flex items-center gap-3">
           <div className="w-14 h-14 rounded-full flex items-center justify-center" style={{ border: `3px solid ${color}` }}>
-            <span className="text-[18px] font-bold font-['JetBrains_Mono',Consolas,monospace]" style={{ color }}>{signal.overall}</span>
+            <span className="text-[1.125rem] font-bold font-['JetBrains_Mono',Consolas,monospace]" style={{ color }}>{signal.overall}</span>
           </div>
           <div className="flex-1">
             <div className="flex items-center gap-2">
-              <span className="text-[13px] text-[#d8dce6] font-medium">{title}</span>
+              <span className="text-[0.8125rem] text-[#d8dce6] font-medium">{title}</span>
               <Badge label={actionLabels[(decision as any).action]} type={(decision as any).action === 'buy' ? 'ok' : (decision as any).action === 'sell' ? 'warn' : 'info'} />
-              <span className="text-[11px]" style={{ color }}>{heatLabels[(decision as any).heat]}</span>
+              <span className="text-[0.6875rem]" style={{ color }}>{heatLabels[(decision as any).heat]}</span>
             </div>
-            <div className="text-[10.5px] text-[#b0b5c0] mt-1">{isStock ? stockScore?.summary : macroDecision?.summary ?? ''}</div>
+            <div className="text-[0.6563rem] text-[#b0b5c0] mt-1">{isStock ? stockScore?.summary : macroDecision?.summary ?? ''}</div>
           </div>
         </div>
 
@@ -217,8 +217,8 @@ export const StrategyCards = memo(function StrategyCards({ symbol, market }: Pro
               <div className="w-full h-2 bg-[#1a1d26] rounded-full mb-1 overflow-hidden">
                 <div className="h-full rounded-full transition-all duration-500" style={{ width: `${d.val}%`, backgroundColor: d.val >= 60 ? '#0ca678' : d.val >= 45 ? '#f59e4b' : '#f04452' }} />
               </div>
-              <div className="text-[10.5px] text-[#636878]">{d.label}</div>
-              <div className="text-[11px] font-mono text-[#b0b5c0]">{d.val}</div>
+              <div className="text-[0.6563rem] text-[#636878]">{d.label}</div>
+              <div className="text-[0.6875rem] font-mono text-[#b0b5c0]">{d.val}</div>
             </div>
           ))}
         </div>
@@ -226,14 +226,14 @@ export const StrategyCards = memo(function StrategyCards({ symbol, market }: Pro
 
       {isStock && stockScore && (
         <Panel title="综合解读（普通人视角）">
-          <div className="text-[12px] text-[#d8dce6] leading-relaxed">{stockScore.conclusion}</div>
+          <div className="text-[0.75rem] text-[#d8dce6] leading-relaxed">{stockScore.conclusion}</div>
         </Panel>
       )}
 
       <Panel title="操作建议">
         <ul className="space-y-1.5">
           {((decision as any).suggestions as string[]).map((s: string, i: number) => (
-            <li key={i} className="flex items-start gap-2 text-[11px] text-[#b0b5c0]">
+            <li key={i} className="flex items-start gap-2 text-[0.6875rem] text-[#b0b5c0]">
               <span className="text-[#4078ff] mt-0.5">•</span>
               {s}
             </li>

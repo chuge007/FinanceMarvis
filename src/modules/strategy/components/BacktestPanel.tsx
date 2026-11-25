@@ -164,9 +164,9 @@ function runClosedLoopBacktest(
 function KpiItem({ label, value, color }: { label: string; value: string; color?: string }) {
   return (
     <div className="flex flex-col">
-      <span className="text-[10px] text-[#636878]">{label}</span>
+      <span className="text-[0.625rem] text-[#636878]">{label}</span>
       <span
-        className="text-[13.5px] font-['JetBrains_Mono',Consolas,monospace] font-semibold tabular-nums"
+        className="text-[0.8438rem] font-['JetBrains_Mono',Consolas,monospace] font-semibold tabular-nums"
         style={{ color: color ?? '#d8dce6' }}
       >
         {value}
@@ -264,7 +264,7 @@ export const BacktestPanel = memo(function BacktestPanel({ symbol, market }: Pro
   if (!symbol) {
     return (
       <Panel title="选股 → 做T → 回测收益">
-        <div className="h-16 flex items-center justify-center text-[#8a8f9c] text-[12px]">
+        <div className="h-16 flex items-center justify-center text-[#8a8f9c] text-[0.75rem]">
           请先选定标的：在候选池点击一行，系统将用同一套K线信号做实盘回测
         </div>
       </Panel>
@@ -274,7 +274,7 @@ export const BacktestPanel = memo(function BacktestPanel({ symbol, market }: Pro
   if (!stats) {
     return (
       <Panel title="选股 → 做T → 回测收益" badge="回测中">
-        <div className="h-16 flex items-center justify-center text-[#8a8f9c] text-[12px]">
+        <div className="h-16 flex items-center justify-center text-[#8a8f9c] text-[0.75rem]">
           正在基于 {symbol} 历史K线执行做T策略回测...
         </div>
       </Panel>
@@ -299,19 +299,19 @@ export const BacktestPanel = memo(function BacktestPanel({ symbol, market }: Pro
       )}
       {/* 周期 + 策略模式 */}
       <div className="flex items-center gap-2 flex-wrap mb-2">
-        <span className="px-1.5 py-0.5 rounded text-[10px] font-medium" style={{ color: phStyle.text, backgroundColor: phStyle.bg }}>
+        <span className="px-1.5 py-0.5 rounded text-[0.625rem] font-medium" style={{ color: phStyle.text, backgroundColor: phStyle.bg }}>
           当前阶段 · {stats.phase.label}
         </span>
-        <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${stats.mode === 'long' ? 'text-[#4078ff] bg-[rgba(64,120,255,0.12)]' : 'text-[#f04452] bg-[rgba(240,68,82,0.12)]'}`}>
+        <span className={`px-1.5 py-0.5 rounded text-[0.625rem] font-medium ${stats.mode === 'long' ? 'text-[#4078ff] bg-[rgba(64,120,255,0.12)]' : 'text-[#f04452] bg-[rgba(240,68,82,0.12)]'}`}>
           {stats.mode === 'long' ? '正T策略（低吸高抛）' : '反T策略（高抛避险/做空）'}
         </span>
-        <span className="text-[10px] text-[#8a8f9c]">{stats.phase.hint}</span>
-        <span className="ml-auto text-[10px] text-[#636878]">信号规则与上方K线标注完全一致</span>
+        <span className="text-[0.625rem] text-[#8a8f9c]">{stats.phase.hint}</span>
+        <span className="ml-auto text-[0.625rem] text-[#636878]">信号规则与上方K线标注完全一致</span>
       </div>
 
       {/* 结论解读（利好/利空） */}
       <div
-        className="rounded px-3 py-2 mb-2 text-[11px] leading-relaxed"
+        className="rounded px-3 py-2 mb-2 text-[0.6875rem] leading-relaxed"
         style={{ backgroundColor: stats.mode === 'short' ? 'rgba(240,68,82,0.07)' : 'rgba(64,120,255,0.07)', border: `1px solid rgba(${stats.mode === 'short' ? '240,68,82' : '64,120,255'},0.18)` }}
       >
         <span className="font-medium" style={{ color: verdictCol }}>{stats.modeVerdict}</span>
@@ -334,7 +334,7 @@ export const BacktestPanel = memo(function BacktestPanel({ symbol, market }: Pro
 
       <div ref={chartRef} className="w-full mt-2" />
       <div ref={drawdownRef} className="w-full" />
-      <div className="mt-1 flex items-center gap-3 text-[11px] text-[#636878] flex-wrap">
+      <div className="mt-1 flex items-center gap-3 text-[0.6875rem] text-[#636878] flex-wrap">
         <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ backgroundColor: stats.mode === 'short' ? '#f04452' : '#4078ff' }} />策略净值（虚线=1.0 基准）</span>
         <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block bg-[#f04452]" />回撤（%）</span>
         <span>数据源: {usingMock ? '本地模拟K线' : `${market === 'CN' ? '腾讯行情日线' : 'Yahoo Finance'} 1y`}</span>
@@ -350,23 +350,23 @@ export const BacktestPanel = memo(function BacktestPanel({ symbol, market }: Pro
       {/* 买卖点信号明细（与K线图同源） */}
       {stats.signalsBrief.length > 0 && (
         <div className="mt-2">
-          <div className="text-[10px] text-[#d8dce6] font-medium mb-1.5">近期买卖点信号（点击K线图上的标记可看完整解读）</div>
+          <div className="text-[0.625rem] text-[#d8dce6] font-medium mb-1.5">近期买卖点信号（点击K线图上的标记可看完整解读）</div>
           <div className="space-y-1">
             {stats.signalsBrief.map((s, i) => (
               <div key={i} className="flex items-start gap-2 rounded bg-[#14161d] px-2 py-1" title={s.meaning}>
                 <span className={`mt-0.5 w-1.5 h-1.5 rounded-full shrink-0 ${s.type === 'buy' ? 'bg-[#f04452]' : 'bg-[#0ca678]'}`} />
-                <span className="text-[10px] font-mono text-[#b0b5c0] shrink-0">{s.time}</span>
-                <span className={`text-[10px] font-medium shrink-0 ${s.type === 'buy' ? 'text-[#f04452]' : 'text-[#0ca678]'}`}>
+                <span className="text-[0.625rem] font-mono text-[#b0b5c0] shrink-0">{s.time}</span>
+                <span className={`text-[0.625rem] font-medium shrink-0 ${s.type === 'buy' ? 'text-[#f04452]' : 'text-[#0ca678]'}`}>
                   {s.type === 'buy' ? '买' : '卖'}
                 </span>
-                <span className="text-[10px] text-[#a4a9b5] truncate">{s.reason}</span>
+                <span className="text-[0.625rem] text-[#a4a9b5] truncate">{s.reason}</span>
               </div>
             ))}
           </div>
         </div>
       )}
 
-      <div className="mt-1.5 text-[11px] text-[#636878] leading-relaxed">
+      <div className="mt-1.5 text-[0.6875rem] text-[#636878] leading-relaxed">
         {stats.mode === 'long'
           ? `回测规则：与K线图同一套信号（MA10/30 金叉死叉 + RSI(14)超买超卖 + 布林边际），上升/震荡期买入做多、卖出兑现，满仓进出。`
           : `回测规则：个股当前处${stats.phase.label}（美股支持选入下跌趋势个股），系统切为反T模式——卖出信号触发高抛/做空、买入信号触发回补接回。`}

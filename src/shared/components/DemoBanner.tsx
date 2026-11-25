@@ -10,14 +10,14 @@ export const DemoBanner = memo(function DemoBanner({
   children: React.ReactNode;
 }) {
   return (
-    <div className="rounded-[5px] border border-[rgba(155,110,251,0.4)] bg-[rgba(155,110,251,0.07)] p-3">
+    <div className="rounded-[0.3125rem] border border-[rgba(155,110,251,0.4)] bg-[rgba(155,110,251,0.07)] p-3">
       <div className="flex gap-2.5">
-        <span className="mt-0.5 shrink-0 rounded bg-[rgba(155,110,251,0.18)] px-1.5 py-0.5 text-[9.5px] font-bold text-[#b79bff]">
+        <span className="mt-0.5 shrink-0 rounded bg-[rgba(155,110,251,0.18)] px-1.5 py-0.5 text-[0.5938rem] font-bold text-[#b79bff]">
           演示数据
         </span>
         <div>
-          <div className="text-[11.5px] font-bold text-[#c9b3ff]">{title}</div>
-          <div className="mt-1 text-[10px] leading-relaxed text-[#b0b5c0]">{children}</div>
+          <div className="text-[0.7188rem] font-bold text-[#c9b3ff]">{title}</div>
+          <div className="mt-1 text-[0.625rem] leading-relaxed text-[#b0b5c0]">{children}</div>
         </div>
       </div>
     </div>

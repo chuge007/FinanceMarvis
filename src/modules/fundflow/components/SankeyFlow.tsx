@@ -13,11 +13,16 @@ import { useAppStore } from '../../../stores/useAppStore';
 interface SankeyNode { name: string; category: string }
 interface SankeyLink { source: number; target: number; value: number }
 
+/** 东财、腾讯、新浪都是真实板块数据；只有 model 是估算。 */
+function isRealSource(source?: string): boolean {
+  return source === 'eastmoney' || source === 'tencent' || source === 'sina';
+}
+
 export const SankeyFlowChart = memo(function SankeyFlowChart() {
   const containerRef = useRef<HTMLDivElement>(null);
   const market = useAppStore((s) => s.market);
   const isCN = market === 'CN';
-  const { data: sectors } = useSectorFlow();
+  const { data: sectors, loading: sectorsLoading } = useSectorFlow();
   const { data: overview } = useFundFlowOverview();
   const { data: moneyFlow } = useMoneyFlow();
   const [hoveredReason, setHoveredReason] = useState<string | null>(null);
@@ -39,7 +44,7 @@ export const SankeyFlowChart = memo(function SankeyFlowChart() {
     const shownCount = inflowSectors.length + outflowSectors.length;
 
     // ─── 只画真实板块净额，不再按写死系数推演“主力/散户”去向。 ───
-    const flowSource = sectors[0]?.source === 'eastmoney' ? 'real' : 'model';
+    const flowSource = isRealSource(sectors[0]?.source) ? 'real' : 'model';
     const nodes: SankeyNode[] = [
       ...inflowSectors.map(s => ({ name: s.name, category: 'sector' })),
       ...outflowSectors.map(s => ({ name: s.name, category: 'sector' })),
@@ -166,25 +171,25 @@ export const SankeyFlowChart = memo(function SankeyFlowChart() {
     const unitLabel = isCN ? '亿' : 'M';
 
     const attributionDiv = document.createElement('div');
-    attributionDiv.className = 'mt-3 space-y-1.5 text-[11px]';
+    attributionDiv.className = 'mt-3 space-y-1.5 text-[0.6875rem]';
     attributionDiv.innerHTML = `
       <div class="flex items-center gap-2 flex-wrap">
         <span class="font-medium ${netFlow > 0 ? 'text-[#f04452]' : 'text-[#0ca678]'}">
           ${netFlow > 0 ? '净流入' : '净流出'} ${Math.abs(Math.round(netFlow))}${unitLabel}
         </span>
-        ${!marketState.isOpen ? '<span class="bg-[#636878] text-[#0f1118] px-1 rounded text-[10.5px]">闭市</span>' : ''}
-        <span class="text-[#636878] text-[10.5px]">图上展示重点板块 ${shownCount}/${sectors.length}</span>
+        ${!marketState.isOpen ? '<span class="bg-[#636878] text-[#0f1118] px-1 rounded text-[0.6563rem]">闭市</span>' : ''}
+        <span class="text-[#636878] text-[0.6563rem]">图上展示重点板块 ${shownCount}/${sectors.length}</span>
       </div>
       <div class="text-[#636878] leading-relaxed">${trendReading}</div>
-      ${topInflow.length > 0 ? `<div class="text-[#f04452]">流入 Top: ${topInflow.map(s => s.name + '(+' + s.pctChg.toFixed(2) + '%)').join(' | ')}</div>` : ''}
+      ${topInflow.length > 0 ? `<div class="text-[#f04452]">流入 Top: ${topInflow.map(s => s.name + '(' + (s.pctChg >= 0 ? '+' : '') + s.pctChg.toFixed(2) + '%)').join(' | ')}</div>` : ''}
       ${topOutflow.length > 0 ? `<div class="text-[#0ca678]">流出 Top: ${topOutflow.map(s => s.name + '(' + s.pctChg.toFixed(2) + '%)').join(' | ')}</div>` : ''}
-      <div class="flex items-center gap-3 text-[10px] text-[#636878] flex-wrap">
+      <div class="flex items-center gap-3 text-[0.625rem] text-[#636878] flex-wrap">
         <span>图例：</span>
         <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 inline-block rounded-sm" style="background:#f04452"></span>净流入</span>
         <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 inline-block rounded-sm" style="background:#0ca678"></span>净流出</span>
         <span>| 连线越粗=资金额越大 · 悬停连线查看明细</span>
       </div>
-      <div class="text-[#636878] text-[10.5px]">数据源: ${flowSource === 'real' ? '东方财富 板块资金流（真实净额）' : '前端模型估算（无可验证真实分项）'} · 不再推演主力/散户资金去向</div>
+      <div class="text-[#636878] text-[0.6563rem]">数据源: ${flowSource === 'real' ? '东方财富 板块资金流（真实净额）' : '前端模型估算（无可验证真实分项）'} · 不再推演主力/散户资金去向</div>
     `;
     container.appendChild(attributionDiv);
 
@@ -195,11 +200,13 @@ export const SankeyFlowChart = memo(function SankeyFlowChart() {
       title="资金流向动态图"
       badge="桑基图"
       hint="只展示净流入 Top8 / 净流出 Top6 重点板块"
-      extra={<ChartHeader source={sectors[0]?.source === 'eastmoney' ? 'real' : 'model'} note="宽度=板块净额，不推演资金来源" />}
+      extra={<ChartHeader source={isRealSource(sectors[0]?.source) ? 'real' : 'model'} note="宽度=板块净额，不推演资金来源" />}
     >
       <div ref={containerRef} className="w-full" style={{ minHeight: 420 }}>
         {sectors.length === 0 && (
-          <div className="h-80 flex items-center justify-center text-[#636878] text-[12px]">加载资金流数据...</div>
+          <div className="h-80 flex items-center justify-center text-[#636878] text-[0.75rem]">
+            {sectorsLoading ? '加载资金流数据...' : '板块数据不可用（东财 / 腾讯 / 新浪均未返回）'}
+          </div>
         )}
       </div>
       <ChartInsight
@@ -208,7 +215,7 @@ export const SankeyFlowChart = memo(function SankeyFlowChart() {
         pitfall="本图不展示主力/散户拆分；美股板块净额来自模型估算，不能据线宽判断真实机构资金规模。"
       />
       {hoveredReason && (
-        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 bg-[#1a1d26] border border-[#2a2d3a] rounded px-3 py-1.5 text-[11px] text-[#d8dce6] z-50 shadow-lg pointer-events-none">
+        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 bg-[#1a1d26] border border-[#2a2d3a] rounded px-3 py-1.5 text-[0.6875rem] text-[#d8dce6] z-50 shadow-lg pointer-events-none">
           {hoveredReason}
         </div>
       )}

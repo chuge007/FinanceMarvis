@@ -32,3 +32,9 @@ temp_build_output.txt
 # Python
 __pycache__/
 *.pyc
+
+# Local agent state and ad-hoc screenshots
+.codebuddy/
+.workbuddy/
+before.png
+after133.png

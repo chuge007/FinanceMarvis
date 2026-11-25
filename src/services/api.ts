@@ -1,5 +1,6 @@
 import axios from 'axios';
 import type { DepthLevel } from '../types/fundflow';
+import { reportSource } from '../shared/utils/sourceHealth';
 
 // ─── fetch 统一超时兜底：行情源不可达时强制 reject，防 Promise 挂起导致加载卡死 ───
 function fetchJ(url: string, ms = 6000, headers?: Record<string, string>): Promise<Response> {
@@ -55,8 +56,10 @@ export async function fetchConvexSeries(seriesId: string, limit = 60): Promise<{
     });
     const result = data?.data ?? [];
     setCache(seriesId, result);
+    reportSource('convex', true);
     return result;
-  } catch {
+  } catch (err) {
+    reportSource('convex', false, err instanceof Error ? err.message : '宏观序列接口不可达');
     return [];
   }
 }

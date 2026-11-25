@@ -30,43 +30,43 @@ export const BullBearForce = memo(function BullBearForce({ market }: Props) {
         {dimensions.map((d) => (
           <div key={d.name}>
             <div className="flex items-center gap-2 mb-1">
-              <span className="text-[10px] text-[#d8dce6] w-16 shrink-0">{d.name}</span>
-              <div className="flex-1 flex h-[10px] rounded overflow-hidden">
+              <span className="text-[0.625rem] text-[#d8dce6] w-16 shrink-0">{d.name}</span>
+              <div className="flex-1 flex h-[0.625rem] rounded overflow-hidden">
                 <div style={{ width: `${d.bullPct}%` }} className="bg-[#f04452] transition-all duration-500" />
                 <div style={{ width: `${d.bearPct}%` }} className="bg-[#0ca678] transition-all duration-500" />
               </div>
-              <span className="text-[11px] font-['JetBrains_Mono',Consolas,monospace] w-16 text-right text-[#b0b5c0] whitespace-nowrap">
+              <span className="text-[0.6875rem] font-['JetBrains_Mono',Consolas,monospace] w-16 text-right text-[#b0b5c0] whitespace-nowrap">
                 {d.bullPct}% / {d.bearPct}%
               </span>
             </div>
-            <div className="text-[11px] text-[#636878] pl-[72px]">{d.meta}</div>
+            <div className="text-[0.6875rem] text-[#636878] pl-[4.5rem]">{d.meta}</div>
           </div>
         ))}
       </div>
       <div className="border-t border-[#1a1d26] pt-3">
-        <div className="flex items-center gap-2 text-[10px] text-[#d8dce6] font-medium mb-2">
+        <div className="flex items-center gap-2 text-[0.625rem] text-[#d8dce6] font-medium mb-2">
           综合研判
-          <span className="px-1.5 py-px rounded text-[11px] font-medium" style={{ color: v.color, backgroundColor: v.bg }}>
+          <span className="px-1.5 py-px rounded text-[0.6875rem] font-medium" style={{ color: v.color, backgroundColor: v.bg }}>
             {v.label} {v.label === '利好' ? '↑' : v.label === '利空' ? '↓' : '—'}
           </span>
         </div>
         <div className="grid grid-cols-2 gap-2 mb-2">
           <div className="bg-[rgba(240,68,82,0.04)] border border-[rgba(240,68,82,0.1)] rounded p-2">
-            <div className="text-[11px] text-[#f04452] mb-1 font-medium">多方因素（利好端）</div>
+            <div className="text-[0.6875rem] text-[#f04452] mb-1 font-medium">多方因素（利好端）</div>
             {conclusion.bulls.map((b, i) => (
-              <div key={i} className="text-[11px] text-[#b0b5c0] leading-relaxed">+ {b}</div>
+              <div key={i} className="text-[0.6875rem] text-[#b0b5c0] leading-relaxed">+ {b}</div>
             ))}
           </div>
           <div className="bg-[rgba(12,166,120,0.04)] border border-[rgba(12,166,120,0.1)] rounded p-2">
-            <div className="text-[11px] text-[#0ca678] mb-1 font-medium">空方因素（利空端）</div>
+            <div className="text-[0.6875rem] text-[#0ca678] mb-1 font-medium">空方因素（利空端）</div>
             {conclusion.bears.map((b, i) => (
-              <div key={i} className="text-[11px] text-[#b0b5c0] leading-relaxed">- {b}</div>
+              <div key={i} className="text-[0.6875rem] text-[#b0b5c0] leading-relaxed">- {b}</div>
             ))}
           </div>
         </div>
         <div className="bg-[rgba(64,120,255,0.04)] border border-[rgba(64,120,255,0.1)] rounded p-2">
-          <div className="text-[11px] text-[#4078ff] mb-0.5 font-medium">Verdict · 研判结论</div>
-          <div className="text-[10px] text-[#d8dce6] leading-relaxed">{conclusion.verdict}</div>
+          <div className="text-[0.6875rem] text-[#4078ff] mb-0.5 font-medium">Verdict · 研判结论</div>
+          <div className="text-[0.625rem] text-[#d8dce6] leading-relaxed">{conclusion.verdict}</div>
         </div>
       </div>
     </Panel>

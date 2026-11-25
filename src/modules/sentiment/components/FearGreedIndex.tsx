@@ -41,7 +41,7 @@ export const FearGreedIndexPanel = memo(function FearGreedIndexPanel() {
   if (loading || !data) {
     return (
       <Panel title={isCN ? 'A股情绪温度计' : 'CNN Fear & Greed'} badge="加载中">
-        <div className="h-24 flex items-center justify-center text-[#636878] text-[10px]">数据加载中...</div>
+        <div className="h-24 flex items-center justify-center text-[#636878] text-[0.625rem]">数据加载中...</div>
       </Panel>
     );
   }
@@ -63,7 +63,7 @@ export const FearGreedIndexPanel = memo(function FearGreedIndexPanel() {
       <div className="flex items-center gap-4 mb-3">
         <ValueDial value={data.value} color={color} />
         <div className="flex-1">
-          <div className="text-[10.5px] text-[#636878] mb-2">{data.subIndices.length}因子分解 · {new Date(data.timestamp).toLocaleDateString('zh-CN')}</div>
+          <div className="text-[0.6563rem] text-[#636878] mb-2">{data.subIndices.length}因子分解 · {new Date(data.timestamp).toLocaleDateString('zh-CN')}</div>
           {data.subIndices.map((f) => (
             <BarWithLabel
               key={f.key}
@@ -91,8 +91,8 @@ export const FearGreedIndexPanel = memo(function FearGreedIndexPanel() {
       {/* Trend sparkline */}
       {data.trend.length > 0 && (
         <div className="mt-2">
-          <div className="text-[10.5px] text-[#636878] mb-1">近 {data.trend.length} 日趋势</div>
-          <div className="flex items-end gap-[1px] h-8">
+          <div className="text-[0.6563rem] text-[#636878] mb-1">近 {data.trend.length} 日趋势</div>
+          <div className="flex items-end gap-[0.0625rem] h-8">
             {data.trend.map((p, i) => {
               const h = Math.max(4, (p.value / 100) * 32);
               const c = p.value >= 75 ? '#f04452' : p.value >= 55 ? '#f59e4b' :
@@ -100,7 +100,7 @@ export const FearGreedIndexPanel = memo(function FearGreedIndexPanel() {
               return (
                 <div
                   key={i}
-                  className="flex-1 rounded-[1px]"
+                  className="flex-1 rounded-[0.0625rem]"
                   style={{ height: h, backgroundColor: c, opacity: 0.8 }}
                   title={`${p.date}: ${p.value}`}
                 />
@@ -111,12 +111,12 @@ export const FearGreedIndexPanel = memo(function FearGreedIndexPanel() {
       )}
 
       {/* VIX + data source note */}
-      <div className="mt-2 p-2 bg-[rgba(64,120,255,0.05)] rounded-[3px]">
-        <div className="flex justify-between text-[10px] mb-1">
+      <div className="mt-2 p-2 bg-[rgba(64,120,255,0.05)] rounded-[0.1875rem]">
+        <div className="flex justify-between text-[0.625rem] mb-1">
           <span className="text-[#636878]">{isCN ? 'A股情绪解读' : 'VIX 即时值'}</span>
           <span className="text-[#b0b5c0] font-mono">{isCN ? stateLabel : (data.vix?.toFixed(1) ?? 'N/A')}</span>
         </div>
-        <div className="text-[10px] text-[#636878] mt-1">{sourceLine}</div>
+        <div className="text-[0.625rem] text-[#636878] mt-1">{sourceLine}</div>
       </div>
     </Panel>
   );

@@ -68,38 +68,38 @@ export const RegimeCard = memo(function RegimeCard({ snapshot, loading, onRefres
       extra={
         <button
           onClick={onRefresh}
-          className="text-[11px] px-2 py-1 rounded border border-[#1a1d26] text-[#b0b5c0] hover:bg-[rgba(255,255,255,0.04)]"
+          className="text-[0.6875rem] px-2 py-1 rounded border border-[#1a1d26] text-[#b0b5c0] hover:bg-[rgba(255,255,255,0.04)]"
         >
           {loading ? '计算中…' : '刷新'}
         </button>
       }
     >
       {loading && !snapshot ? (
-        <div className="py-8 text-center text-[12px] text-[#636878]">
+        <div className="py-8 text-center text-[0.75rem] text-[#636878]">
           正在读取 8 组真实历史序列并计算历史分位…
         </div>
       ) : !regime ? (
-        <div className="py-6 text-center text-[12px] text-[#f59e4b]">状态计算失败，请点击刷新重试。</div>
+        <div className="py-6 text-center text-[0.75rem] text-[#f59e4b]">状态计算失败，请点击刷新重试。</div>
       ) : (
         <div className="space-y-4">
           <div className="flex flex-wrap items-start gap-5">
-            <div className="min-w-[190px]">
-              <div className="text-[11px] text-[#636878] mb-1">风险偏好状态</div>
+            <div className="min-w-[11.875rem]">
+              <div className="text-[0.6875rem] text-[#636878] mb-1">风险偏好状态</div>
               <div className="flex items-center gap-2 flex-wrap">
-                <div className="text-[30px] leading-none font-bold" style={{ color }}>{regime.tone}</div>
+                <div className="text-[1.875rem] leading-none font-bold" style={{ color }}>{regime.tone}</div>
                 <ScoreGauge score={regime.score} color={color} />
               </div>
               <div className="mt-2">
                 <BarWithLabel label="数据置信度" pct={regime.confidence} color={color} maxPct={100} />
               </div>
-              <div className="text-[10px] text-[#636878] mt-1">
+              <div className="text-[0.625rem] text-[#636878] mt-1">
                 真实数据 {regime.available}/{regime.total} 项 · 最新观测 {regime.asOf ?? '—'}
               </div>
             </div>
-            <div className="flex-1 min-w-[280px]">
-              <p className="text-[13px] leading-relaxed text-[#d8dce6]">{regime.summary}</p>
+            <div className="flex-1 min-w-[17.5rem]">
+              <p className="text-[0.8125rem] leading-relaxed text-[#d8dce6]">{regime.summary}</p>
               {changed && (
-                <p className="text-[11px] mt-2" style={{ color: '#f7d44c' }}>
+                <p className="text-[0.6875rem] mt-2" style={{ color: '#f7d44c' }}>
                   状态切换：{previous?.date ?? '上次'} 的「{previous?.tone}」→ 今日「{regime.tone}」。
                   状态切换不等于必须立刻调仓，先按下面的确认条件核对。
                 </p>
@@ -107,23 +107,23 @@ export const RegimeCard = memo(function RegimeCard({ snapshot, loading, onRefres
               <div className="flex flex-wrap gap-2 mt-3">
                 <SourceBadge kind="real" text="仅用真实序列" />
                 <SourceBadge kind={regime.confidence >= 70 ? 'real' : 'rule'} text={`数据覆盖 ${regime.confidence}%`} />
-                <span className="text-[10px] text-[#636878]">计算于 {new Date(snapshot!.fetchedAt).toLocaleTimeString('zh-CN')}</span>
+                <span className="text-[0.625rem] text-[#636878]">计算于 {new Date(snapshot!.fetchedAt).toLocaleTimeString('zh-CN')}</span>
               </div>
             </div>
           </div>
 
           <div>
-            <div className="text-[11px] text-[#636878] mb-2">判断依据（按指标在历史序列中的相对位置）</div>
+            <div className="text-[0.6875rem] text-[#636878] mb-2">判断依据（按指标在历史序列中的相对位置）</div>
             <ul className="space-y-1.5">
               {regime.reasons.map((r, i) => (
-                <li key={i} className="text-[11px] leading-relaxed text-[#b0b5c0] flex gap-2">
+                <li key={i} className="text-[0.6875rem] leading-relaxed text-[#b0b5c0] flex gap-2">
                   <span style={{ color }}>·</span><span>{r}</span>
                 </li>
               ))}
             </ul>
           </div>
 
-          <p className="text-[10px] leading-relaxed text-[#636878] border-t border-[#1a1d26] pt-3">
+          <p className="text-[0.625rem] leading-relaxed text-[#636878] border-t border-[#1a1d26] pt-3">
             说明：状态由历史分位与方向的加权合成，属于「描述当前风险环境」，不预测涨跌、不保证收益；
             分位数受样本区间影响，月度指标与日度指标口径不同。数据有延迟，且上游可能临时不可用。
             本工具不构成投资建议。

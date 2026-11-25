@@ -27,20 +27,20 @@ export const RiskHeatmap = memo(function RiskHeatmap({ market }: Props) {
           return (
             <div
               key={item.id}
-              className={`rounded-[5px] p-2.5 border transition-colors ${kind !== 'real' ? 'border-dashed opacity-70' : ''}`}
+              className={`rounded-[0.3125rem] p-2.5 border transition-colors ${kind !== 'real' ? 'border-dashed opacity-70' : ''}`}
               style={{ backgroundColor: bg, borderColor: kind === 'real' ? border : 'rgba(155,110,251,0.45)' }}
             >
               <div className="flex items-center justify-between gap-1 mb-1">
                 <div className="flex items-center gap-1.5 min-w-0">
                   <span className="text-xs">{item.icon}</span>
-                  <span className="text-[10.5px] text-[#636878] uppercase truncate">{item.label}</span>
+                  <span className="text-[0.6563rem] text-[#636878] uppercase truncate">{item.label}</span>
                 </div>
                 <SourceBadge kind={kind} />
               </div>
-              <div className="text-[13px] font-['JetBrains_Mono',Consolas,monospace] font-semibold text-[#d8dce6] tabular-nums mb-1">
+              <div className="text-[0.8125rem] font-['JetBrains_Mono',Consolas,monospace] font-semibold text-[#d8dce6] tabular-nums mb-1">
                 {item.value}
               </div>
-              <div className="text-[10px] text-[#636878] leading-tight">{item.reading}</div>
+              <div className="text-[0.625rem] text-[#636878] leading-tight">{item.reading}</div>
             </div>
           );
         })}

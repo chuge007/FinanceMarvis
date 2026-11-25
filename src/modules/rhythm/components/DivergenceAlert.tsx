@@ -34,14 +34,14 @@ export const DivergenceAlert = memo(function DivergenceAlert({ snapshot }: Props
       {alerts.length ? (
         <div className="space-y-1.5">
           {alerts.map((a) => (
-            <div key={a} className="rounded px-3 py-2 text-[10.5px] text-[#f7d44c]"
+            <div key={a} className="rounded px-3 py-2 text-[0.6563rem] text-[#f7d44c]"
               style={{ background: 'rgba(247,212,76,0.06)', border: '1px solid rgba(247,212,76,0.18)' }}>
               {a}
             </div>
           ))}
         </div>
       ) : (
-        <div className="h-10 flex items-center justify-center text-[10.5px] text-[#636878]">
+        <div className="h-10 flex items-center justify-center text-[0.6563rem] text-[#636878]">
           未检测到显著背离（或真实序列不足）
         </div>
       )}

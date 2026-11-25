@@ -100,7 +100,7 @@ export const RiskTemperatureOverlay = memo(function RiskTemperatureOverlay({ sna
       hint="多指标同向才可信"
       extra={<ChartHeader source={seriesList.length ? 'real' : 'missing'} note="统一 Z 轴 · 实线=同步 虚线=领先 点线=滞后" />}
     >
-      <div className="mb-2 rounded px-3 py-2 text-[11px] leading-relaxed"
+      <div className="mb-2 rounded px-3 py-2 text-[0.6875rem] leading-relaxed"
         style={{ background: adverse >= 2 ? 'rgba(240,68,82,0.07)' : 'rgba(64,120,255,0.06)', border: '1px solid rgba(255,255,255,0.06)' }}>
         <span className="font-medium text-[#d8dce6]">
           {usable === 0 ? '真实序列不足，暂不判断。' : `${usable} 项中 ${adverse} 项处于风险偏高区间、${benign} 项偏低。`}
@@ -110,7 +110,7 @@ export const RiskTemperatureOverlay = memo(function RiskTemperatureOverlay({ sna
       {seriesList.length ? (
         <div style={{ height: 240 }}><canvas ref={canvasRef} /></div>
       ) : (
-        <div className="h-40 flex items-center justify-center text-[10.5px] text-[#636878]">真实序列不足，叠加图不可用</div>
+        <div className="h-40 flex items-center justify-center text-[0.6563rem] text-[#636878]">真实序列不足，叠加图不可用</div>
       )}
       <div className="mt-2">
         <ChartInsight

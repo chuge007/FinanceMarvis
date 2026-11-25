@@ -37,8 +37,8 @@ export const RhythmPage = memo(function RhythmPage() {
   return (
     <div className="space-y-3 p-3">
       <div>
-        <h2 className="text-[13px] font-bold text-[#d8dce6]">市场节奏 · 今天该怎么看待风险</h2>
-        <p className="text-[10px] text-[#636878] mt-0.5">
+        <h2 className="text-[0.8125rem] font-bold text-[#d8dce6]">市场节奏 · 今天该怎么看待风险</h2>
+        <p className="text-[0.625rem] text-[#636878] mt-0.5">
           结论先行：先看状态与置信度 → 再看领先/同步/滞后依据 → 最后才是动作与纪律。
         </p>
       </div>
@@ -68,7 +68,7 @@ export const RhythmPage = memo(function RhythmPage() {
       
       <PortfolioRecommendation />
 
-      <p className="text-center text-[10px] text-[#636878] pb-2">
+      <p className="text-center text-[0.625rem] text-[#636878] pb-2">
         StrategyLab · 市场节奏模块 · 真实历史序列 + 历史分位 / Z-score · 不预测涨跌，不构成投资建议
       </p>
     </div>

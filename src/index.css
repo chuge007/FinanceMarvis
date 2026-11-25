@@ -17,14 +17,24 @@
   --radius: 5px;
 }
 
+/*
+ * 只保留 box-sizing。这里不能再写 margin/padding: 0：
+ * 无层级（unlayered）规则的优先级高于 Tailwind 的 utilities 层，
+ * 会把全站的 padding / margin / space-y 工具类全部清空，
+ * 表现为「卡片贴着内容、页面没有间距」。
+ * Tailwind preflight 已在 base 层做过重置，无需重复。
+ */
 *,
 *::before,
 *::after {
   box-sizing: border-box;
-  margin: 0;
-  padding: 0;
 }
 
+/*
+ * 根字号即全局缩放基准：布局与字号全部走 rem（src 里的任意 px 已统一改成 rem），
+ * 所以只改这一处就能让整套界面随屏幕等比放大，且图表按真实尺寸重绘、不发虚。
+ * 运行时由 src/shared/utils/uiScale.ts 写入行内 font-size 覆盖这里的兜底值。
+ */
 html {
   font-size: 16px;
 }

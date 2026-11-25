@@ -71,27 +71,27 @@ export const BriefPage = memo(function BriefPage() {
     <div className="space-y-3 p-3">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-[14px] font-bold text-[#d8dce6]">今日作战简报</h2>
-          <p className="text-[10px] text-[#636878] mt-0.5">盘前 30 秒：体制 → 隔夜变化 → 背离 → 联动 → 你的地图</p>
+          <h2 className="text-[0.875rem] font-bold text-[#d8dce6]">今日作战简报</h2>
+          <p className="text-[0.625rem] text-[#636878] mt-0.5">盘前 30 秒：体制 → 隔夜变化 → 背离 → 联动 → 你的地图</p>
         </div>
         <div className="flex gap-2">
-          <button onClick={() => setTab('rhythm')} className="text-[11px] px-2 py-1 rounded border border-[#1a1d26] text-[#b0b5c0] hover:bg-[rgba(255,255,255,0.04)]">看完整分析</button>
-          <button onClick={() => setTab('discipline')} className="text-[11px] px-2 py-1 rounded bg-[#4078ff] text-white">记录今日决策</button>
+          <button onClick={() => setTab('rhythm')} className="text-[0.6875rem] px-2 py-1 rounded border border-[#1a1d26] text-[#b0b5c0] hover:bg-[rgba(255,255,255,0.04)]">看完整分析</button>
+          <button onClick={() => setTab('discipline')} className="text-[0.6875rem] px-2 py-1 rounded bg-[#4078ff] text-white">记录今日决策</button>
         </div>
       </div>
 
       <Panel title="一句话" hint="只读，不给买卖点" extra={<ChartHeader source={regime ? 'real' : 'missing'} note={last?.date ?? ''} />}>
         {loading && !regime ? (
-          <div className="py-6 text-center text-[11px] text-[#636878]">正在读取真实序列…</div>
+          <div className="py-6 text-center text-[0.6875rem] text-[#636878]">正在读取真实序列…</div>
         ) : !regime || regime.confidence === 0 ? (
-          <div className="py-6 text-center text-[11px] text-[#f59e4b]">真实数据不可用，今日不给判断。</div>
+          <div className="py-6 text-center text-[0.6875rem] text-[#f59e4b]">真实数据不可用，今日不给判断。</div>
         ) : (
           <div className="space-y-2">
-            <div className="text-[15px] font-bold text-[#d8dce6]">
+            <div className="text-[0.9375rem] font-bold text-[#d8dce6]">
               市场体制：{regime.tone} · 综合分 {regime.score} · 置信度 {regime.confidence}%
             </div>
-            <div className="text-[11px] text-[#b0b5c0] leading-relaxed">{regime.riskBudget}</div>
-            <div className="text-[10.5px] text-[#636878]">你的地图建议：维持既定框架；体制只调整风险预算，不产生买卖信号。</div>
+            <div className="text-[0.6875rem] text-[#b0b5c0] leading-relaxed">{regime.riskBudget}</div>
+            <div className="text-[0.6563rem] text-[#636878]">你的地图建议：维持既定框架；体制只调整风险预算，不产生买卖信号。</div>
           </div>
         )}
       </Panel>
@@ -101,15 +101,15 @@ export const BriefPage = memo(function BriefPage() {
           <div className="grid grid-cols-4 gap-2">
             {overnight.map((r) => (
               <div key={r.label} className="rounded border border-[#1a1d26] bg-[rgba(255,255,255,0.02)] p-2">
-                <div className="text-[10px] text-[#636878]">{r.label}</div>
-                <div className="text-[13px] font-mono text-[#d8dce6] tabular-nums">{r.value}</div>
+                <div className="text-[0.625rem] text-[#636878]">{r.label}</div>
+                <div className="text-[0.8125rem] font-mono text-[#d8dce6] tabular-nums">{r.value}</div>
               </div>
             ))}
           </div>
         ) : (
-          <div className="text-[10.5px] text-[#636878]">真实序列不足，无法计算隔夜变化。</div>
+          <div className="text-[0.6563rem] text-[#636878]">真实序列不足，无法计算隔夜变化。</div>
         )}
-        <div className="mt-2 text-[10.5px] text-[#b0b5c0]">
+        <div className="mt-2 text-[0.6563rem] text-[#b0b5c0]">
           股债/信用联动：VIX 与 HY OAS 近 60 日相关性 {correlation === null ? '—' : correlation.toFixed(2)}
           {correlation !== null && correlation > 0.3 ? '（同向恶化风险上升）' : ''}
         </div>
@@ -120,12 +120,12 @@ export const BriefPage = memo(function BriefPage() {
 
       <Panel title="你的地图" hint="战略层仍在投资地图">
         {rebalanceGap ? (
-          <div className="text-[11px] text-[#b0b5c0] leading-relaxed">
+          <div className="text-[0.6875rem] text-[#b0b5c0] leading-relaxed">
             当前权益实际占比 {fmt(rebalanceGap.actual)}%，目标 {rebalanceGap.target}%，偏离 {fmt(rebalanceGap.gap)} 个百分点。
             详细再平衡清单请到「纪律复盘」。
           </div>
         ) : (
-          <div className="text-[11px] text-[#636878]">尚未读取到持仓，先到「持仓跟踪」录入后再看偏离。</div>
+          <div className="text-[0.6875rem] text-[#636878]">尚未读取到持仓，先到「持仓跟踪」录入后再看偏离。</div>
         )}
       </Panel>
     </div>

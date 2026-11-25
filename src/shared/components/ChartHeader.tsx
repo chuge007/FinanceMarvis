@@ -14,7 +14,7 @@ export const ChartHeader = memo(function ChartHeader({
   source, sourceText, asOf, note, className = '',
 }: ChartHeaderProps) {
   return (
-    <div className={`flex flex-wrap items-center gap-x-2 gap-y-1 text-[9.5px] text-[#636878] ${className}`}>
+    <div className={`flex flex-wrap items-center gap-x-2 gap-y-1 text-[0.5938rem] text-[#636878] ${className}`}>
       <SourceBadge kind={source} text={sourceText} />
       {asOf && <span>截至 {asOf}</span>}
       {note && <span className="text-[#4d5364]">{note}</span>}

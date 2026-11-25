@@ -265,11 +265,11 @@ export const EventLinkageFlow = memo(function EventLinkageFlow({ module }: Event
     : '数据加载中...';
 
   return (
-    <div className="bg-[#0f1118] border border-dashed border-[rgba(155,110,251,0.45)] rounded-[5px] p-3">
+    <div className="bg-[#0f1118] border border-dashed border-[rgba(155,110,251,0.45)] rounded-[0.3125rem] p-3">
       <div className="flex items-center justify-between mb-2">
-        <div className="text-[10px] font-bold text-[#d8dce6]">指标事件联动关系图</div>
+        <div className="text-[0.625rem] font-bold text-[#d8dce6]">指标事件联动关系图</div>
         <ChartHeader source="demo" note="关系为写死示例，仅顶部 CRAI/VIX 为实时值" />
-        <div className="text-[9.5px] text-[#636878] font-mono">{realDataNote}</div>
+        <div className="text-[0.5938rem] text-[#636878] font-mono">{realDataNote}</div>
       </div>
       <div ref={containerRef} className="w-full" style={{ minHeight: 320 }} />
       <div className="mt-2">
@@ -280,12 +280,12 @@ export const EventLinkageFlow = memo(function EventLinkageFlow({ module }: Event
         />
       </div>
       {activeNode && descriptions[activeNode] && (
-        <div className="mt-2 p-2 bg-[rgba(64,120,255,0.08)] border border-[rgba(64,120,255,0.2)] rounded text-[10px] text-[#b0b5c0]">
+        <div className="mt-2 p-2 bg-[rgba(64,120,255,0.08)] border border-[rgba(64,120,255,0.2)] rounded text-[0.625rem] text-[#b0b5c0]">
           <span className="text-[#4078ff] font-medium">{LINKAGES[module].nodes.find(n => n.id === activeNode)?.label}: </span>
           {descriptions[activeNode]}
         </div>
       )}
-      <div className="mt-2 flex gap-3 text-[10px] text-[#636878]">
+      <div className="mt-2 flex gap-3 text-[0.625rem] text-[#636878]">
         <span><span className="inline-block w-2 h-2 rounded-full bg-[#4078ff] mr-1"></span>宏观</span>
         <span><span className="inline-block w-2 h-2 rounded-full bg-[#f59e4b] mr-1"></span>情绪</span>
         <span><span className="inline-block w-2 h-2 rounded-full bg-[#0ca678] mr-1"></span>资金</span>

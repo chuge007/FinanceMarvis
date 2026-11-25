@@ -14,7 +14,7 @@ const STYLES: Record<string, string> = {
 
 export const Badge = memo(function Badge({ label, type = 'default' }: BadgeProps) {
   return (
-    <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${STYLES[type]}`}>
+    <span className={`text-[0.625rem] px-1.5 py-0.5 rounded font-medium ${STYLES[type]}`}>
       {label}
     </span>
   );

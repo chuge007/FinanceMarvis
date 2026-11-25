@@ -69,19 +69,19 @@ export const RegimeTimeline = memo(function RegimeTimeline({ snapshot }: Props) 
     >
       {bands.length ? (
         <>
-          <div className="flex h-6 w-full overflow-hidden rounded-[3px] bg-[#1a1d26]">
+          <div className="flex h-6 w-full overflow-hidden rounded-[0.1875rem] bg-[#1a1d26]">
             {bands.map((r) => (
               <div key={r.date} className="h-full flex-1" style={{ background: TONE_COLOR[r.tone as Tone] }} title={`${r.date} · ${r.tone} · ${r.score}`} />
             ))}
           </div>
-          <div className="mt-1 flex justify-between text-[9px] text-[#636878]">
+          <div className="mt-1 flex justify-between text-[0.5625rem] text-[#636878]">
             <span>{bands[0].date.slice(5)}</span>
             <span>当前：{history.current ?? '不可用'} · 近120日占比 {history.ratio}% · 平均持续 {history.avgRun} 天</span>
             <span>{bands[bands.length - 1].date.slice(5)}</span>
           </div>
         </>
       ) : (
-        <div className="h-12 flex items-center justify-center text-[10.5px] text-[#636878]">真实序列不足，无法回溯历史状态。</div>
+        <div className="h-12 flex items-center justify-center text-[0.6563rem] text-[#636878]">真实序列不足，无法回溯历史状态。</div>
       )}
       <div className="mt-2">
         <ChartInsight

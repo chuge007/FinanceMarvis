@@ -127,13 +127,13 @@ export const CumulativeFlowChart = memo(function CumulativeFlowChart() {
       extra={<ChartHeader source="model" note="A股仅当日真实，其余为前端模型估算" />}
     >
       <div className="mb-2 flex items-center justify-between gap-2">
-        <div className="text-[10.5px] text-[#b0b5c0] truncate">{flowData?.reading ?? '加载中...'}</div>
+        <div className="text-[0.6563rem] text-[#b0b5c0] truncate">{flowData?.reading ?? '加载中...'}</div>
         <div className="flex items-center gap-1 shrink-0">
           {PERIODS.map((p) => (
             <button
               key={p}
               onClick={() => setPeriod(p)}
-              className={`px-1.5 py-0.5 rounded text-[9.5px] ${period === p ? 'bg-[#4078ff] text-white' : 'text-[#636878] hover:text-[#b0b5c0]'}`}
+              className={`px-1.5 py-0.5 rounded text-[0.5938rem] ${period === p ? 'bg-[#4078ff] text-white' : 'text-[#636878] hover:text-[#b0b5c0]'}`}
             >
               {p}日
             </button>
@@ -150,7 +150,7 @@ export const CumulativeFlowChart = memo(function CumulativeFlowChart() {
           pitfall="A股仅最新一日来自东方财富，历史为模型估算；美股序列全部为模型估算，不能当真实资金流使用。"
         />
       </div>
-      <div className="text-[10px] text-[#636878] mt-2">
+      <div className="text-[0.625rem] text-[#636878] mt-2">
         {isCN ? '数据源: 东方财富仅当日真实，其余为前端模型估算 · 红=净流入 绿=净流出' : '数据源: 前端模型估算 · 非真实资金流'}
       </div>
     </Panel>

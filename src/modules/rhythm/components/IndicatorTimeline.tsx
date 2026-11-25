@@ -26,7 +26,7 @@ function trendText(slope: number | null): string {
 
 /** 以中轴为基准的方向条，把 slope 的正负与强弱画出来 */
 function TrendBar({ slope }: { slope: number | null }) {
-  if (slope === null) return <span className="text-[10px] text-[#636878]">方向数据不足</span>;
+  if (slope === null) return <span className="text-[0.625rem] text-[#636878]">方向数据不足</span>;
   const strength = Math.max(0.08, Math.min(1, Math.abs(slope) / 0.3));
   const width = strength * 50;
   const up = slope > 0.05;
@@ -34,9 +34,9 @@ function TrendBar({ slope }: { slope: number | null }) {
   const color = up ? '#f04452' : down ? '#0ca678' : '#636878';
   return (
     <div className="flex items-center gap-1.5" title={`斜率 ${slope.toFixed(3)} · ${trendText(slope)}`}>
-      <span className="text-[10px] w-[52px] text-right" style={{ color }}>{trendText(slope)}</span>
-      <div className="relative w-[110px] h-[6px] rounded-full bg-[#1a1d26]">
-        <div className="absolute left-1/2 top-[-2px] w-px h-[10px] bg-[#4d5364]" />
+      <span className="text-[0.625rem] w-[3.25rem] text-right" style={{ color }}>{trendText(slope)}</span>
+      <div className="relative w-[6.875rem] h-[0.375rem] rounded-full bg-[#1a1d26]">
+        <div className="absolute left-1/2 top-[-0.125rem] w-px h-[0.625rem] bg-[#4d5364]" />
         {up || down ? (
           <div
             className="absolute top-0 h-full rounded-full"
@@ -48,7 +48,7 @@ function TrendBar({ slope }: { slope: number | null }) {
             }}
           />
         ) : (
-          <div className="absolute top-[2px] left-1/2 -translate-x-1/2 w-[6px] h-[2px] rounded-full" style={{ background: color }} />
+          <div className="absolute top-[0.125rem] left-1/2 -translate-x-1/2 w-[0.375rem] h-[0.125rem] rounded-full" style={{ background: color }} />
         )}
       </div>
     </div>
@@ -60,35 +60,35 @@ const Row = memo(function Row({ item }: { item: IndicatorReading }) {
   const pct = item.percentile;
   const val = item.value === null ? '—' : item.value.toFixed(item.unit === '%' ? 2 : 1) + item.unit;
   return (
-    <div className="border border-[#1a1d26] rounded-[4px] px-3 py-2 bg-[rgba(255,255,255,0.015)]">
+    <div className="border border-[#1a1d26] rounded-[0.25rem] px-3 py-2 bg-[rgba(255,255,255,0.015)]">
       <div className="flex items-center justify-between gap-2 flex-wrap">
         <div className="flex items-center gap-2">
-          <span className="text-[12px] text-[#d8dce6]">{item.name}</span>
+          <span className="text-[0.75rem] text-[#d8dce6]">{item.name}</span>
           <SourceBadge kind={missing ? 'missing' : 'real'} />
         </div>
-        <div className="flex items-center gap-3 text-[11px] flex-wrap">
+        <div className="flex items-center gap-3 text-[0.6875rem] flex-wrap">
           <span className="font-['JetBrains_Mono',Consolas,monospace] text-[#d8dce6]">{val}</span>
           <TrendBar slope={item.slope} />
         </div>
       </div>
 
       {missing ? (
-        <div className="text-[11px] text-[#636878] mt-2">
+        <div className="text-[0.6875rem] text-[#636878] mt-2">
           上游未返回可用历史序列，本项不计入状态判断（不用模拟值补位）。
         </div>
       ) : (
         <>
-          <div className="relative h-[6px] mt-2 rounded-full bg-[#1a1d26]">
+          <div className="relative h-[0.375rem] mt-2 rounded-full bg-[#1a1d26]">
             <div
               className="absolute left-0 top-0 h-full rounded-full"
               style={{ width: `${pct ?? 0}%`, background: pctColor(pct ?? 50), opacity: 0.55 }}
             />
             <div
-              className="absolute top-[-3px] w-[2px] h-[12px] rounded"
+              className="absolute top-[-0.1875rem] w-[0.125rem] h-[0.75rem] rounded"
               style={{ left: `${pct ?? 0}%`, background: pctColor(pct ?? 50) }}
             />
           </div>
-          <div className="flex items-center justify-between mt-1 text-[10px] text-[#636878]">
+          <div className="flex items-center justify-between mt-1 text-[0.625rem] text-[#636878]">
             <span>历史分位 {pct === null ? '—' : `${Math.round(pct)}%`} · Z {item.z === null ? '—' : item.z.toFixed(2)}</span>
             <span>{item.observations} 个观测 · {item.frequency} · 截至 {item.asOf ?? '—'}</span>
           </div>
@@ -96,8 +96,8 @@ const Row = memo(function Row({ item }: { item: IndicatorReading }) {
       )}
 
       <details className="mt-2 group">
-        <summary className="cursor-pointer text-[10px] text-[#4078ff] select-none">怎么读 / 常见误用</summary>
-        <div className="mt-2 space-y-1.5 text-[11px] leading-relaxed">
+        <summary className="cursor-pointer text-[0.625rem] text-[#4078ff] select-none">怎么读 / 常见误用</summary>
+        <div className="mt-2 space-y-1.5 text-[0.6875rem] leading-relaxed">
           <p><span className="text-[#636878]">是什么：</span>{item.explanation}</p>
           <p><span className="text-[#636878]">怎么用：</span>{item.howTo}</p>
           <p><span className="text-[#636878]">别这样用：</span><span className="text-[#f59e4b]">{item.pitfall}</span></p>
@@ -117,8 +117,8 @@ export const IndicatorTimeline = memo(function IndicatorTimeline({ indicators }:
           return (
             <div key={g.phase}>
               <div className="flex items-baseline gap-2 mb-2">
-                <span className="text-[12px] font-bold" style={{ color: g.color }}>{g.title}</span>
-                <span className="text-[10px] text-[#636878]">{g.note}</span>
+                <span className="text-[0.75rem] font-bold" style={{ color: g.color }}>{g.title}</span>
+                <span className="text-[0.625rem] text-[#636878]">{g.note}</span>
               </div>
               <div className="space-y-2">
                 {list.map((i) => <Row key={i.id} item={i} />)}
@@ -126,7 +126,7 @@ export const IndicatorTimeline = memo(function IndicatorTimeline({ indicators }:
             </div>
           );
         })}
-        <p className="text-[10px] leading-relaxed text-[#636878] border-t border-[#1a1d26] pt-2">
+        <p className="text-[0.625rem] leading-relaxed text-[#636878] border-t border-[#1a1d26] pt-2">
           领先 / 同步 / 滞后是经验分类而非精确时钟：收益率曲线倒挂到衰退的时滞常见估计为 6~18 个月，
           口径差异大且存在假信号；情绪类指标是同步描述，不预测反转。分位区间随样本长度变化，
           月度与日度序列不可直接横向比较。

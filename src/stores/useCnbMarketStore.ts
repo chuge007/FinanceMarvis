@@ -26,6 +26,11 @@ const CN10Y_SERIES = 'CN10Y';      // 中国10年国债收益率
 // Yahoo fallback symbol
 const YH_CSI300 = '000300.SS';
 
+// 经同域 /yahoo 代理（生产由 server/proxy.mjs 转发），避免浏览器直连被 CORS/449 拦截。
+const YAHOO_BASE = import.meta.env.VITE_UPSTREAM === 'direct'
+  ? 'https://query1.finance.yahoo.com'
+  : '/yahoo';
+
 const valid = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
 const valuesOf = (series: { value: number }[]) => series.map((d) => d.value).filter(valid);
 const latestOf = (values: number[]) => (values.length ? values[values.length - 1] : null);
@@ -57,7 +62,7 @@ export const useCnbMarketStore = create<CNMarketState>((set) => ({
       if (!ssciValues.length) {
         // ConvexTrade 无沪深300时再用 Yahoo 兜底，取不到就是 null。
         const yahoo = await fetch(
-          `https://query1.finance.yahoo.com/v8/finance/chart/${YH_CSI300}?interval=1d&range=5d`,
+          `${YAHOO_BASE}/v8/finance/chart/${YH_CSI300}?interval=1d&range=5d`,
           { headers: { 'User-Agent': 'Mozilla/5.0' } },
         ).then(r => r.json()).catch(() => null);
         const price = Number(yahoo?.chart?.result?.[0]?.meta?.regularMarketPrice);

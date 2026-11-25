@@ -52,36 +52,36 @@ export const PortfolioRecommendation: React.FC = () => {
             <button
               key={s.type}
               onClick={() => { setSelected(s); setSaved(false); }}
-              className={`rounded-[5px] border p-3 text-left transition-colors ${
+              className={`rounded-[0.3125rem] border p-3 text-left transition-colors ${
                 active
                   ? 'border-[#4078ff] bg-[rgba(64,120,255,0.08)]'
                   : 'border-[#1a1d26] bg-[#0f1118] hover:border-[#2a3040]'
               }`}
             >
               <div className="flex items-start justify-between gap-2">
-                <h4 className="text-[12.5px] font-bold text-[#d8dce6]">{s.name}</h4>
-                <span className={`shrink-0 rounded px-1.5 py-0.5 text-[9.5px] ${RISK_COLOR[s.riskLevel]}`}>
+                <h4 className="text-[0.7813rem] font-bold text-[#d8dce6]">{s.name}</h4>
+                <span className={`shrink-0 rounded px-1.5 py-0.5 text-[0.5938rem] ${RISK_COLOR[s.riskLevel]}`}>
                   {RISK_LABEL[s.riskLevel]}
                 </span>
               </div>
-              <div className="mt-1.5 text-[9.5px] leading-relaxed text-[#636878]">
+              <div className="mt-1.5 text-[0.5938rem] leading-relaxed text-[#636878]">
                 {top ? `最大一类：${top.assetType.replace(/（.*?）/, '')} ${top.allocation}%` : '—'}
               </div>
-              <div className="text-[9.5px] text-[#4d5364]">共 {s.allocations.length} 类资产 · {s.rebalanceFrequency}</div>
+              <div className="text-[0.5938rem] text-[#4d5364]">共 {s.allocations.length} 类资产 · {s.rebalanceFrequency}</div>
             </button>
           );
         })}
       </div>
 
-      <div className="rounded-[5px] border border-[#1a1d26] bg-[#0f1118] p-4">
+      <div className="rounded-[0.3125rem] border border-[#1a1d26] bg-[#0f1118] p-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <h3 className="text-[13px] font-bold text-[#d8dce6]">{selected.name}</h3>
-            <p className="mt-1 max-w-[560px] text-[10.5px] leading-relaxed text-[#9aa0ae]">{selected.description}</p>
+            <h3 className="text-[0.8125rem] font-bold text-[#d8dce6]">{selected.name}</h3>
+            <p className="mt-1 max-w-[35rem] text-[0.6563rem] leading-relaxed text-[#9aa0ae]">{selected.description}</p>
           </div>
           <button
             onClick={applyStrategy}
-            className="shrink-0 rounded-[4px] bg-[#4078ff] px-3 py-2 text-[11.5px] font-bold text-white hover:bg-[#2f66e0]"
+            className="shrink-0 rounded-[0.25rem] bg-[#4078ff] px-3 py-2 text-[0.7188rem] font-bold text-white hover:bg-[#2f66e0]"
           >
             存为目标配置
           </button>
@@ -90,7 +90,7 @@ export const PortfolioRecommendation: React.FC = () => {
         <div className="mt-4 space-y-2">
           {selected.allocations.map((a, i) => (
             <div key={i}>
-              <div className="mb-1 flex justify-between text-[10px]">
+              <div className="mb-1 flex justify-between text-[0.625rem]">
                 <span className="text-[#b0b5c0]">{a.assetType}</span>
                 <span className="tabular-nums text-[#636878]">{a.allocation}%</span>
               </div>
@@ -100,29 +100,29 @@ export const PortfolioRecommendation: React.FC = () => {
                   style={{ width: `${Math.max(0, Math.min(100, a.allocation))}%` }}
                 />
               </div>
-              <div className="mt-0.5 text-[9.5px] leading-relaxed text-[#4d5364]">{a.description}</div>
+              <div className="mt-0.5 text-[0.5938rem] leading-relaxed text-[#4d5364]">{a.description}</div>
             </div>
           ))}
         </div>
 
         <div className="mt-4 grid gap-2 border-t border-[#1a1d26] pt-3 sm:grid-cols-2">
           <div>
-            <div className="text-[9.5px] text-[#636878]">再平衡频率</div>
-            <div className="text-[11px] text-[#d8dce6]">{selected.rebalanceFrequency}</div>
+            <div className="text-[0.5938rem] text-[#636878]">再平衡频率</div>
+            <div className="text-[0.6875rem] text-[#d8dce6]">{selected.rebalanceFrequency}</div>
           </div>
           <div>
-            <div className="text-[9.5px] text-[#636878]">这套框架假设的市场环境</div>
-            <div className="text-[11px] leading-relaxed text-[#d8dce6]">{selected.marketCondition}</div>
+            <div className="text-[0.5938rem] text-[#636878]">这套框架假设的市场环境</div>
+            <div className="text-[0.6875rem] leading-relaxed text-[#d8dce6]">{selected.marketCondition}</div>
           </div>
         </div>
 
         {saved && (
-          <p className="mt-3 rounded-[4px] bg-[rgba(12,166,120,0.08)] px-2.5 py-2 text-[10px] text-[#0ca678]">
+          <p className="mt-3 rounded-[0.25rem] bg-[rgba(12,166,120,0.08)] px-2.5 py-2 text-[0.625rem] text-[#0ca678]">
             已存为目标配置，并跳转到「纪律复盘」。在那里用再平衡检查对比你的实际仓位。
           </p>
         )}
 
-        <p className="mt-3 border-t border-[#1a1d26] pt-3 text-[9.5px] leading-relaxed text-[#636878]">
+        <p className="mt-3 border-t border-[#1a1d26] pt-3 text-[0.5938rem] leading-relaxed text-[#636878]">
           注意：这里的比例是静态示例，不随市场变化，也不包含税费、申赎费与跟踪误差。
           「适用市场环境」本身是主观判断，可能出错。本页不构成投资建议，不承诺任何收益。
         </p>

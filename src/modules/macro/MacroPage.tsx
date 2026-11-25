@@ -42,9 +42,9 @@ export const MacroPage = memo(function MacroPage() {
     <div className="space-y-3 p-3">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-[13px] font-bold text-[#d8dce6]">宏观水温</h2>
+          <h2 className="text-[0.8125rem] font-bold text-[#d8dce6]">宏观水温</h2>
           {displayUpdate && (
-            <span className="text-[10px] text-[#636878]">更新 {displayUpdate}</span>
+            <span className="text-[0.625rem] text-[#636878]">更新 {displayUpdate}</span>
           )}
         </div>
         <TimeFilter />

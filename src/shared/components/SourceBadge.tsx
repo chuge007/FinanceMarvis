@@ -16,7 +16,7 @@ export const SourceBadge = memo(function SourceBadge({ kind, text }: { kind: Sou
   return (
     <span
       title={s.title}
-      className="inline-flex items-center text-[10px] px-1.5 py-0.5 rounded whitespace-nowrap"
+      className="inline-flex items-center text-[0.625rem] px-1.5 py-0.5 rounded whitespace-nowrap"
       style={{ color: s.color, background: s.bg, border: `1px solid ${s.color}33` }}
     >
       {text ?? s.label}

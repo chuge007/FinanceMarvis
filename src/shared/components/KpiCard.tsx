@@ -22,17 +22,17 @@ export const KpiCard = memo(function KpiCard({
   const color = direction ? directionColor(direction) : '#d8dce6';
   const sparkColor = direction ? directionColor(direction) : '#4078ff';
   return (
-    <div className="bg-[rgba(255,255,255,0.02)] border border-[#1a1d26] rounded-[5px] px-3 py-2.5">
-      <div className="text-[10px] text-[#636878] mb-1 uppercase tracking-wider">{label}</div>
+    <div className="bg-[rgba(255,255,255,0.02)] border border-[#1a1d26] rounded-[0.3125rem] px-3 py-2.5">
+      <div className="text-[0.625rem] text-[#636878] mb-1 uppercase tracking-wider">{label}</div>
       <div className="flex items-baseline gap-1" style={{ color }}>
-        <span className="font-['JetBrains_Mono',Consolas,monospace] text-[16px] font-semibold tabular-nums">
+        <span className="font-['JetBrains_Mono',Consolas,monospace] text-[1rem] font-semibold tabular-nums">
           {value}
         </span>
-        {unit && <span className="text-[11px]">{unit}</span>}
-        {direction && <span className="text-[11px] ml-0.5">{directionText(direction)}</span>}
+        {unit && <span className="text-[0.6875rem]">{unit}</span>}
+        {direction && <span className="text-[0.6875rem] ml-0.5">{directionText(direction)}</span>}
       </div>
       {percentile !== null && percentile !== undefined && (
-        <div className="mt-0.5 text-[9px] text-[#636878]">
+        <div className="mt-0.5 text-[0.5625rem] text-[#636878]">
           {percentileLabel ?? '历史'} {percentile.toFixed(0)}% 分位
           <span className="ml-1" style={{ color: percentile > 80 ? '#f04452' : percentile < 20 ? '#0ca678' : '#636878' }}>
             {percentile > 80 ? '偏高' : percentile < 20 ? '偏低' : '中性'}

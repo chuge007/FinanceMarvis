@@ -56,7 +56,7 @@ export const CorrelationMatrix = memo(function CorrelationMatrix({ snapshot }: P
       hint="分散化是否还有效"
       extra={<ChartHeader source={model ? 'real' : 'missing'} note={`${windowSize}日滚动 · ${method === 'pearson' ? 'Pearson' : 'Spearman'}`} />}
     >
-      <div className="mb-2 flex items-center gap-2 text-[10px]">
+      <div className="mb-2 flex items-center gap-2 text-[0.625rem]">
         <span className="text-[#636878]">窗口</span>
         {WINDOWS.map((w) => (
           <button key={w} onClick={() => setWindowSize(w)} className={`px-1.5 py-0.5 rounded ${windowSize === w ? 'bg-[#4078ff] text-white' : 'text-[#636878] hover:text-[#b0b5c0]'}`}>{w}日</button>
@@ -67,11 +67,11 @@ export const CorrelationMatrix = memo(function CorrelationMatrix({ snapshot }: P
       </div>
 
       {!model ? (
-        <div className="h-24 flex items-center justify-center text-[10.5px] text-[#636878]">真实日度序列不足，无法计算相关性。</div>
+        <div className="h-24 flex items-center justify-center text-[0.6563rem] text-[#636878]">真实日度序列不足，无法计算相关性。</div>
       ) : (
         <>
           <div className="overflow-x-auto">
-            <table className="w-full text-[9.5px] font-['JetBrains_Mono',Consolas,monospace] tabular-nums">
+            <table className="w-full text-[0.5938rem] font-['JetBrains_Mono',Consolas,monospace] tabular-nums">
               <thead>
                 <tr className="text-[#636878]">
                   <th className="text-left py-1 font-normal" />
@@ -100,7 +100,7 @@ export const CorrelationMatrix = memo(function CorrelationMatrix({ snapshot }: P
               </tbody>
             </table>
           </div>
-          <div className="mt-2 rounded px-2 py-1.5 text-[10px] text-[#b0b5c0]" style={{ background: 'rgba(255,255,255,0.02)' }}>
+          <div className="mt-2 rounded px-2 py-1.5 text-[0.625rem] text-[#b0b5c0]" style={{ background: 'rgba(255,255,255,0.02)' }}>
             {model.biggest.label
               ? `相关性变化最大：${model.biggest.label} 由 ${model.biggest.from.toFixed(2)} → ${model.biggest.to.toFixed(2)}（60日）${Math.abs(model.biggest.delta) > 0.35 ? '，已高亮' : ''}。`
               : '相关性变化样本不足。'}

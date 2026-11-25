@@ -15,8 +15,10 @@ import type {
   OptionVolumeOI,
 } from '../types/sentiment';
 
-const CBOE_URL = 'https://www.cboe.com/us/options/market_statistics/daily/';
-const CBOE_PROXY = '/cboe/us/options/market_statistics/daily/';
+const CBOE_URL = 'https://www.cboe.com/markets/us/options/market-statistics/daily/';
+// CBOE 2026 年把统计页从 /us/options/... 迁到 /markets/us/options/...；
+// 旧路径会 301 到新域名路径，浏览器跟随重定向后会被 CORS 拦掉，因此直接用新路径。
+const CBOE_PROXY = '/cboe/markets/us/options/market-statistics/daily/';
 const YAHOO_BASE = import.meta.env.VITE_UPSTREAM === 'direct'
   ? 'https://query1.finance.yahoo.com'
   : '/yahoo';

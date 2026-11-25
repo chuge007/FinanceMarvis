@@ -72,7 +72,7 @@ export const CandidatePool = memo(function CandidatePool({ market, candidates }:
         <button
           onClick={() => refresh(market)}
           disabled={refreshing}
-          className="px-2 py-1 rounded text-[10px] font-['JetBrains_Mono',Consolas,monospace] bg-[rgba(64,120,255,0.12)] text-[#4078ff] border border-[rgba(64,120,255,0.25)] hover:bg-[rgba(64,120,255,0.2)] disabled:opacity-50"
+          className="px-2 py-1 rounded text-[0.625rem] font-['JetBrains_Mono',Consolas,monospace] bg-[rgba(64,120,255,0.12)] text-[#4078ff] border border-[rgba(64,120,255,0.25)] hover:bg-[rgba(64,120,255,0.2)] disabled:opacity-50"
         >
           {refreshing ? '选股分析中…' : '刷新重选股'}
         </button>
@@ -81,15 +81,15 @@ export const CandidatePool = memo(function CandidatePool({ market, candidates }:
       <div className="space-y-3">
         {/* 选股环境条（动态市场环境） */}
         <div className="flex items-center gap-3 flex-wrap bg-[#0d1117] border border-[#1a1d26] rounded px-3 py-2">
-          <span className="text-[10px] text-[#636878]">市场环境</span>
-          <span className="text-[11px] font-medium" style={{ color: envColor }}>
+          <span className="text-[0.625rem] text-[#636878]">市场环境</span>
+          <span className="text-[0.6875rem] font-medium" style={{ color: envColor }}>
             {envLabel}
           </span>
-          <span className="text-[10.5px] text-[#636878]">（{envSource}）</span>
+          <span className="text-[0.6563rem] text-[#636878]">（{envSource}）</span>
           <div className="flex-1" />
-          <span className="text-[11px] text-[#0ca678]">安全上涨 {safeCount}</span>
-          <span className="text-[11px] text-[#f59e4b]">超跌例外 {reboundCount}</span>
-          <span className="text-[11px] text-[#636878]">共 {list.length} 只</span>
+          <span className="text-[0.6875rem] text-[#0ca678]">安全上涨 {safeCount}</span>
+          <span className="text-[0.6875rem] text-[#f59e4b]">超跌例外 {reboundCount}</span>
+          <span className="text-[0.6875rem] text-[#636878]">共 {list.length} 只</span>
         </div>
 
         <input
@@ -97,17 +97,17 @@ export const CandidatePool = memo(function CandidatePool({ market, candidates }:
           placeholder="搜索代码 / 名称 / 关键词 …"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          className="w-full bg-[#0d1117] border border-[#1a1d26] rounded px-2.5 py-1.5 text-[10.5px] text-[#d8dce6] placeholder-[#636878] focus:outline-none focus:border-[#4078ff] font-['JetBrains_Mono',Consolas,monospace]"
+          className="w-full bg-[#0d1117] border border-[#1a1d26] rounded px-2.5 py-1.5 text-[0.6563rem] text-[#d8dce6] placeholder-[#636878] focus:outline-none focus:border-[#4078ff] font-['JetBrains_Mono',Consolas,monospace]"
         />
 
         <div>
-          <div className="text-[10px] text-[#d8dce6] font-medium mb-2">
+          <div className="text-[0.625rem] text-[#d8dce6] font-medium mb-2">
             {title}{' '}
             <span className="text-[#636878]">({list.length})</span>
-            <span className="ml-2 text-[10.5px] text-[#636878]">点击行 → 联动下方 K线盘面 + 做实盘策略回测</span>
+            <span className="ml-2 text-[0.6563rem] text-[#636878]">点击行 → 联动下方 K线盘面 + 做实盘策略回测</span>
           </div>
-          <div className="overflow-y-auto max-h-[420px] scrollbar-thin">
-            <table className="w-full text-[10.5px]">
+          <div className="overflow-y-auto max-h-[26.25rem] scrollbar-thin">
+            <table className="w-full text-[0.6563rem]">
               <thead>
                 <tr className="text-[#636878] border-b border-[#1a1d26] sticky top-0 bg-[#0d1117]">
                   <th className="text-left py-1.5 font-medium w-7">#</th>
@@ -140,7 +140,7 @@ export const CandidatePool = memo(function CandidatePool({ market, candidates }:
                       <td className="py-2 font-['JetBrains_Mono',Consolas,monospace] text-[#d8dce6]">
                         {c.symbol}
                         {q && (
-                          <span className="ml-1 text-[10px] px-0.5 rounded bg-[rgba(64,120,255,0.15)] text-[#4078ff]">
+                          <span className="ml-1 text-[0.625rem] px-0.5 rounded bg-[rgba(64,120,255,0.15)] text-[#4078ff]">
                             {q.source === 'tencent' ? '腾讯' : 'Yahoo'}
                           </span>
                         )}
@@ -152,45 +152,45 @@ export const CandidatePool = memo(function CandidatePool({ market, candidates }:
                       <td className="py-2 text-right font-['JetBrains_Mono',Consolas,monospace] tabular-nums" style={{ color: directionColor(dir) }}>
                         {changePct > 0 ? '+' : ''}{changePct.toFixed(2)}%
                       </td>
-                      <td className="py-2 w-[64px]">
+                      <td className="py-2 w-[4rem]">
                         <div className="flex items-center gap-1.5">
                           <ScoreBar value={c.safetyScore} color={c.safetyScore >= 72 ? '#0ca678' : c.safetyScore >= 55 ? '#f59e4b' : '#f04452'} />
-                          <span className="text-[11px] font-mono text-[#b0b5c0] tabular-nums w-7 text-right">{c.safetyScore}</span>
+                          <span className="text-[0.6875rem] font-mono text-[#b0b5c0] tabular-nums w-7 text-right">{c.safetyScore}</span>
                         </div>
                       </td>
-                      <td className="py-2 w-[64px]">
+                      <td className="py-2 w-[4rem]">
                         <div className="flex items-center gap-1.5">
                           <ScoreBar value={c.trendScore} color={c.trendScore >= 62 ? '#4078ff' : c.trendScore < 45 ? '#f04452' : '#f59e4b'} />
-                          <span className="text-[11px] font-mono text-[#b0b5c0] tabular-nums w-7 text-right">{c.trendScore}</span>
+                          <span className="text-[0.6875rem] font-mono text-[#b0b5c0] tabular-nums w-7 text-right">{c.trendScore}</span>
                         </div>
                       </td>
-                      <td className="py-2 w-[64px]">
+                      <td className="py-2 w-[4rem]">
                         <div className="flex items-center gap-1.5">
                           <ScoreBar value={c.valueScore} color={c.valueScore >= 72 ? '#0ca678' : c.valueScore >= 55 ? '#f59e4b' : '#f04452'} />
-                          <span className="text-[11px] font-mono text-[#b0b5c0] tabular-nums w-7 text-right">{c.valueScore}</span>
+                          <span className="text-[0.6875rem] font-mono text-[#b0b5c0] tabular-nums w-7 text-right">{c.valueScore}</span>
                         </div>
                       </td>
-                      <td className="py-2 w-[64px]">
+                      <td className="py-2 w-[4rem]">
                         <div className="flex items-center gap-1.5">
                           <ScoreBar value={c.upsideScore} color={c.upsideScore >= 65 ? '#4078ff' : c.upsideScore < 48 ? '#f04452' : '#f59e4b'} />
-                          <span className="text-[11px] font-mono text-[#b0b5c0] tabular-nums w-7 text-right">{c.upsideScore}</span>
+                          <span className="text-[0.6875rem] font-mono text-[#b0b5c0] tabular-nums w-7 text-right">{c.upsideScore}</span>
                         </div>
                       </td>
                       <td className="py-2 text-center">
                         <span
-                          className="inline-block px-1.5 py-0.5 rounded text-[10.5px] font-medium whitespace-nowrap"
+                          className="inline-block px-1.5 py-0.5 rounded text-[0.6563rem] font-medium whitespace-nowrap"
                           style={{ color: groupStyle.text, backgroundColor: groupStyle.bg, border: `1px solid ${groupStyle.border}` }}
                         >
                           {GROUP_LABEL[c.group]}
                         </span>
                       </td>
                       <td className="py-2 text-[#636878]">
-                        <div className="text-[10px] text-[#a4a9b5] leading-snug">{c.thesis}</div>
+                        <div className="text-[0.625rem] text-[#a4a9b5] leading-snug">{c.thesis}</div>
                         <div className="mt-1 flex items-center gap-1.5 flex-wrap">
                           {(c.reasons ?? []).map((r, ri) => (
                             <span
                               key={ri}
-                              className="text-[10px] px-1 py-px rounded"
+                              className="text-[0.625rem] px-1 py-px rounded"
                               style={{ backgroundColor: 'rgba(255,255,255,0.04)', color: VERDICT_STYLE[r.verdict] }}
                               title={r.text}
                             >
@@ -209,7 +209,7 @@ export const CandidatePool = memo(function CandidatePool({ market, candidates }:
             </table>
           </div>
         </div>
-        <div className="text-[10.5px] text-[#636878] leading-relaxed">
+        <div className="text-[0.6563rem] text-[#636878] leading-relaxed">
           选股逻辑：安全度(30%) + 动能/趋势(25%) + 题材炒作(20%) + 资金流(15%) + 市场环境(10%) 加权。
           性价比 = 安全度为主的防御得分（回撤保护）；上涨希望 = 趋势+题材+资金合力（上行空间）；双高 = 最有性价比的上涨标的。
           实时涨跌来自行情（A股=腾讯 · 美股=Yahoo），恐惧贪婪指数驱动市场环境维度。

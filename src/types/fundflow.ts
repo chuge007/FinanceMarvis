@@ -12,7 +12,13 @@ export interface SectorFlow {
   large?: number;       // 大单净额（亿元）
   medium?: number;      // 中单净额（亿元）
   small?: number;       // 小单净额（亿元）
-  source?: 'eastmoney' | 'model';
+  source?: 'eastmoney' | 'tencent' | 'sina' | 'model';
+  /** 腾讯行业榜：5/20/60 日涨跌幅（%），其它源可能没有 */
+  rs5?: number;
+  rs20?: number;
+  rs60?: number;
+  /** false 表示只有价格/涨跌，没有主力净流入 */
+  flowAvailable?: boolean;
   // 美股细化字段（模型估算）
   usInstitution?: number; // 机构净额 $M
   usHedge?: number;       // 对冲基金净额 $M
@@ -34,7 +40,11 @@ export interface MarketCapitalOverview {
   upCount: number;        // 上涨家数
   downCount: number;      // 下跌家数
   flatCount: number;      // 平盘家数
-  source: 'eastmoney' | 'model';
+  source: 'eastmoney' | 'tencent' | 'sina' | 'model';
+  /** stock = 股票涨跌家数；sector = 板块涨跌数（腾讯/新浪兜底时） */
+  breadthBasis?: 'stock' | 'sector';
+  sectorUp?: number;
+  sectorDown?: number;
   reading: string;        // 通俗解读
   trend: 'up' | 'down' | 'flat';
 }

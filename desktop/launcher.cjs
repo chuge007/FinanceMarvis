@@ -123,16 +123,35 @@ const ROUTES = [
     headers: { Referer: 'https://www.eastmoney.com/', Origin: 'https://www.eastmoney.com' }, viaProxy: false },
   { prefix: '/yahoo', origin: 'https://query1.finance.yahoo.com',
     headers: { 'User-Agent': UA, Referer: 'https://finance.yahoo.com/', Origin: 'https://finance.yahoo.com' }, viaProxy: true },
+  { prefix: '/yahoo-alt', origin: 'https://query2.finance.yahoo.com',
+    headers: { 'User-Agent': UA, Referer: 'https://finance.yahoo.com/', Origin: 'https://finance.yahoo.com' }, viaProxy: true },
   { prefix: '/cboe', origin: 'https://www.cboe.com',
     headers: { 'User-Agent': UA, Referer: 'https://www.cboe.com/', Origin: 'https://www.cboe.com' }, viaProxy: true },
   { prefix: '/eastmoney-kline', origin: 'https://push2his.eastmoney.com',
     headers: { Referer: 'https://quote.eastmoney.com/', Origin: 'https://quote.eastmoney.com' }, viaProxy: false },
   { prefix: '/eastmoney-quote', origin: 'https://push2.eastmoney.com',
     headers: { Referer: 'https://quote.eastmoney.com/', Origin: 'https://quote.eastmoney.com' }, viaProxy: false },
+  { prefix: '/tencent-rank', origin: 'https://proxy.finance.qq.com',
+    headers: { 'User-Agent': UA, Referer: 'https://gu.qq.com/' }, viaProxy: false },
+  { prefix: '/sina-sector', origin: 'https://vip.stock.finance.sina.com.cn',
+    headers: { 'User-Agent': UA, Referer: 'https://finance.sina.com.cn/' }, viaProxy: false },
   { prefix: '/convex', origin: 'https://convextrade.com/api/public', headers: {}, viaProxy: true },
+  // 美国财政部官方收益率曲线 CSV：国内可直连
+  { prefix: '/treasury', origin: 'https://home.treasury.gov',
+    headers: { 'User-Agent': UA, Referer: 'https://home.treasury.gov/' }, viaProxy: false },
+  // 美联储 FOMC 日历：国内可直连，不走出海代理
+  { prefix: '/fed', origin: 'https://www.federalreserve.gov',
+    headers: { 'User-Agent': UA, Referer: 'https://www.federalreserve.gov/' }, viaProxy: false },
+  // FRED 图表 CSV 直链：免 key，一次拿整条序列
+  { prefix: '/fred', origin: 'https://fred.stlouisfed.org',
+    headers: { 'User-Agent': UA, Referer: 'https://fred.stlouisfed.org/' }, viaProxy: false },
+  // 台湾证交所开放数据：台股月营收汇总表
+  { prefix: '/twse', origin: 'https://openapi.twse.com.tw',
+    headers: { 'User-Agent': UA, Accept: 'application/json' }, viaProxy: false },
 ]
 
 let PROXY_URL = ''
+let PROXY_SOURCE = 'none'
 const proxyAgents = new Map()
 
 function probePort(host, port, ms) {
@@ -148,25 +167,29 @@ function probePort(host, port, ms) {
 }
 
 async function detectProxy() {
-  // 优先级：手动指定 > 本机常见出海代理端口(项目约定 7897) > 系统代理 > 直连
+  // 优先级与 vite.config.ts / server/proxy.mjs 一致：
+  // 手动指定 > 环境变量 > 本机常见端口（项目约定 7897）> 直连
   const explicit = process.env.MARVIS_PROXY
   if (explicit) {
     PROXY_URL = explicit
+    PROXY_SOURCE = 'env'
     log('出海代理(手动指定 MARVIS_PROXY): ' + PROXY_URL)
+    return
+  }
+  const envProxy = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.ALL_PROXY || ''
+  if (envProxy) {
+    PROXY_URL = envProxy
+    PROXY_SOURCE = 'env'
+    log('使用系统代理: ' + PROXY_URL)
     return
   }
   for (const port of [7897, 7890, 10809, 1080]) {
     if (await probePort('127.0.0.1', port, 350)) {
       PROXY_URL = 'http://127.0.0.1:' + port
-      log('检测到本机出海代理: ' + PROXY_URL + '（ConvexTrade / Yahoo 走此通道）')
+      PROXY_SOURCE = 'detected'
+      log('检测到本机出海代理: ' + PROXY_URL + '（Yahoo / CBOE / Convex 走此通道）')
       return
     }
-  }
-  const envProxy = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.ALL_PROXY || ''
-  if (envProxy) {
-    PROXY_URL = envProxy
-    log('使用系统代理: ' + PROXY_URL)
-    return
   }
   log('未检测到出海代理，/convex、/yahoo、/cboe 走直连（可能有地区限制，页面已有兜底数据源）')
 }
@@ -222,7 +245,7 @@ function agentFor(route) {
   return proxyAgents.get(p)
 }
 
-function proxyRequest(req, res, route) {
+function proxyRequest(req, res, route, allowRetry = true) {
   const target = route.origin + (req.url || '').slice(route.prefix.length)
   let u
   try { u = new URL(target) } catch {
@@ -258,6 +281,11 @@ function proxyRequest(req, res, route) {
   })
   preq.on('timeout', () => preq.destroy(new Error('上游超时')))
   preq.on('error', (err) => {
+    if (agent && allowRetry && !res.headersSent && (req.method === 'GET' || req.method === 'HEAD')) {
+      log(`[proxy] ${route.prefix} 经代理失败，回退直连: ${err.message}`)
+      proxyRequest(req, res, Object.assign({}, route, { viaProxy: false }), false)
+      return
+    }
     if (!res.headersSent) {
       res.statusCode = 502
       res.setHeader('content-type', 'text/plain; charset=utf-8')
@@ -269,9 +297,187 @@ function proxyRequest(req, res, route) {
   req.pipe(preq)
 }
 
+// ───────────────────────── 内置 AI 网关 ─────────────────────────
+// 与 server/ai-gateway.mjs 同逻辑；exe 单文件运行时无法 require 外部模块，故内联一份精简实现。
+// 凭证优先取环境变量（部署方统一配置），其次取请求头（使用者自带 Key，存本机 localStorage）。
+function normalizeAiBase(raw) {
+  let base = String(raw || '').trim().replace(/\/+$/, '')
+  if (!base) return ''
+  base = base.replace(/\/chat\/completions$/, '')
+  if (!/\/v\d+[a-z]*$/i.test(base)) base += '/v1'
+  return base
+}
+
+function aiCredential(req) {
+  const envBase = normalizeAiBase(process.env.AI_BASE_URL)
+  if (envBase) {
+    return {
+      base: envBase,
+      key: String(process.env.AI_API_KEY || '').trim(),
+      model: String(process.env.AI_MODEL || '').trim(),
+    }
+  }
+  return {
+    base: normalizeAiBase(req.headers['x-ai-base']),
+    key: String(req.headers['x-ai-key'] || '').trim(),
+    model: String(req.headers['x-ai-model'] || '').trim(),
+  }
+}
+
+function aiFail(res, status, message) {
+  if (res.headersSent) return
+  res.statusCode = status
+  res.setHeader('content-type', 'application/json; charset=utf-8')
+  res.setHeader('cache-control', 'no-store')
+  res.end(JSON.stringify({ error: { message: message, type: 'ai_gateway_error' } }))
+}
+
+function readAiBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = []
+    let size = 0
+    req.on('data', (c) => {
+      size += c.length
+      if (size > 4 * 1024 * 1024) { reject(new Error('请求体过大（上限 4MB）')); req.destroy(); return }
+      chunks.push(c)
+    })
+    req.on('end', () => {
+      const raw = Buffer.concat(chunks).toString('utf8').trim()
+      if (!raw) return resolve({})
+      try { resolve(JSON.parse(raw)) } catch { reject(new Error('请求体不是合法 JSON')) }
+    })
+    req.on('error', reject)
+  })
+}
+
+async function handleAi(req, res, pathname) {
+  if (pathname === '/ai/config') {
+    const envBase = normalizeAiBase(process.env.AI_BASE_URL)
+    let host = ''
+    if (envBase) { try { host = new URL(envBase).host } catch { host = '' } }
+    res.setHeader('content-type', 'application/json; charset=utf-8')
+    res.setHeader('cache-control', 'no-store')
+    res.end(JSON.stringify({
+      configured: Boolean(envBase),
+      model: envBase ? String(process.env.AI_MODEL || '') : '',
+      baseUrl: host,
+    }))
+    return
+  }
+
+  if (pathname === '/ai/models') {
+    const cred = aiCredential(req)
+    if (!cred.base) return aiFail(res, 400, '未配置模型接口')
+    let target
+    try { target = new URL(cred.base + '/models') } catch { return aiFail(res, 400, 'Base URL 格式不正确') }
+    const transport = target.protocol === 'http:' ? http : https
+    const headers = { accept: 'application/json' }
+    if (cred.key) headers.authorization = 'Bearer ' + cred.key
+    const preq = transport.request({
+      method: 'GET',
+      host: target.hostname,
+      port: target.port || (target.protocol === 'http:' ? 80 : 443),
+      path: target.pathname + target.search,
+      headers,
+      timeout: 20000,
+    }, (pres) => {
+      const chunks = []
+      pres.on('data', (c) => chunks.push(c))
+      pres.on('end', () => {
+        res.statusCode = pres.statusCode || 502
+        res.setHeader('content-type', 'application/json; charset=utf-8')
+        res.setHeader('cache-control', 'no-store')
+        res.end(Buffer.concat(chunks).toString('utf8'))
+      })
+      pres.on('error', () => aiFail(res, 502, '拉取模型列表失败'))
+    })
+    preq.on('timeout', () => preq.destroy(new Error('上游超时')))
+    preq.on('error', (err) => aiFail(res, 502, '上游不可达：' + err.message))
+    preq.end()
+    return
+  }
+
+  if (req.method !== 'POST') return aiFail(res, 405, '请使用 POST')
+
+  const cred = aiCredential(req)
+  if (!cred.base) return aiFail(res, 400, '未配置模型接口：请在「AI 设置」里填写 Base URL、API Key 与模型名')
+
+  let body
+  try { body = await readAiBody(req) } catch (e) { return aiFail(res, 400, e.message) }
+  const messages = Array.isArray(body.messages) ? body.messages : []
+  if (!messages.length) return aiFail(res, 400, 'messages 不能为空')
+
+  const model = String(body.model || cred.model || '').trim()
+  if (!model) return aiFail(res, 400, '缺少模型名（model）')
+
+  let target
+  try { target = new URL(cred.base + '/chat/completions') } catch { return aiFail(res, 400, 'Base URL 格式不正确') }
+
+  const stream = body.stream !== false
+  const payload = JSON.stringify({
+    model,
+    messages,
+    stream,
+    temperature: typeof body.temperature === 'number' ? body.temperature : 0.3,
+  })
+
+  const transport = target.protocol === 'http:' ? http : https
+  const headers = {
+    'content-type': 'application/json',
+    accept: stream ? 'text/event-stream' : 'application/json',
+  }
+  if (cred.key) headers.authorization = 'Bearer ' + cred.key
+
+  const preq = transport.request({
+    method: 'POST',
+    host: target.hostname,
+    port: target.port || (target.protocol === 'http:' ? 80 : 443),
+    path: target.pathname + target.search,
+    headers,
+    timeout: 120000,
+  }, (pres) => {
+    const ct = pres.headers['content-type'] || (stream ? 'text/event-stream; charset=utf-8' : 'application/json')
+    res.statusCode = pres.statusCode || 502
+    res.setHeader('content-type', String(ct))
+    res.setHeader('cache-control', 'no-cache, no-transform')
+    res.setHeader('x-accel-buffering', 'no')
+    if (pres.headers['content-length']) res.setHeader('content-length', String(pres.headers['content-length']))
+    if ((pres.statusCode || 0) >= 400) {
+      const chunks = []
+      pres.on('data', (c) => chunks.push(c))
+      pres.on('end', () => { if (!res.writableEnded) res.end(Buffer.concat(chunks)) })
+      pres.on('error', () => res.destroy())
+      return
+    }
+    pres.pipe(res)
+    pres.on('error', () => res.destroy())
+  })
+
+  preq.on('timeout', () => preq.destroy(new Error('上游超时（120s）')))
+  preq.on('error', (err) => {
+    log('[ai] 上游请求失败: ' + err.message)
+    if (!res.headersSent) aiFail(res, 502, '上游不可达：' + err.message)
+    else res.destroy()
+  })
+  // 客户端点“停止”时及时掐断上游连接，避免继续消耗额度。
+  res.on('close', () => { if (!res.writableEnded) preq.destroy() })
+  preq.end(payload)
+}
+
 // ───────────────────────── 服务与启动 ─────────────────────────
 const server = http.createServer((req, res) => {
   const pathname = (req.url || '/').split('?')[0]
+  if (pathname === '/proxy-status') {
+    res.statusCode = 200
+    res.setHeader('content-type', 'application/json; charset=utf-8')
+    res.setHeader('cache-control', 'no-store')
+    res.end(JSON.stringify({ proxy: PROXY_URL || null, source: PROXY_SOURCE, at: Date.now() }))
+    return
+  }
+  if (pathname.startsWith('/ai/')) {
+    handleAi(req, res, pathname).catch((err) => aiFail(res, 500, err && err.message ? err.message : 'AI 网关异常'))
+    return
+  }
   if (pathname === '/__marvis_ping') {
     res.statusCode = 200
     res.setHeader('content-type', 'text/plain; charset=utf-8')

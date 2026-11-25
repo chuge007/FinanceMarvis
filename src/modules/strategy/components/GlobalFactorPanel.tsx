@@ -23,13 +23,13 @@ function FactorCard({ f, icon }: { f: FactorScore; icon: string }) {
   const color = scoreColor(f.score);
   const v = verdictOf(f.score);
   return (
-    <div className="bg-[#0d1117] border border-[#1a1d26] rounded-[5px] p-2.5 flex-1 min-w-0">
+    <div className="bg-[#0d1117] border border-[#1a1d26] rounded-[0.3125rem] p-2.5 flex-1 min-w-0">
       <div className="flex items-center justify-between">
-        <span className="text-[10px] font-medium text-[#d8dce6]">
+        <span className="text-[0.625rem] font-medium text-[#d8dce6]">
           {icon} {f.label}因子
         </span>
         <span
-          className="text-[14px] font-['JetBrains_Mono',Consolas,monospace] font-semibold tabular-nums"
+          className="text-[0.875rem] font-['JetBrains_Mono',Consolas,monospace] font-semibold tabular-nums"
           style={{ color }}
         >
           {f.score}
@@ -39,12 +39,12 @@ function FactorCard({ f, icon }: { f: FactorScore; icon: string }) {
         <div className="h-full rounded-full" style={{ width: `${f.score}%`, backgroundColor: color }} />
       </div>
       <div className="flex items-center justify-between gap-2 mb-1">
-        <div className="text-[11px] text-[#636878] font-['JetBrains_Mono',Consolas,monospace] truncate">{f.meta}</div>
-        <span className="shrink-0 px-1 py-px rounded text-[11px] font-medium" style={{ color: v.color, backgroundColor: v.bg }}>
+        <div className="text-[0.6875rem] text-[#636878] font-['JetBrains_Mono',Consolas,monospace] truncate">{f.meta}</div>
+        <span className="shrink-0 px-1 py-px rounded text-[0.6875rem] font-medium" style={{ color: v.color, backgroundColor: v.bg }}>
           {v.label} {v.label === '利好' ? '↑' : v.label === '利空' ? '↓' : '—'}
         </span>
       </div>
-      <div className="text-[10px] text-[#b0b5c0] leading-relaxed line-clamp-2 min-h-[26px]">{f.reading}</div>
+      <div className="text-[0.625rem] text-[#b0b5c0] leading-relaxed line-clamp-2 min-h-[1.625rem]">{f.reading}</div>
     </div>
   );
 }
@@ -55,15 +55,15 @@ export const GlobalFactorPanel = memo(function GlobalFactorPanel({ symbol, marke
   return (
     <Panel title="做T综合因子 · 宏观 × 情绪 × 产业" badge={factors ? `综合 ${factors.composite} 分 · ${factors.source === 'realtime' ? '实时' : '估算'}` : undefined}>
       {!symbol ? (
-        <div className="h-16 flex items-center justify-center text-[#636878] text-[12px]">
+        <div className="h-16 flex items-center justify-center text-[#636878] text-[0.75rem]">
           请先选择标的，基于其所属产业评估做T环境
         </div>
       ) : loading && !factors ? (
-        <div className="h-16 flex items-center justify-center text-[#636878] text-[12px]">
+        <div className="h-16 flex items-center justify-center text-[#636878] text-[0.75rem]">
           综合因子计算中...
         </div>
       ) : error ? (
-        <div className="h-16 flex items-center justify-center text-[#f04452] text-[12px]">{error}</div>
+        <div className="h-16 flex items-center justify-center text-[#f04452] text-[0.75rem]">{error}</div>
       ) : factors ? (
         <div className="space-y-2.5">
           <div className="flex gap-2">
@@ -74,27 +74,27 @@ export const GlobalFactorPanel = memo(function GlobalFactorPanel({ symbol, marke
 
           {/* 综合做T偏向 */}
           <div
-            className="rounded-[5px] p-2.5 flex items-center gap-3"
+            className="rounded-[0.3125rem] p-2.5 flex items-center gap-3"
             style={{ backgroundColor: `${factors.bias.color}14`, border: `1px solid ${factors.bias.color}35` }}
           >
             <div
               className="w-11 h-11 rounded-full flex items-center justify-center shrink-0"
               style={{ border: `2px solid ${factors.bias.color}` }}
             >
-              <span className="text-[16px] font-bold font-['JetBrains_Mono',Consolas,monospace]" style={{ color: factors.bias.color }}>
+              <span className="text-[1rem] font-bold font-['JetBrains_Mono',Consolas,monospace]" style={{ color: factors.bias.color }}>
                 {factors.composite}
               </span>
             </div>
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2">
-                <span className="text-[12px] font-medium" style={{ color: factors.bias.color }}>{factors.bias.title}</span>
-                <span className="text-[10.5px] text-[#636878]">综合做T偏向</span>
+                <span className="text-[0.75rem] font-medium" style={{ color: factors.bias.color }}>{factors.bias.title}</span>
+                <span className="text-[0.6563rem] text-[#636878]">综合做T偏向</span>
               </div>
-              <div className="text-[10px] text-[#b0b5c0] leading-relaxed">{factors.bias.suggestion}</div>
+              <div className="text-[0.625rem] text-[#b0b5c0] leading-relaxed">{factors.bias.suggestion}</div>
             </div>
           </div>
 
-          <div className="flex items-center justify-between text-[10px] text-[#636878]">
+          <div className="flex items-center justify-between text-[0.625rem] text-[#636878]">
             <span>因子解读：宏观(30%) + 情绪(30%) + 产业(40%) 加权 · 产业=标的所属板块主力资金流</span>
             <span className="font-['JetBrains_Mono',Consolas,monospace]">更新 {factors.updatedAt}</span>
           </div>

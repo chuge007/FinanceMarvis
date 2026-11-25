@@ -71,15 +71,15 @@ export const ModuleRelationshipFooter = memo(function ModuleRelationshipFooter({
 
   return (
     <div className="mt-4 pt-3 border-t border-[rgba(255,255,255,0.06)]">
-      <div className="text-[10.5px] text-[#636878] mb-2">
+      <div className="text-[0.6563rem] text-[#636878] mb-2">
         {MODULE_NAMES[module]} ↔ 模块联动关系
       </div>
 
       {dynamicSummary && (
-        <div className="mb-2 p-2 bg-[rgba(64,120,255,0.06)] rounded-[3px] border-l-2 border-[#4078ff]">
-          <div className="text-[10px] text-[#b0b5c0] leading-relaxed">{dynamicSummary}</div>
+        <div className="mb-2 p-2 bg-[rgba(64,120,255,0.06)] rounded-[0.1875rem] border-l-2 border-[#4078ff]">
+          <div className="text-[0.625rem] text-[#b0b5c0] leading-relaxed">{dynamicSummary}</div>
           {lastUpdate && (
-            <div className="text-[9.5px] text-[#636878] mt-1">基于 {lastUpdate} 数据联动分析</div>
+            <div className="text-[0.5938rem] text-[#636878] mt-1">基于 {lastUpdate} 数据联动分析</div>
           )}
         </div>
       )}
@@ -88,14 +88,14 @@ export const ModuleRelationshipFooter = memo(function ModuleRelationshipFooter({
         {relations.map((r) => (
           <div
             key={`${r.from}-${r.to}`}
-            className="bg-[rgba(255,255,255,0.02)] rounded-[3px] p-2 border border-[rgba(255,255,255,0.04)]"
+            className="bg-[rgba(255,255,255,0.02)] rounded-[0.1875rem] p-2 border border-[rgba(255,255,255,0.04)]"
           >
             <div className="flex items-center gap-1 mb-1">
-              <span className="text-[10px] text-[#4078ff] font-medium">{r.from}</span>
-              <span className="text-[9.5px] text-[#636878]">{r.arrow}</span>
-              <span className="text-[10px] text-[#f59e4b] font-medium">{r.to}</span>
+              <span className="text-[0.625rem] text-[#4078ff] font-medium">{r.from}</span>
+              <span className="text-[0.5938rem] text-[#636878]">{r.arrow}</span>
+              <span className="text-[0.625rem] text-[#f59e4b] font-medium">{r.to}</span>
             </div>
-            <div className="text-[10px] text-[#8a8f9d] leading-relaxed">{r.desc}</div>
+            <div className="text-[0.625rem] text-[#8a8f9d] leading-relaxed">{r.desc}</div>
           </div>
         ))}
       </div>

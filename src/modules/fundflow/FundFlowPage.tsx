@@ -32,8 +32,8 @@ export const FundFlowPage = memo(function FundFlowPage() {
     <div className="space-y-3 p-3">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <h2 className="text-[13px] font-bold text-[#d8dce6]">{title}</h2>
-          <span className={`text-[10px] px-1.5 py-0.5 rounded-full text-white ${statusColor}`}>
+          <h2 className="text-[0.8125rem] font-bold text-[#d8dce6]">{title}</h2>
+          <span className={`text-[0.625rem] px-1.5 py-0.5 rounded-full text-white ${statusColor}`}>
             {statusLabel}
           </span>
         </div>

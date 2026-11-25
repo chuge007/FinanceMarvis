@@ -9,6 +9,21 @@
       content="Marvis 投资地图：先安排应急金与短期资金，再决定多少钱能进股市。不荐股、不预测收益。"
     />
     <title>Marvis · 投资地图</title>
+    <!-- 首屏先按窗口宽度设好根字号，避免 React 挂载前闪一下未放大的界面（逻辑与 src/shared/utils/uiScale.ts 一致） -->
+    <script>
+      (function () {
+        var pct = 112;
+        try {
+          var raw = localStorage.getItem('marvis.ui.scale.v1');
+          pct = raw && raw !== 'auto' ? Number(raw) : Math.round((window.innerWidth / 1440) * 100);
+          if (!isFinite(pct) || pct <= 0) pct = 112;
+          pct = Math.min(165, Math.max(112, Math.round(pct)));
+        } catch (e) {
+          pct = 112;
+        }
+        document.documentElement.style.fontSize = (16 * pct) / 100 + 'px';
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

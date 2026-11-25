@@ -19,31 +19,31 @@ function SectionRow({ s }: { s: SectorFlow }) {
     <div className="rounded-md bg-[#14161d] p-2">
       <div className="flex items-center gap-2 mb-1.5">
         <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: s.color }} />
-        <span className="text-[11px] font-medium text-[#d8dce6] shrink-0">{s.name}</span>
-        <span className={`text-[10px] font-mono shrink-0 ${s.pctChg >= 0 ? 'text-[#f04452]' : 'text-[#0ca678]'}`}>
+        <span className="text-[0.6875rem] font-medium text-[#d8dce6] shrink-0">{s.name}</span>
+        <span className={`text-[0.625rem] font-mono shrink-0 ${s.pctChg >= 0 ? 'text-[#f04452]' : 'text-[#0ca678]'}`}>
           {s.pctChg >= 0 ? '+' : ''}{s.pctChg.toFixed(2)}%
         </span>
-        <span className="ml-auto text-[11px] font-mono shrink-0" style={{ color: s.netFlow >= 0 ? '#f04452' : '#0ca678' }}>
+        <span className="ml-auto text-[0.6875rem] font-mono shrink-0" style={{ color: s.netFlow >= 0 ? '#f04452' : '#0ca678' }}>
           {s.netFlow >= 0 ? '+' : ''}{s.netFlow}M
         </span>
       </div>
       {/* 资金强度条 */}
       <div className="flex items-center gap-2 mb-1.5">
-        <span className="text-[10px] text-[#636878] shrink-0">强度</span>
-        <div className="flex-1 h-[7px] bg-[#1a1d26] rounded-full overflow-hidden">
+        <span className="text-[0.625rem] text-[#636878] shrink-0">强度</span>
+        <div className="flex-1 h-[0.4375rem] bg-[#1a1d26] rounded-full overflow-hidden">
           <div className="h-full rounded-full" style={{ width: `${strength}%`, backgroundColor: s.netFlow >= 0 ? '#f04452' : '#0ca678', opacity: 0.85 }} />
         </div>
-        <span className="text-[10.5px] font-mono text-[#b0b5c0] shrink-0">{strength}</span>
+        <span className="text-[0.6563rem] font-mono text-[#b0b5c0] shrink-0">{strength}</span>
       </div>
       {/* 分口径 */}
       <div className="flex gap-3">
         {flows.map((f) => (
-          <span key={f.label} className="text-[10px] font-mono" style={{ color: f.color }}>
+          <span key={f.label} className="text-[0.625rem] font-mono" style={{ color: f.color }}>
             {f.label} {f.v >= 0 ? '+' : ''}{f.v}M
           </span>
         ))}
       </div>
-      <div className="text-[10px] text-[#636878] leading-snug mt-1">{s.reading}</div>
+      <div className="text-[0.625rem] text-[#636878] leading-snug mt-1">{s.reading}</div>
     </div>
   );
 }
@@ -114,13 +114,13 @@ export const USFlowDynamics = memo(function USFlowDynamics() {
     >
       {/* 轮动结论解读 */}
       <div
-        className="rounded px-3 py-2 text-[10.5px] leading-relaxed mb-2"
+        className="rounded px-3 py-2 text-[0.6563rem] leading-relaxed mb-2"
         style={{ backgroundColor: 'rgba(64,120,255,0.07)', border: '1px solid rgba(64,120,255,0.2)' }}
       >
         <span className="text-[#4078ff] font-medium">轮动解读 &nbsp;</span>
         <span className="text-[#b0b5c0]">{dyn?.rotation ?? '加载中...'}</span>
         {lead && tail && lead.id !== tail.id && (
-          <div className="mt-1 flex items-center gap-2 text-[11px] flex-wrap">
+          <div className="mt-1 flex items-center gap-2 text-[0.6875rem] flex-wrap">
             <span className="px-1.5 py-0.5 rounded bg-[rgba(240,68,82,0.14)] text-[#f04452]">资金去向 · {lead.name} +{lead.netFlow}M</span>
             <span className="text-[#636878]">→</span>
             <span className="px-1.5 py-0.5 rounded bg-[rgba(12,166,120,0.14)] text-[#0ca678]">资金流出 · {tail.name} {tail.netFlow}M</span>
@@ -133,12 +133,12 @@ export const USFlowDynamics = memo(function USFlowDynamics() {
       </div>
 
       {/* 分口径汇总 */}
-      <div className="flex items-center gap-4 mb-2 text-[10px]">
+      <div className="flex items-center gap-4 mb-2 text-[0.625rem]">
         <span className="text-[#636878]">主力口径</span>
         <span className="font-mono text-[#4078ff]">机构 +{totalSplit.institution}M</span>
         <span className="font-mono text-[#9b6efb]">对冲 +{totalSplit.hedge}M</span>
         <span className="font-mono text-[#f59e4b]">散户 +{totalSplit.retail}M</span>
-        <span className="ml-auto text-[#636878] text-[10px]">合计 +{totalSplit.institution + totalSplit.hedge + totalSplit.retail}M</span>
+        <span className="ml-auto text-[#636878] text-[0.625rem]">合计 +{totalSplit.institution + totalSplit.hedge + totalSplit.retail}M</span>
       </div>
 
       <div style={{ height: 210 }}>
@@ -151,7 +151,7 @@ export const USFlowDynamics = memo(function USFlowDynamics() {
           pitfall="全部由 CRAI + 板块权重推演，没有真实逐笔资金数据，不能作为下单依据。"
         />
       </div>
-      <div className="text-[10px] text-[#636878] mt-1.5 leading-relaxed">
+      <div className="text-[0.625rem] text-[#636878] mt-1.5 leading-relaxed">
         日内累计净流入演变（开盘 09:30 → 收盘 16:00 每 30 分钟模拟）。美股无北向资金披露，采用「CRAI情绪 + 板块权重 + 成长/防御轮动偏好」模型估算，分机构/对冲/散户口径用于判断资金方向与轮动强度，非下单依据。
       </div>
     </Panel>
