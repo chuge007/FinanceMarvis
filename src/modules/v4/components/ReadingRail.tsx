@@ -25,7 +25,7 @@ export const ReadingRail = memo(function ReadingRail({ nodes, onSelect }: Props)
 
       <div className="space-y-1.5">
         {nodes.map((node) => {
-          const partial = node.coverage < 0.67 && node.status !== 'missing';
+          const partial = node.coverage < 0.66 && node.status !== 'missing';
           const color = partial ? '#636878' : STATUS_COLOR[node.status] ?? '#4d5364';
           const score = node.score;
           return (
@@ -50,7 +50,7 @@ export const ReadingRail = memo(function ReadingRail({ nodes, onSelect }: Props)
               <div className="mt-1 flex items-center justify-between gap-1">
                 <span className="truncate text-[0.5625rem] text-[#4d5364]">{node.sublabel}</span>
                 <span className="shrink-0 text-[0.5625rem] text-[#636878]">
-                  {node.coverage < 0.67 && node.status !== 'missing' ? '单项 · ' : ''}
+                  {node.coverage < 0.66 && node.status !== 'missing' ? '单项 · ' : ''}
                   {node.directionLabel}
                 </span>
               </div>

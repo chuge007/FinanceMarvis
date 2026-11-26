@@ -20,7 +20,7 @@ const BATCH_SIZE = 18;
 const BROWSER_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
 /** 派生格子依赖、但本身不单独展示的标的。 */
-const YAHOO_DEPS = ['HYG', 'LQD', '^VIX3M', 'SPY', 'QQQ'];
+const YAHOO_DEPS = ['HYG', 'LQD', '^VIX', '^VIX3M', 'SPY', 'QQQ'];
 
 export interface RawCache {
   ts: number;
@@ -28,6 +28,8 @@ export interface RawCache {
   fred: Record<string, FredPoint[]>;
   /** Yahoo 不可达时的现货指数兜底（腾讯）。 */
   tencent: Record<string, AssetPoint[]>;
+  /** FRED/Convex 不可达时的官方利率兜底（美国财政部）。 */
+  treasury: Record<string, FredPoint[]>;
 }
 
 function yahooBase(): string {
@@ -161,8 +163,16 @@ async function fetchTencentIndexDaily(symbol: string): Promise<AssetPoint[]> {
   }
 }
 
-const TREASURY_IDS = ['DGS2', 'DGS3M', 'DGS5', 'DGS10', 'DGS30'] as const;
-type TreasuryId = (typeof TREASURY_IDS)[number];
+type TreasuryId =
+  | 'DGS2'
+  | 'DGS3M'
+  | 'DGS5'
+  | 'DGS10'
+  | 'DGS30'
+  | 'T10Y2Y'
+  | 'T10Y3M'
+  | 'DFII10'
+  | 'T5YIE';
 
 /** 简易 CSV 行解析：只处理双引号包裹与转义，财政部表头含 "1.5 Month" 这类字段。 */
 function parseCsvLine(line: string): string[] {
@@ -199,53 +209,104 @@ function toIsoDate(raw: string): string | null {
   return `${m[3]}-${mm}-${dd}`;
 }
 
-/** 美国财政部官方日度收益率曲线：FRED/Convex 都不可达时的真实利率兜底。 */
-async function fetchTreasuryCurve(): Promise<Partial<Record<TreasuryId, FredPoint[]>>> {
+/** 按表头名取列，返回 日期升序的序列；列名变化时返回空对象。 */
+function parseTreasuryCsv(text: string, mapping: Record<string, string>): Record<string, FredPoint[]> {
+  const lines = text.split(/\r?\n/).filter((line) => line.trim());
+  if (lines.length < 2) return {};
+  const header = parseCsvLine(lines[0]);
+  const idx: Record<string, number> = {};
+  for (const [id, name] of Object.entries(mapping)) {
+    idx[id] = header.findIndex((h) => h.toLowerCase() === name.toLowerCase());
+    if (idx[id] < 0) return {};
+  }
+
+  const out: Record<string, FredPoint[]> = {};
+  for (const id of Object.keys(mapping)) out[id] = [];
+  for (const line of lines.slice(1)) {
+    const cols = line.split(',');
+    const date = toIsoDate(cols[0] ?? '');
+    if (!date) continue;
+    for (const id of Object.keys(mapping)) {
+      const value = Number(cols[idx[id]]);
+      if (Number.isFinite(value)) out[id].push({ date, value });
+    }
+  }
+  for (const id of Object.keys(out)) out[id].sort((a, b) => a.date.localeCompare(b.date));
+  return out;
+}
+
+async function fetchTreasuryCsv(type: string): Promise<string> {
   const year = new Date().getFullYear();
   const path =
     `/treasury/resource-center/data-chart-center/interest-rates/daily-treasury-rates.csv/${year}/all` +
-    `?type=daily_treasury_yield_curve&field_tdr_date_value=${year}&page&_format=csv`;
+    `?type=${type}&field_tdr_date_value=${year}&page&_format=csv`;
+  const resp = await fetch(path, { headers: { accept: 'text/csv' } });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  return resp.text();
+}
+
+let treasuryCache: { ts: number; data: Partial<Record<TreasuryId, FredPoint[]>> } | null = null;
+let treasuryInflight: Promise<Partial<Record<TreasuryId, FredPoint[]>>> | null = null;
+
+/** 5 分钟缓存 + inflight 去重：rhythm 与跨资产会同时请求，不能重复打财政部。 */
+export async function fetchTreasuryCurve(): Promise<Partial<Record<TreasuryId, FredPoint[]>>> {
+  if (treasuryCache && Date.now() - treasuryCache.ts < 5 * 60_000) return treasuryCache.data;
+  if (treasuryInflight) return treasuryInflight;
+  treasuryInflight = loadTreasuryCurve()
+    .then((data) => {
+      if (Object.keys(data).length) treasuryCache = { ts: Date.now(), data };
+      return data;
+    })
+    .finally(() => {
+      treasuryInflight = null;
+    });
+  return treasuryInflight;
+}
+
+/**
+ * 美国财政部官方日度曲线：名义 + 实际两套。
+ *  - 名义：2Y/3M/5Y/10Y/30Y，并派生 10Y-3M；
+ *  - 实际：5Y/10Y → DFII10（10Y 实际利率）；
+ *  - T5YIE = 名义 5Y − 实际 5Y，即 5 年盈亏平衡通胀。
+ */
+async function loadTreasuryCurve(): Promise<Partial<Record<TreasuryId, FredPoint[]>>> {
   try {
-    const resp = await fetch(path, { headers: { accept: 'text/csv' } });
-    if (!resp.ok) {
-      reportSource('treasury', false, `财政部 CSV HTTP ${resp.status}`);
-      return {};
+    // 名义曲线是主数据；实际曲线失败时仍保留名义曲线，不整块丢弃。
+    const [nominalRes, realRes] = await Promise.allSettled([
+      fetchTreasuryCsv('daily_treasury_yield_curve'),
+      fetchTreasuryCsv('daily_treasury_real_yield_curve'),
+    ]);
+    if (nominalRes.status !== 'fulfilled') throw nominalRes.reason;
+    const nominalText = nominalRes.value;
+    const realText = realRes.status === 'fulfilled' ? realRes.value : '';
+    const nominal = parseTreasuryCsv(nominalText, {
+      DGS2: '2 Yr',
+      DGS3M: '3 Mo',
+      DGS5: '5 Yr',
+      DGS10: '10 Yr',
+      DGS30: '30 Yr',
+    });
+    const real = parseTreasuryCsv(realText, { R5: '5 Yr', R10: '10 Yr' });
+
+    const out: Partial<Record<TreasuryId, FredPoint[]>> = {
+      DGS2: nominal.DGS2,
+      DGS3M: nominal.DGS3M,
+      DGS5: nominal.DGS5,
+      DGS10: nominal.DGS10,
+      DGS30: nominal.DGS30,
+    };
+    if (nominal.DGS10?.length && nominal.DGS2?.length) {
+      out.T10Y2Y = subtractSeries(nominal.DGS10, nominal.DGS2);
     }
-    const text = await resp.text();
-    const lines = text.split(/\r?\n/).filter((line) => line.trim());
-    if (lines.length < 2) {
-      reportSource('treasury', false, '财政部 CSV 为空');
-      return {};
+    if (nominal.DGS10?.length && nominal.DGS3M?.length) {
+      out.T10Y3M = subtractSeries(nominal.DGS10, nominal.DGS3M);
+    }
+    if (real.R10?.length) out.DFII10 = real.R10;
+    if (nominal.DGS5?.length && real.R5?.length) {
+      out.T5YIE = subtractSeries(nominal.DGS5, real.R5);
     }
 
-    const header = parseCsvLine(lines[0]);
-    const col = (name: string) => header.findIndex((h) => h.toLowerCase() === name.toLowerCase());
-    const idx: Record<TreasuryId, number> = {
-      DGS2: col('2 Yr'),
-      DGS3M: col('3 Mo'),
-      DGS5: col('5 Yr'),
-      DGS10: col('10 Yr'),
-      DGS30: col('30 Yr'),
-    };
-    if (Object.values(idx).some((i) => i < 0)) {
-      reportSource('treasury', false, '财政部 CSV 列名变化');
-      return {};
-    }
-
-    const out: Record<TreasuryId, FredPoint[]> = {
-      DGS2: [], DGS3M: [], DGS5: [], DGS10: [], DGS30: [],
-    };
-    for (const line of lines.slice(1)) {
-      const cols = line.split(',');
-      const date = toIsoDate(cols[0] ?? '');
-      if (!date) continue;
-      for (const id of TREASURY_IDS) {
-        const value = Number(cols[idx[id]]);
-        if (Number.isFinite(value)) out[id].push({ date, value });
-      }
-    }
-    for (const id of TREASURY_IDS) out[id].sort((a, b) => a.date.localeCompare(b.date));
-    const ok = TREASURY_IDS.some((id) => out[id].length > 20);
+    const ok = Object.values(out).some((list) => (list?.length ?? 0) > 20);
     reportSource('treasury', ok, ok ? '' : '财政部 CSV 有效行数不足');
     return ok ? out : {};
   } catch (err) {
@@ -254,7 +315,7 @@ async function fetchTreasuryCurve(): Promise<Partial<Record<TreasuryId, FredPoin
   }
 }
 
-/** 两条 FRED 序列按日期交集相减（用于 10Y - 3M）。 */
+/** 两条序列按日期交集相减（用于 10Y - 3M、5Y 名义 - 5Y 实际）。 */
 function subtractSeries(a: FredPoint[], b: FredPoint[]): FredPoint[] {
   const map = new Map(b.map((p) => [p.date, p.value]));
   const out: FredPoint[] = [];
@@ -298,7 +359,13 @@ export async function fetchAllRaw(): Promise<RawCache> {
       ...YAHOO_DEPS,
     ]),
   ];
-  const fredIds = [...new Set(CROSS_ASSET_DEFS.filter((d) => d.source === 'fred').map((d) => d.ref))];
+  // 快照缺失时也值得重试的 FRED 序列（HY OAS 没有 Yahoo/财政部等价物）。
+  const fredIds = [
+    ...new Set([
+      ...CROSS_ASSET_DEFS.filter((d) => d.source === 'fred').map((d) => d.ref),
+      'BAMLH0A0HYM2',
+    ]),
+  ];
 
   const yahoo: Record<string, AssetPoint[]> = {};
   const yahooAllowed = canRequest('cross-asset-yahoo');
@@ -353,12 +420,6 @@ export async function fetchAllRaw(): Promise<RawCache> {
 
   // FRED / Convex 都不可达时，用美国财政部官方曲线补齐利率腿（同一官方口径）。
   const treasury = await fetchTreasuryCurve();
-  for (const id of ['DGS2', 'DGS5', 'DGS10', 'DGS30'] as const) {
-    if (!fred[id]?.length && treasury[id]?.length) fred[id] = treasury[id];
-  }
-  if (!fred.T10Y3M?.length && treasury.DGS10?.length && treasury.DGS3M?.length) {
-    fred.T10Y3M = subtractSeries(treasury.DGS10, treasury.DGS3M);
-  }
 
   const yahooOk = Object.values(yahoo).some((list) => list.length > 0);
   if (yahooOk) {
@@ -371,7 +432,7 @@ export async function fetchAllRaw(): Promise<RawCache> {
 
   const fredOk = Object.values(fred).some((list) => list.length > 0);
   if (fredOk) reportSource('fred', true);
-  else reportSource('fred', false, '跨资产利率：FRED 未返回任何序列');
+  else reportSource('fred', false, 'FRED 不可达；利率已由财政部官方曲线兜底，HY OAS 仍缺');
 
-  return { ts: Date.now(), yahoo, fred, tencent };
+  return { ts: Date.now(), yahoo, fred, tencent, treasury };
 }

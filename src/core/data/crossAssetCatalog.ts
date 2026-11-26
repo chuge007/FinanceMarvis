@@ -40,6 +40,8 @@ export interface CrossAssetDef {
   externalUrl?: string;
   /** Yahoo 不可达时的腾讯现货指数代码（仅同一指数的现货兜底）。 */
   tencentSymbol?: string;
+  /** 统一快照缺失时的 Yahoo 同口径序列（目前用于 VIX）。 */
+  yahooFallback?: string;
 }
 
 export const TERRAIN_GROUPS: { id: AssetGroupId; label: string; hint: string }[] = [
@@ -80,7 +82,7 @@ export const CROSS_ASSET_DEFS: CrossAssetDef[] = [
 
   // ── 信用与风险 ───────────────────────────────────────────
   { id: 'HY_OAS', label: '高收益债信用利差', short: 'HY OAS', group: 'credit', source: 'snapshot', ref: 'BAMLH0A0HYM2', region: 'US', unit: '%', digits: 2, polarity: -1, role: 'risk', note: '企业借钱变难时先在这里反应，常被当作股市预警。', pitfall: '领先是经验而非承诺，发行结构会造成假信号。', externalUrl: fredUrl('BAMLH0A0HYM2') },
-  { id: 'VIX', label: 'VIX 波动率指数', short: 'VIX', group: 'credit', source: 'snapshot', ref: 'VIXCLS', region: 'US', unit: 'index', digits: 2, polarity: -1, role: 'risk', note: '期权市场愿意为保护付多少钱，风险的实时价格。', pitfall: '低波动可以长期维持，不等于低风险。', externalUrl: fredUrl('VIXCLS') },
+  { id: 'VIX', label: 'VIX 波动率指数', short: 'VIX', group: 'credit', source: 'snapshot', ref: 'VIXCLS', region: 'US', unit: 'index', digits: 2, polarity: -1, role: 'risk', note: '期权市场愿意为保护付多少钱，风险的实时价格。', pitfall: '低波动可以长期维持，不等于低风险。', externalUrl: fredUrl('VIXCLS'), yahooFallback: '^VIX' },
   { id: 'HYG_LQD', label: '高收益-投资级 20日超额', short: 'HYG-LQD', group: 'credit', source: 'derived', ref: 'HYG,LQD', region: 'US', unit: 'pt', digits: 2, polarity: 1, role: 'risk', note: '信用内部的风险偏好：高收益跑赢投资级，说明市场愿意下沉。', pitfall: 'ETF 价格含流动性溢价，和现金债利差不是同一口径。', externalUrl: etfUrl('HYG') },
   { id: 'SKEW', label: 'SKEW 尾部风险', short: 'SKEW', group: 'credit', source: 'yahoo', ref: '^SKEW', region: 'US', unit: 'index', digits: 1, polarity: -1, role: 'risk', note: '价外看跌期权的相对贵贱，衡量尾部保护需求。', pitfall: '读数常年偏高，边际变化比绝对值更有意义。' },
 

@@ -11,6 +11,7 @@
  */
 import { convexApi, fngApi, fetchStockCandles } from '../../../services/api';
 import { fetchFredSeries } from '../../../services/fred';
+import { fetchTreasuryCurve } from '../../../core/data/crossAssetSources';
 import { canRequest, recordFailure, recordSuccess } from '../../../shared/utils/circuitBreaker';
 import { clamp, percentileOf, zScore, trendSlope, toYearOverYear, daysSince, rollingZScores } from '../../../shared/utils/seriesStats';
 
@@ -115,6 +116,8 @@ export interface IndicatorReading {
   explanation: string;
   howTo: string;
   pitfall: string;
+  /** 本次上游失败，沿用上一次成功读数（asOf 仍是旧日期）。 */
+  stale?: boolean;
 }
 
 export interface RegimeResult {
@@ -162,6 +165,8 @@ const cache = new Map<string, { ts: number; data: SeriesPoint[] }>();
 const YAHOO_FALLBACK: Record<string, { symbol: string; scale: number }> = {
   VIXCLS: { symbol: '%5EVIX', scale: 1 },
   DGS10: { symbol: '%5ETNX', scale: 0.1 },
+  // 广义美元指数：Convex/FRED 都不可达时，Yahoo 的 ICE 美元指数是同口径旁证。
+  DTWEXBGS: { symbol: 'DX-Y.NYB', scale: 1 },
 };
 
 async function loadYahooFallback(id: string, limit: number): Promise<SeriesPoint[]> {
@@ -189,6 +194,8 @@ async function loadSeries(id: string, limit: number): Promise<SeriesPoint[]> {
   const key = `${id}:${limit}`;
   const hit = cache.get(key);
   if (hit && Date.now() - hit.ts < 60_000) return hit.data;
+  // 上游全挂时保留上一次成功序列，避免一次网络抖动把整条链清空；asOf 会显示旧日期。
+  const stale = hit?.data ?? [];
 
   // 主链路回到 ConvexTrade：它在多数家庭网络下经本机代理可通，
   // 而 FRED 官方站在部分网络完全不可达（实测 15s 超时），当主链路会导致「全缺」。
@@ -204,9 +211,23 @@ async function loadSeries(id: string, limit: number): Promise<SeriesPoint[]> {
     return arr;
   }
 
+  // 10Y / 2s10s：FRED/Convex 不可达时用美国财政部官方曲线（同一官方口径）。
+  if (id === 'DGS10' || id === 'T10Y2Y') {
+    const treasury = await fetchTreasuryCurve();
+    const points = id === 'DGS10' ? treasury.DGS10 : treasury.T10Y2Y;
+    if (points?.length) {
+      const mapped = points.map((p) => ({ date: p.date, value: p.value }));
+      cache.set(key, { ts: Date.now(), data: mapped });
+      return mapped;
+    }
+  }
+
   const fb = await loadYahooFallback(id, limit);
-  cache.set(key, { ts: Date.now(), data: fb });
-  return fb;
+  if (fb.length) {
+    cache.set(key, { ts: Date.now(), data: fb });
+    return fb;
+  }
+  return stale;
 }
 
 /** 兜底镜像：ConvexTrade 的 FRED 副本，超时压到 3s，失败立刻放弃。 */
@@ -304,7 +325,7 @@ const TONE_TEXT: Record<Tone, { summary: string; action: string; confirm: string
   },
 };
 
-function buildRegime(indicators: IndicatorReading[]): RegimeResult {
+export function buildRegime(indicators: IndicatorReading[]): RegimeResult {
   const scored = indicators.filter((i) => i.source === 'real' && i.score !== null);
   const totalWeight = CONFIG.reduce((a, c) => a + c.weight, 0);
   const usedWeight = scored.reduce((a, i) => a + i.weight, 0);
@@ -336,7 +357,8 @@ function buildRegime(indicators: IndicatorReading[]): RegimeResult {
 
   const reasons = scored.map((i) => {
     const fmt = i.value === null ? '—' : i.value.toFixed(i.unit === '%' ? 2 : 1);
-    return `${i.name} ${fmt}${i.unit}，位于近 ${i.observations} 个观测的 ${i.percentile === null ? '—' : Math.round(i.percentile)}% 分位，${describeTrend(i.slope)}（${i.phase}）。`;
+    const stale = i.stale ? '（缓存）' : '';
+    return `${i.name} ${fmt}${i.unit}，位于近 ${i.observations} 个观测的 ${i.percentile === null ? '—' : Math.round(i.percentile)}% 分位，${describeTrend(i.slope)}（${i.phase}）${stale}。`;
   });
   const missing = indicators.filter((i) => i.source === 'missing').map((i) => i.name);
   if (missing.length) reasons.push(`未取到真实数据、未计入判断：${missing.join('、')}。`);

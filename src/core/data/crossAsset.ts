@@ -157,12 +157,19 @@ function buildSnapshot(
   yahoo: Record<string, AssetPoint[]>,
   fred: Record<string, FredPoint[]>,
   tencent: Record<string, AssetPoint[]>,
+  treasury: Record<string, FredPoint[]>,
   rhythm: RhythmSnapshot | null,
   options: OptionsSentimentSnapshot | null,
   errors: string[],
 ): CrossAssetSnapshot {
   const readings: Record<string, CrossAssetReading> = {};
   const series: Record<string, AssetPoint[]> = {};
+
+  const pickFallback = (ref: string): { points: FredPoint[]; source: 'fred' | 'treasury' } | null => {
+    if (fred[ref]?.length) return { points: fred[ref], source: 'fred' };
+    if (treasury[ref]?.length) return { points: treasury[ref], source: 'treasury' };
+    return null;
+  };
 
   CROSS_ASSET_DEFS.forEach((def) => {
     if (def.source === 'cboe') {
@@ -186,13 +193,26 @@ function buildSnapshot(
     }
     if (def.source === 'snapshot') {
       points = fromSnapshot(rhythm, def.ref);
-      // 快照缺失时，用 FRED/财政部同口径序列补（目前用于 10Y）。
-      if (!points.length && fred[def.ref]?.length) {
-        points = normalize(def.id, def, fred[def.ref]);
-        actualSource = 'fred';
+      // 快照缺失时的兜底顺序：Yahoo 同口径（VIX）→ FRED → 财政部曲线。
+      if (!points.length && def.yahooFallback && yahoo[def.yahooFallback]?.length) {
+        points = normalize(def.id, def, yahoo[def.yahooFallback]);
+        actualSource = 'yahoo';
+      }
+      if (!points.length) {
+        const fallback = pickFallback(def.ref);
+        if (fallback) {
+          points = normalize(def.id, def, fallback.points);
+          actualSource = fallback.source;
+        }
       }
     }
-    if (def.source === 'fred') points = normalize(def.id, def, fred[def.ref] ?? []);
+    if (def.source === 'fred') {
+      const fallback = pickFallback(def.ref);
+      if (fallback) {
+        points = normalize(def.id, def, fallback.points);
+        actualSource = fallback.source;
+      }
+    }
 
     series[def.id] = points;
     readings[def.id] = { ...buildReading(def.id, def, points), actualSource };
@@ -209,7 +229,11 @@ function buildSnapshot(
       if (def && points.length) {
         const normalized = normalize('T10Y2Y', def, points);
         series.T10Y2Y = normalized;
-        readings.T10Y2Y = { ...buildReading('T10Y2Y', def, normalized), source: 'derived' };
+        readings.T10Y2Y = {
+          ...buildReading('T10Y2Y', def, normalized),
+          source: 'derived',
+          actualSource: 'derived',
+        };
       }
     }
   }
@@ -225,7 +249,8 @@ function buildSnapshot(
 
   derived('HYG_LQD', excessReturnSeries(yahoo.HYG ?? [], yahoo.LQD ?? []));
   derived('COPPER_GOLD', ratioSeries(yahoo['HG=F'] ?? [], yahoo['GC=F'] ?? []));
-  derived('VIX_TERM', ratioSeries(fromSnapshot(rhythm, 'VIXCLS'), yahoo['^VIX3M'] ?? []));
+  // 用 series.VIX 而不是原始快照：VIX 快照缺失时会由 Yahoo ^VIX 兜底，期限比才能一起恢复。
+  derived('VIX_TERM', ratioSeries(series.VIX ?? [], yahoo['^VIX3M'] ?? []));
   derived('SPY_ACT', volumeRatioSeries(yahoo.SPY ?? []));
   derived('QQQ_ACT', volumeRatioSeries(yahoo.QQQ ?? []));
 
@@ -266,7 +291,7 @@ export async function fetchCrossAsset(
     const usableCache = rawCache && !force && Date.now() - rawCache.ts < TTL ? rawCache : null;
     const raw = usableCache ?? (await fetchAllRaw());
     rawCache = raw;
-    return buildSnapshot(raw.yahoo, raw.fred, raw.tencent, rhythm, options, []);
+    return buildSnapshot(raw.yahoo, raw.fred, raw.tencent, raw.treasury, rhythm, options, []);
   })();
 
   try {

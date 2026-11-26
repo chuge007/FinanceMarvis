@@ -58,6 +58,7 @@ export function heatColor(percentile: number | null): string {
 
 export function sourceColor(source: CrossAssetReading['actualSource']): string {
   if (source === 'tencent') return '#f59e4b';
+  if (source === 'treasury') return '#20c4d8';
   if (source === 'cboe') return '#20c4d8';
   if (source === 'derived') return '#9b6efb';
   return '#0ca678';
@@ -65,6 +66,7 @@ export function sourceColor(source: CrossAssetReading['actualSource']): string {
 
 export function sourceLabel(source: CrossAssetReading['actualSource']): string {
   if (source === 'tencent') return '腾讯现货兜底（Yahoo 不可达）';
+  if (source === 'treasury') return '美国财政部官方收益率曲线';
   if (source === 'cboe') return 'CBOE 期权统计（当日）';
   if (source === 'derived') return '派生（由真实序列计算）';
   if (source === 'snapshot') return '统一快照';

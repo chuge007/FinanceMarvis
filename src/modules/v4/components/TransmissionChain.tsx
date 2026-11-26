@@ -28,7 +28,7 @@ const SOURCE_COLOR: Record<string, string> = {
 
 function NodeCard({ node, onClick }: { node: ChainNode; onClick: () => void }) {
   const missing = node.status === 'missing';
-  const partial = !missing && node.coverage < 0.67;
+  const partial = !missing && node.coverage < 0.66;
   const color = partial ? '#636878' : STATUS_COLOR[node.status] ?? '#4d5364';
   const statusLabel = partial ? '单项' : STATUS_LABEL[node.status];
   return (

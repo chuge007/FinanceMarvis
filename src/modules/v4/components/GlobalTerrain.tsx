@@ -13,6 +13,7 @@ const SOURCE_NOTE: Record<string, string> = {
   snapshot: '统一快照',
   cboe: 'CBOE 官方',
   tencent: '腾讯现货兜底',
+  treasury: '美国财政部曲线',
   derived: '由真实序列派生',
 };
 

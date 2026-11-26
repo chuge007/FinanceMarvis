@@ -59,7 +59,11 @@ export async function fetchConvexSeries(seriesId: string, limit = 60): Promise<{
     reportSource('convex', true);
     return result;
   } catch (err) {
-    reportSource('convex', false, err instanceof Error ? err.message : '宏观序列接口不可达');
+    reportSource(
+      'convex',
+      false,
+      err instanceof Error ? `${err.message}（已回退 FRED / 财政部曲线）` : '宏观序列接口不可达（已回退 FRED / 财政部曲线）',
+    );
     return [];
   }
 }

@@ -20,7 +20,7 @@ export interface ChainNode {
   title: string;
   subtitle: string;
   score: number | null;
-  /** 参与打分的分量覆盖度 0~1；低于 0.67 时标记“单项”，避免单指标高分被误读。 */
+  /** 参与打分的分量覆盖度 0~1；低于 0.66 时标记“单项”，避免单指标高分被误读。 */
   coverage: number;
   valueLabel: string;
   sublabel: string;
@@ -292,12 +292,12 @@ export function buildChain(input: ChainInput): ChainModel {
   const narrative = [
     aScore === null
       ? '资金价格数据不足'
-      : aCoverage < 0.67
+      : aCoverage < 0.66
         ? `资金价格单项${aScore >= 62 ? '偏高' : aScore <= 38 ? '偏低' : '中性'}（覆盖不足）`
         : aScore >= 62 ? '钱在变贵' : aScore <= 38 ? '钱在变松' : '资金价格中性',
     bScore === null
       ? '风险定价数据不足'
-      : bCoverage < 0.67
+      : bCoverage < 0.66
         ? `风险定价单项${bScore >= 62 ? '偏高' : bScore <= 38 ? '偏低' : '中性'}（覆盖不足）`
         : bScore >= 62 ? '风险在变贵' : bScore <= 38 ? '风险在变便宜' : '风险定价中性',
     cScore === null ? '情绪数据不足' : cScore >= 70 ? '人群走向极端' : '人群情绪中性',

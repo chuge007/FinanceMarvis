@@ -132,6 +132,10 @@ await check(
   '财政部收益率曲线',
   `https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rates.csv/${year}/all?type=daily_treasury_yield_curve&field_tdr_date_value=${year}&page&_format=csv`,
 )
+await check(
+  '财政部实际利率曲线',
+  `https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rates.csv/${year}/all?type=daily_treasury_real_yield_curve&field_tdr_date_value=${year}&page&_format=csv`,
+)
 if (proxy.url) {
   await check('CBOE 经代理', 'https://www.cboe.com/markets/us/options/market-statistics/daily/', { proxy: proxy.url })
   await check('Convex 经代理', 'https://convextrade.com/api/public/data/DGS10?limit=2&format=json', { proxy: proxy.url })

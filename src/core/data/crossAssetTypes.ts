@@ -16,8 +16,8 @@ export interface CrossAssetReading {
   short: string;
   group: AssetGroupId;
   source: CrossAssetSource;
-  /** 实际取到数据的源：可能因 Yahoo 不可达而降级为腾讯现货。 */
-  actualSource: CrossAssetSource | 'tencent';
+  /** 实际取到数据的源：可能因 Yahoo/FRED 不可达而降级为腾讯现货或财政部曲线。 */
+  actualSource: CrossAssetSource | 'tencent' | 'treasury';
   region: AssetRegion;
   unit: CrossAssetDef['unit'];
   digits: number;
