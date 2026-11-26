@@ -145,6 +145,9 @@ const ROUTES = [
   // FRED 图表 CSV 直链：免 key，一次拿整条序列
   { prefix: '/fred', origin: 'https://fred.stlouisfed.org',
     headers: { 'User-Agent': UA, Referer: 'https://fred.stlouisfed.org/' }, viaProxy: false },
+  // FRED 直连失败时的代理通道
+  { prefix: '/fred-proxy', origin: 'https://fred.stlouisfed.org',
+    headers: { 'User-Agent': UA, Referer: 'https://fred.stlouisfed.org/' }, viaProxy: true },
   // 台湾证交所开放数据：台股月营收汇总表
   { prefix: '/twse', origin: 'https://openapi.twse.com.tw',
     headers: { 'User-Agent': UA, Accept: 'application/json' }, viaProxy: false },

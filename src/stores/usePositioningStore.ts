@@ -9,8 +9,14 @@ import { create } from 'zustand';
 import { fetchTermStructure, type TermStructure } from '../services/volTerm';
 import { fetchOptionsSentiment } from '../services/optionsSentiment';
 import type { OptionsSentimentSnapshot } from '../types/sentiment';
+import { readJSON, writeJSON } from '../shared/utils/localStore';
 
 const TTL = 5 * 60_000;
+const CACHE_KEY = 'marvis.positioning.v1';
+const cached = readJSON<{ term: TermStructure | null; options: OptionsSentimentSnapshot | null } | null>(
+  CACHE_KEY,
+  null,
+);
 
 interface PositioningState {
   term: TermStructure | null;
@@ -23,8 +29,9 @@ interface PositioningState {
 let inflight: Promise<{ term: TermStructure; options: OptionsSentimentSnapshot }> | null = null;
 
 export const usePositioningStore = create<PositioningState>((set, get) => ({
-  term: null,
-  options: null,
+  // 冷启动先渲染上次的期限结构/期权情绪，P/C 格子不用等 CBOE 整页返回。
+  term: cached?.term ?? null,
+  options: cached?.options ?? null,
   loading: false,
   loadedAt: 0,
 
@@ -41,6 +48,7 @@ export const usePositioningStore = create<PositioningState>((set, get) => ({
         );
       }
       const { term: nextTerm, options } = await inflight;
+      if (nextTerm || options) writeJSON(CACHE_KEY, { term: nextTerm, options });
       set({ term: nextTerm, options, loading: false, loadedAt: Date.now() });
     } catch {
       set({ loading: false });

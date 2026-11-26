@@ -176,6 +176,13 @@ const ROUTES = [
     viaProxy: false,
   },
   {
+    // FRED 直连被地区限制时的代理通道（部分节点可达）
+    prefix: '/fred-proxy',
+    origin: 'https://fred.stlouisfed.org',
+    headers: { 'User-Agent': UA, Referer: 'https://fred.stlouisfed.org/' },
+    viaProxy: true,
+  },
+  {
     // 台湾证交所开放数据：台股月营收汇总表，免 key
     prefix: '/twse',
     origin: 'https://openapi.twse.com.tw',

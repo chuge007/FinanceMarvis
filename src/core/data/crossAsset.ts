@@ -278,6 +278,18 @@ function buildSnapshot(
 }
 
 /**
+ * 用已缓存的原始序列重新合成（不发起网络请求）。
+ * 统一快照/期权晚到时调用它，把 FG、P/C、VIX 等格子补齐，避免等下一次 5 分钟刷新。
+ */
+export function recomputeCrossAsset(
+  rhythm: RhythmSnapshot | null,
+  options: OptionsSentimentSnapshot | null,
+): CrossAssetSnapshot | null {
+  if (!rawCache) return null;
+  return buildSnapshot(rawCache.yahoo, rawCache.fred, rawCache.tencent, rawCache.treasury, rhythm, options, []);
+}
+
+/**
  * 取全球地形快照。rhythm 用于复用 VIX / HY OAS / 10Y / 曲线 / 情绪，避免重复请求。
  */
 export async function fetchCrossAsset(

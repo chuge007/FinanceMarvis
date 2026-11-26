@@ -20,11 +20,28 @@ export interface AlignedPair {
   b: number[];
 }
 
-/** 取所有日度序列的日期并集，截取最近 days 个点。 */
-export function buildAxis(seriesList: DatedValue[][], days = 180): string[] {
+/** 判断是否周末（周六/周日）。日期可能是 'YYYY-MM-DD'，也可能是带时间的 ISO 串。 */
+function isWeekend(date: string): boolean {
+  const [y, m, d] = date.slice(0, 10).split('-').map(Number);
+  if (!y || !m || !d) return false;
+  const day = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+  return day === 0 || day === 6;
+}
+
+/**
+ * 取所有日度序列的日期并集，截取最近 days 个点。
+ *
+ * weekdaysOnly 默认开：宏观序列是交易日口径，而情绪类序列（alt.me 恐惧贪婪）全年每天都发。
+ * 并集里混进周末后，交易日序列在每个周末都会空一格，叠加图上就会断成一截一截；
+ * 同时 days 会被日历日稀释（120 个点只剩 4 个月）。市场休市日（节假日）仍会留单点缺口，
+ * 由图表端用有限的 spanGaps 容错，不做插值。
+ */
+export function buildAxis(seriesList: DatedValue[][], days = 180, weekdaysOnly = true): string[] {
   const set = new Set<string>();
   seriesList.forEach((points) => points.forEach((p) => set.add(p.date)));
-  return [...set].sort().slice(-days);
+  let all = [...set].sort();
+  if (weekdaysOnly) all = all.filter((d) => !isWeekend(d));
+  return all.slice(-days);
 }
 
 /** 把一条序列对齐到统一日期轴；缺数据就是 null，不插值。 */

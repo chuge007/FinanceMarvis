@@ -90,7 +90,7 @@ export const ResearchPage = memo(function ResearchPage({ initialTab }: Props) {
 
       {tab === 'industry' && <IndustryPage />}
 
-      {tab === 'overlay' && <OverlayLab snapshot={snapshot} />}
+      {tab === 'overlay' && <OverlayLab />}
       {tab === 'corr' && <CorrelationLab snapshot={snapshot} />}
       {tab === 'structure' && (
         <div className="rounded-[0.3125rem] border border-[#1a1d26] bg-[#0f1118] p-3">

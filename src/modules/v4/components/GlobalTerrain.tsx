@@ -19,27 +19,27 @@ const SOURCE_NOTE: Record<string, string> = {
 
 export const GlobalTerrain = memo(function GlobalTerrain() {
   const rhythm = useSnapshotStore((s) => s.snapshot);
-  const rhythmLoadedAt = useSnapshotStore((s) => s.loadedAt);
-  const rhythmError = useSnapshotStore((s) => s.error);
   const cross = useCrossAssetStore((s) => s.snapshot);
   const loading = useCrossAssetStore((s) => s.loading);
   const error = useCrossAssetStore((s) => s.error);
   const load = useCrossAssetStore((s) => s.load);
+  const recompute = useCrossAssetStore((s) => s.recompute);
   const options = usePositioningStore((s) => s.options);
   const loadPositioning = usePositioningStore((s) => s.load);
 
   const [selected, setSelected] = useState<string | null>(null);
 
   useEffect(() => {
+    // 跨资产与统一快照并行：FRED 有 5 分钟 inflight 去重，Convex 有熔断，
+    // 不再为了避让而把首屏串行拖到 20 秒。
     void loadPositioning();
-  }, [loadPositioning]);
+    void load();
+  }, [load, loadPositioning]);
 
   useEffect(() => {
-    // 等统一快照先落地：跨资产和 rhythm 同时打 FRED/Convex 会互相触发熔断，
-    // 结果就是两边都只剩一半数据。快照成功或失败后再拉，二者不抢通道。
-    if (!rhythm && !rhythmError && rhythmLoadedAt === 0) return;
-    void load();
-  }, [rhythm, options?.generatedAt, rhythmLoadedAt, rhythmError, load]);
+    // 快照/期权晚到时用同一份原始缓存重新合成（不发网络），P/C、FG、VIX 会随后补齐。
+    if (rhythm || options) recompute();
+  }, [rhythm?.fetchedAt, options?.generatedAt, recompute]);
 
   const model = useMemo(() => buildTerrain(cross), [cross]);
   const selectedCell = selected ? cross?.readings[selected] ?? null : null;
@@ -51,7 +51,7 @@ export const GlobalTerrain = memo(function GlobalTerrain() {
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h3 className="text-[0.875rem] font-bold text-[#d8dce6]">全球地形</h3>
           <span className={`text-[0.75rem] ${error ? 'text-[#f04452]' : 'text-[#4d5364]'}`}>
-            {error ?? (!rhythm && !rhythmError && rhythmLoadedAt === 0 ? '等待统一快照…' : '加载跨资产真实序列…')}
+            {error ?? '加载跨资产真实序列…'}
           </span>
         </div>
         <div className="mt-2 space-y-1.5" aria-hidden="true">

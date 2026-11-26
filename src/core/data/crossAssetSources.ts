@@ -7,14 +7,13 @@
  * Yahoo 走 spark 批量（单批最多 20，留余量取 18），避免 24+ 条并发触发 403/429；
  * spark 只有 close，没有 volume，SPY/QQQ 再单独用 chart 补成交量。
  */
-import { convexApi } from '../../services/api';
-import { fetchFredSeries, type FredPoint } from '../../services/fred';
+import type { FredPoint } from '../../services/fred';
 import { canRequest, recordFailure, recordSuccess } from '../../shared/utils/circuitBreaker';
 import { reportSource } from '../../shared/utils/sourceHealth';
 import { CROSS_ASSET_DEFS } from './crossAssetCatalog';
 import type { AssetPoint } from './crossAssetTypes';
 
-const YAHOO_TIMEOUT = 10_000;
+const YAHOO_TIMEOUT = 8_000;
 const MAX_CONCURRENT = 3;
 const BATCH_SIZE = 18;
 const BROWSER_UA =
@@ -75,13 +74,13 @@ function toPoints(timestamps: number[], closes: (number | null)[], volumes?: (nu
   return out.sort((a, b) => a.date.localeCompare(b.date));
 }
 
-/** 单只标的的 1 年日线；失败返回空数组，不抛异常。 */
-export async function fetchYahooDaily(symbol: string): Promise<AssetPoint[]> {
+/** 单只标的的日线；默认 1 年，叠加实验室需要 2 年覆盖周度序列。 */
+export async function fetchYahooDaily(symbol: string, range = '1y'): Promise<AssetPoint[]> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), YAHOO_TIMEOUT);
   try {
     const encoded = encodeURIComponent(symbol).replace(/%3D/g, '=');
-    const url = `${yahooBase()}/v8/finance/chart/${encoded}?range=1y&interval=1d`;
+    const url = `${yahooBase()}/v8/finance/chart/${encoded}?range=${range}&interval=1d`;
     const resp = await fetch(url, {
       headers: { 'User-Agent': BROWSER_UA, accept: 'application/json' },
       signal: ctrl.signal,
@@ -141,9 +140,11 @@ async function fetchTencentIndexDaily(symbol: string): Promise<AssetPoint[]> {
     : symbol.startsWith('hk')
       ? 'hkfqkline'
       : 'fqkline';
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 8_000);
   try {
     const url = `https://web.ifzq.gtimg.cn/appstock/app/${endpoint}/get?param=${symbol},day,,,300,qfq`;
-    const resp = await fetch(url, { headers: { accept: 'application/json' } });
+    const resp = await fetch(url, { headers: { accept: 'application/json' }, signal: ctrl.signal });
     if (!resp.ok) return [];
     const json = await resp.json();
     const node = json?.data?.[symbol];
@@ -160,10 +161,12 @@ async function fetchTencentIndexDaily(symbol: string): Promise<AssetPoint[]> {
     return out.sort((a, b) => a.date.localeCompare(b.date));
   } catch {
     return [];
+  } finally {
+    clearTimeout(timer);
   }
 }
 
-type TreasuryId =
+export type TreasuryId =
   | 'DGS2'
   | 'DGS3M'
   | 'DGS5'
@@ -172,6 +175,7 @@ type TreasuryId =
   | 'T10Y2Y'
   | 'T10Y3M'
   | 'DFII10'
+  | 'T10YIE'
   | 'T5YIE';
 
 /** 简易 CSV 行解析：只处理双引号包裹与转义，财政部表头含 "1.5 Month" 这类字段。 */
@@ -240,9 +244,15 @@ async function fetchTreasuryCsv(type: string): Promise<string> {
   const path =
     `/treasury/resource-center/data-chart-center/interest-rates/daily-treasury-rates.csv/${year}/all` +
     `?type=${type}&field_tdr_date_value=${year}&page&_format=csv`;
-  const resp = await fetch(path, { headers: { accept: 'text/csv' } });
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-  return resp.text();
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 10_000);
+  try {
+    const resp = await fetch(path, { headers: { accept: 'text/csv' }, signal: ctrl.signal });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    return await resp.text();
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 let treasuryCache: { ts: number; data: Partial<Record<TreasuryId, FredPoint[]>> } | null = null;
@@ -302,6 +312,9 @@ async function loadTreasuryCurve(): Promise<Partial<Record<TreasuryId, FredPoint
       out.T10Y3M = subtractSeries(nominal.DGS10, nominal.DGS3M);
     }
     if (real.R10?.length) out.DFII10 = real.R10;
+    if (nominal.DGS10?.length && real.R10?.length) {
+      out.T10YIE = subtractSeries(nominal.DGS10, real.R10);
+    }
     if (nominal.DGS5?.length && real.R5?.length) {
       out.T5YIE = subtractSeries(nominal.DGS5, real.R5);
     }
@@ -326,32 +339,7 @@ function subtractSeries(a: FredPoint[], b: FredPoint[]): FredPoint[] {
   return out;
 }
 
-/** FRED 序列：先走 ConvexTrade 镜像（3s 快失败），再走官方 CSV。 */
-async function fetchFred(id: string): Promise<FredPoint[]> {
-  if (canRequest('convex-mirror')) {
-    try {
-      const { data } = await convexApi.get(`/data/${id}`, {
-        params: { limit: 300, format: 'json' },
-        timeout: 3_000,
-      });
-      const list: FredPoint[] = Array.isArray(data?.data)
-        ? data.data
-            .filter((p: { date?: string; value?: number }) => p && p.date && Number.isFinite(Number(p.value)))
-            .map((p: { date: string; value: number }) => ({ date: String(p.date), value: Number(p.value) }))
-        : [];
-      if (list.length) {
-        recordSuccess('convex-mirror');
-        return list;
-      }
-      recordFailure('convex-mirror', '空序列');
-    } catch (err) {
-      recordFailure('convex-mirror', err instanceof Error ? err.message : '不可达');
-    }
-  }
-  return fetchFredSeries(id, 300);
-}
-
-/** 拉取全部原始序列：SPY 探针 → spark 批量 → chart 补缺 → 腾讯指数兜底。 */
+/** 拉取全部原始序列：Yahoo 与财政部并行；利率不再等 FRED。 */
 export async function fetchAllRaw(): Promise<RawCache> {
   const yahooSymbols = [
     ...new Set([
@@ -359,67 +347,66 @@ export async function fetchAllRaw(): Promise<RawCache> {
       ...YAHOO_DEPS,
     ]),
   ];
-  // 快照缺失时也值得重试的 FRED 序列（HY OAS 没有 Yahoo/财政部等价物）。
-  const fredIds = [
-    ...new Set([
-      ...CROSS_ASSET_DEFS.filter((d) => d.source === 'fred').map((d) => d.ref),
-      'BAMLH0A0HYM2',
-    ]),
-  ];
 
-  const yahoo: Record<string, AssetPoint[]> = {};
-  const yahooAllowed = canRequest('cross-asset-yahoo');
-  const probeSymbol = yahooSymbols.includes('SPY') ? 'SPY' : yahooSymbols[0];
+  const yahooTask = (async () => {
+    const yahoo: Record<string, AssetPoint[]> = {};
+    const yahooAllowed = canRequest('cross-asset-yahoo');
+    const probeSymbol = yahooSymbols.includes('SPY') ? 'SPY' : yahooSymbols[0];
 
-  // 先用 SPY 探一次：Yahoo 整体不可达时（大陆无代理常见）直接跳过剩余请求，
-  // 避免每条都等满超时，把首屏拖到 30 秒以上。
-  if (yahooAllowed && probeSymbol) {
-    yahoo[probeSymbol] = await fetchYahooDaily(probeSymbol);
-  }
-
-  const restSymbols = yahooSymbols.filter((symbol) => symbol !== probeSymbol);
-  if (probeSymbol && yahoo[probeSymbol]?.length) {
-    for (const batch of chunk(restSymbols, BATCH_SIZE)) {
-      const got = await fetchYahooSparkBatch(batch);
-      Object.assign(yahoo, got);
+    // 先用 SPY 探一次：Yahoo 整体不可达时（大陆无代理常见）直接跳过剩余请求，
+    // 避免每条都等满超时，把首屏拖到 30 秒以上。
+    if (yahooAllowed && probeSymbol) {
+      yahoo[probeSymbol] = await fetchYahooDaily(probeSymbol);
     }
-    // spark 缺的、以及 spark 不返回成交量的 SPY/QQQ，用单只 chart 补。
-    const needChart = restSymbols.filter(
-      (symbol) => !yahoo[symbol]?.length || symbol === 'SPY' || symbol === 'QQQ',
+
+    const restSymbols = yahooSymbols.filter((symbol) => symbol !== probeSymbol);
+    if (probeSymbol && yahoo[probeSymbol]?.length) {
+      for (const batch of chunk(restSymbols, BATCH_SIZE)) {
+        const got = await fetchYahooSparkBatch(batch);
+        Object.assign(yahoo, got);
+      }
+      // spark 缺的、以及 spark 不返回成交量的 SPY/QQQ，用单只 chart 补。
+      const needChart = restSymbols.filter(
+        (symbol) => !yahoo[symbol]?.length || symbol === 'SPY' || symbol === 'QQQ',
+      );
+      const filled = await mapLimit(needChart, MAX_CONCURRENT, async (symbol) => {
+        return [symbol, await fetchYahooDaily(symbol)] as const;
+      });
+      filled.forEach(([symbol, list]) => {
+        if (list.length) yahoo[symbol] = list;
+        else if (!yahoo[symbol]) yahoo[symbol] = [];
+      });
+    } else {
+      restSymbols.forEach((symbol) => {
+        yahoo[symbol] = [];
+      });
+    }
+
+    // Yahoo 整体不可用时，只对目录里声明了 tencentSymbol 的现货指数做兜底；
+    // 期指/汇率/商品没有等价标的，保持「缺」。
+    const tencent: Record<string, AssetPoint[]> = {};
+    const needTencent = CROSS_ASSET_DEFS.filter(
+      (d) => d.tencentSymbol && !(yahoo[d.ref]?.length),
     );
-    const filled = await mapLimit(needChart, MAX_CONCURRENT, async (symbol) => {
-      return [symbol, await fetchYahooDaily(symbol)] as const;
+    const tencentPairs = await mapLimit(needTencent, 2, async (def) => {
+      const symbol = def.tencentSymbol as string;
+      return [symbol, await fetchTencentIndexDaily(symbol)] as const;
     });
-    filled.forEach(([symbol, list]) => {
-      if (list.length) yahoo[symbol] = list;
-      else if (!yahoo[symbol]) yahoo[symbol] = [];
+    tencentPairs.forEach(([symbol, list]) => {
+      tencent[symbol] = list;
     });
-  } else {
-    restSymbols.forEach((symbol) => {
-      yahoo[symbol] = [];
-    });
-  }
 
-  // Yahoo 整体不可用时，只对目录里声明了 tencentSymbol 的现货指数做兜底；
-  // 期指/汇率/商品没有等价标的，保持「缺」。
-  const tencent: Record<string, AssetPoint[]> = {};
-  const needTencent = CROSS_ASSET_DEFS.filter(
-    (d) => d.tencentSymbol && !(yahoo[d.ref]?.length),
-  );
-  const tencentPairs = await mapLimit(needTencent, 2, async (def) => {
-    const symbol = def.tencentSymbol as string;
-    return [symbol, await fetchTencentIndexDaily(symbol)] as const;
-  });
-  tencentPairs.forEach(([symbol, list]) => {
-    tencent[symbol] = list;
-  });
+    return { yahoo, tencent };
+  })();
 
-  // FRED 官方 CSV 对并发较敏感，3 条一批，避免短时间打满被限流。
-  const fredPairs = await mapLimit(fredIds, 3, async (id) => [id, await fetchFred(id)] as const);
-  const fred: Record<string, FredPoint[]> = Object.fromEntries(fredPairs);
+  const treasuryTask = fetchTreasuryCurve();
 
-  // FRED / Convex 都不可达时，用美国财政部官方曲线补齐利率腿（同一官方口径）。
-  const treasury = await fetchTreasuryCurve();
+  const [yahooRes, treasuryRes] = await Promise.allSettled([yahooTask, treasuryTask]);
+  const { yahoo, tencent } =
+    yahooRes.status === 'fulfilled' ? yahooRes.value : { yahoo: {}, tencent: {} };
+  // 利率腿已全部由财政部覆盖；HY OAS 由统一快照负责，跨资产不再重复打 FRED。
+  const fred: Record<string, FredPoint[]> = {};
+  const treasury = treasuryRes.status === 'fulfilled' ? treasuryRes.value : {};
 
   const yahooOk = Object.values(yahoo).some((list) => list.length > 0);
   if (yahooOk) {
@@ -429,10 +416,6 @@ export async function fetchAllRaw(): Promise<RawCache> {
     recordFailure('cross-asset-yahoo', '全部标的无数据');
     reportSource('yahoo', false, '跨资产行情：Yahoo 未返回任何标的');
   }
-
-  const fredOk = Object.values(fred).some((list) => list.length > 0);
-  if (fredOk) reportSource('fred', true);
-  else reportSource('fred', false, 'FRED 不可达；利率已由财政部官方曲线兜底，HY OAS 仍缺');
 
   return { ts: Date.now(), yahoo, fred, tencent, treasury };
 }

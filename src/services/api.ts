@@ -1,6 +1,7 @@
 import axios from 'axios';
 import type { DepthLevel } from '../types/fundflow';
 import { reportSource } from '../shared/utils/sourceHealth';
+import { canRequest, recordFailure, recordSuccess } from '../shared/utils/circuitBreaker';
 
 // ─── fetch 统一超时兜底：行情源不可达时强制 reject，防 Promise 挂起导致加载卡死 ───
 function fetchJ(url: string, ms = 6000, headers?: Record<string, string>): Promise<Response> {
@@ -49,6 +50,8 @@ export const yahooApi = axios.create({
 export async function fetchConvexSeries(seriesId: string, limit = 60): Promise<{ date: string; value: number }[]> {
   const cached = getCached(seriesId);
   if (cached) return cached;
+  // ConvexTrade 已连续 404/超时时直接跳过，避免每个页面都等 8s；冷却期后自动重试。
+  if (!canRequest('convex-mirror')) return [];
 
   try {
     const { data } = await convexApi.get(`/data/${seriesId}`, {
@@ -56,9 +59,11 @@ export async function fetchConvexSeries(seriesId: string, limit = 60): Promise<{
     });
     const result = data?.data ?? [];
     setCache(seriesId, result);
+    recordSuccess('convex-mirror');
     reportSource('convex', true);
     return result;
   } catch (err) {
+    recordFailure('convex-mirror', err instanceof Error ? err.message : '不可达');
     reportSource(
       'convex',
       false,

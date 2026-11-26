@@ -5,11 +5,14 @@
  * 所以 rhythm.fetchedAt 变化时会就地重算（原始行情仍在 5 分钟缓存里，不重复请求）。
  */
 import { create } from 'zustand';
-import { fetchCrossAsset, type CrossAssetSnapshot } from '../core/data/crossAsset';
+import { fetchCrossAsset, recomputeCrossAsset, type CrossAssetSnapshot } from '../core/data/crossAsset';
 import { useSnapshotStore } from '../core/data/snapshot';
 import { usePositioningStore } from './usePositioningStore';
+import { readJSON, writeJSON } from '../shared/utils/localStore';
 
 const TTL = 5 * 60_000;
+const CACHE_KEY = 'marvis.crossAsset.v1';
+const cached = readJSON<CrossAssetSnapshot | null>(CACHE_KEY, null);
 
 interface CrossAssetState {
   snapshot: CrossAssetSnapshot | null;
@@ -19,12 +22,15 @@ interface CrossAssetState {
   rhythmAt: string | null;
   optionsAt: string | null;
   load: (force?: boolean) => Promise<void>;
+  /** 只用已有原始缓存重新合成，不发网络请求。 */
+  recompute: () => void;
 }
 
 let inflight: Promise<CrossAssetSnapshot> | null = null;
 
 export const useCrossAssetStore = create<CrossAssetState>((set, get) => ({
-  snapshot: null,
+  // 冷启动先渲染上次快照：先看到图，再后台刷新；loadedAt=0 会强制走一次网络。
+  snapshot: cached && Array.isArray(cached.readings) ? cached : null,
   loading: false,
   error: null,
   loadedAt: 0,
@@ -51,6 +57,7 @@ export const useCrossAssetStore = create<CrossAssetState>((set, get) => ({
     try {
       if (!inflight) inflight = fetchCrossAsset(rhythm, options, force);
       const next = await inflight;
+      if (next.available > 0) writeJSON(CACHE_KEY, next);
       set({
         snapshot: next,
         loading: false,
@@ -67,7 +74,7 @@ export const useCrossAssetStore = create<CrossAssetState>((set, get) => ({
         (afterRhythm?.fetchedAt ?? null) !== (rhythm?.fetchedAt ?? null) ||
         (afterOptions?.generatedAt ?? null) !== (options?.generatedAt ?? null)
       ) {
-        void get().load();
+        get().recompute();
       }
     } catch (err) {
       set({
@@ -77,5 +84,17 @@ export const useCrossAssetStore = create<CrossAssetState>((set, get) => ({
     } finally {
       inflight = null;
     }
+  },
+
+  recompute: () => {
+    const rhythm = useSnapshotStore.getState().snapshot;
+    const options = usePositioningStore.getState().options;
+    const next = recomputeCrossAsset(rhythm, options);
+    if (!next) return;
+    set({
+      snapshot: next,
+      rhythmAt: rhythm?.fetchedAt ?? null,
+      optionsAt: options?.generatedAt ?? null,
+    });
   },
 }));

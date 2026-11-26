@@ -235,11 +235,19 @@ export default defineConfig(async (): Promise<UserConfig> => {
           rewrite: (p) => p.replace(/^\/twse/, ''),
           headers: { 'User-Agent': BROWSER_UA, Accept: 'application/json' },
         },
-        // FRED 图表 CSV 直链：免 key，返回 text/csv。实测经 7897 不可用，保持直连。
+        // FRED 图表 CSV 直链：免 key，返回 text/csv。
+        // 直连失败时客户端会再试 /fred-proxy（走本机出海代理）；两个通道都可能被地区限制。
         '/fred': {
           target: 'https://fred.stlouisfed.org',
           changeOrigin: true,
           rewrite: (p) => p.replace(/^\/fred/, ''),
+          headers: { 'User-Agent': BROWSER_UA, Referer: 'https://fred.stlouisfed.org/' },
+        },
+        '/fred-proxy': {
+          target: 'https://fred.stlouisfed.org',
+          changeOrigin: true,
+          rewrite: (p) => p.replace(/^\/fred-proxy/, ''),
+          agent,
           headers: { 'User-Agent': BROWSER_UA, Referer: 'https://fred.stlouisfed.org/' },
         },
         // 美国财政部官方收益率曲线 CSV：FRED/Convex 不可达时的真实利率兜底（直连可用）。

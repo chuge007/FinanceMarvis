@@ -3,9 +3,10 @@
  *
  *   https://fred.stlouisfed.org/graph/fredgraph.csv?id=BAMLH0A0HYM2
  *
- * 为什么换掉 ConvexTrade：
- *  - ConvexTrade 只是 FRED 的二手镜像，大陆直连常需要出海代理，超时 10s 后还要串行兜底；
- *  - 官方 CSV 是一次请求拿到整条序列，体积十几 KB，走本地服务端转发即可，不依赖代理。
+ * 通道策略：
+ *  - 先走同域 `/fred`（直连），2.5s 快失败；
+ *  - 直连失败再走 `/fred-proxy`（本机出海代理），3s；
+ *  - 两条都失败才记一次熔断，避免每个指标都交两遍学费。
  *
  * 口径提醒：CSV 里缺失值写作 "."，一律跳过，不插值。
  */
@@ -18,20 +19,18 @@ export interface FredPoint {
 }
 
 const TTL = 5 * 60_000;
-/**
- * 3.5s 快失败：FRED 在部分网络（含本机实测）完全不可达，等满 10s 只会拖垮首屏。
- * 配合熔断器，前两条指标各等 3.5s 后该源进入 5 分钟冷却，后续直接跳过。
- */
-const TIMEOUT = 3_500;
+const DIRECT_TIMEOUT = 2_500;
+const PROXY_TIMEOUT = 3_000;
 const BREAKER_ID = 'fred';
 
 const cache = new Map<string, { ts: number; data: FredPoint[] }>();
 const inflight = new Map<string, Promise<FredPoint[]>>();
 
-function base(): string {
-  return import.meta.env.VITE_UPSTREAM === 'direct'
-    ? 'https://fred.stlouisfed.org'
-    : '/fred';
+function paths(): string[] {
+  if (import.meta.env.VITE_UPSTREAM === 'direct') {
+    return ['https://fred.stlouisfed.org/graph/fredgraph.csv'];
+  }
+  return ['/fred/graph/fredgraph.csv', '/fred-proxy/graph/fredgraph.csv'];
 }
 
 function parseCsv(text: string, limit: number): FredPoint[] {
@@ -54,8 +53,31 @@ function parseCsv(text: string, limit: number): FredPoint[] {
   return limit > 0 ? out.slice(-limit) : out;
 }
 
+async function fetchOne(
+  base: string,
+  seriesId: string,
+  timeout: number,
+  limit: number,
+): Promise<FredPoint[]> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeout);
+  try {
+    const resp = await fetch(`${base}?id=${encodeURIComponent(seriesId)}`, {
+      headers: { accept: 'text/csv' },
+      signal: ctrl.signal,
+    });
+    if (!resp.ok) return [];
+    return parseCsv(await resp.text(), limit);
+  } catch {
+    return [];
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * 取一条 FRED 序列的最近 limit 个观测；失败返回空数组（不抛异常、不阻塞页面）。
+ * 直连失败会自动经 `/fred-proxy` 重试一次。
  */
 export async function fetchFredSeries(seriesId: string, limit = 300): Promise<FredPoint[]> {
   const key = `${seriesId}:${limit}`;
@@ -71,35 +93,24 @@ export async function fetchFredSeries(seriesId: string, limit = 300): Promise<Fr
   }
 
   const task = (async (): Promise<FredPoint[]> => {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), TIMEOUT);
-    try {
-      const url = `${base()}/graph/fredgraph.csv?id=${encodeURIComponent(seriesId)}`;
-      const resp = await fetch(url, { headers: { accept: 'text/csv' }, signal: ctrl.signal });
-      if (!resp.ok) {
-        recordFailure(BREAKER_ID, `HTTP ${resp.status}`);
-        reportSource('fred', false, `FRED 返回 HTTP ${resp.status}`);
-        return hit?.data ?? [];
+    let lastError = '不可达';
+    const list = paths();
+    for (let i = 0; i < list.length; i++) {
+      const base = list[i];
+      const timeout = base.includes('/fred-proxy') ? PROXY_TIMEOUT : DIRECT_TIMEOUT;
+      const data = await fetchOne(base, seriesId, timeout, limit);
+      if (data.length) {
+        recordSuccess(BREAKER_ID);
+        reportSource('fred', true);
+        cache.set(key, { ts: Date.now(), data });
+        return data;
       }
-      const text = await resp.text();
-      const data = parseCsv(text, limit);
-      if (!data.length) {
-        recordFailure(BREAKER_ID, 'CSV 无有效数据');
-        reportSource('fred', false, 'FRED 返回的 CSV 没有有效数据');
-        return hit?.data ?? [];
-      }
-      recordSuccess(BREAKER_ID);
-      reportSource('fred', true);
-      cache.set(key, { ts: Date.now(), data });
-      return data;
-    } catch (err) {
-      const message = err instanceof Error ? err.message : '不可达';
-      recordFailure(BREAKER_ID, message);
-      reportSource('fred', false, `FRED 不可达：${message}`);
-      return hit?.data ?? [];
-    } finally {
-      clearTimeout(timer);
+      lastError = base.includes('/fred-proxy') ? '直连与代理均无数据' : '直连无数据';
     }
+
+    recordFailure(BREAKER_ID, lastError);
+    reportSource('fred', false, `FRED 不可达：${lastError}`);
+    return hit?.data ?? [];
   })();
 
   inflight.set(key, task);

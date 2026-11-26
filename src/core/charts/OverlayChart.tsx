@@ -42,20 +42,47 @@ const DASH: Record<string, number[] | undefined> = {
   dotted: [2, 3],
 };
 
-function computeRange(series: OverlaySeries[], forcedMin?: number, forcedMax?: number) {
-  if (forcedMin !== undefined && forcedMax !== undefined) return { min: forcedMin, max: forcedMax };
-  let min = Number.POSITIVE_INFINITY;
-  let max = Number.NEGATIVE_INFINITY;
+/**
+ * 纵轴范围按 2%~98% 分位取，而不是直接取 min/max。
+ *
+ * 原因：单条序列的一两个极端点（例如 VIX 冲到 8σ）会把整根轴拉满，
+ * 其余几条线全被压成一条水平线，叠加图就失去意义。
+ * 被裁掉的极值会穿过上下边界显示，并在轴文字里标注，不隐藏事实。
+ */
+function computeRange(
+  series: OverlaySeries[],
+  forcedMin?: number,
+  forcedMax?: number,
+): { min: number; max: number; clipped: boolean } {
+  if (forcedMin !== undefined && forcedMax !== undefined) return { min: forcedMin, max: forcedMax, clipped: false };
+
+  const all: number[] = [];
   for (const s of series) {
     for (const v of s.values) {
       if (v === null || !Number.isFinite(v)) continue;
-      if (v < min) min = v;
-      if (v > max) max = v;
+      all.push(v);
     }
   }
-  if (!Number.isFinite(min) || !Number.isFinite(max)) return { min: -3, max: 3 };
-  const pad = Math.max(0.3, (max - min) * 0.1);
-  return { min: Number((min - pad).toFixed(2)), max: Number((max + pad).toFixed(2)) };
+  if (!all.length) return { min: -3, max: 3, clipped: false };
+
+  all.sort((a, b) => a - b);
+  const at = (p: number) => all[Math.min(all.length - 1, Math.max(0, Math.round(p * (all.length - 1))))];
+  const lo = forcedMin ?? at(0.02);
+  const hi = forcedMax ?? at(0.98);
+  const clipped = lo > all[0] + 1e-9 || hi < all[all.length - 1] - 1e-9;
+
+  let min = lo;
+  let max = hi;
+  const pad = Math.max(0.2, (max - min) * 0.08);
+  min -= pad;
+  max += pad;
+  // 所有线都贴在 0 附近时，别把小波动放大成噪声：至少给 ±1.5 的跨度
+  const center = (min + max) / 2;
+  if (max - min < 3) {
+    min = center - 1.5;
+    max = center + 1.5;
+  }
+  return { min: Number(min.toFixed(2)), max: Number(max.toFixed(2)), clipped };
 }
 
 export const OverlayChart = memo(function OverlayChart({
@@ -69,6 +96,7 @@ export const OverlayChart = memo(function OverlayChart({
   initialHidden,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const wrapRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<Chart<'line'> | null>(null);
   const [hidden, setHidden] = useState<string[]>(initialHidden ?? []);
   const boxHeight = typeof height === 'number' ? `${height}px` : height;
@@ -126,11 +154,22 @@ export const OverlayChart = memo(function OverlayChart({
     });
 
     chartRef.current = chart;
+
+    // Chart.js 的 responsive 依赖父容器尺寸；父容器在 tab 切换/字体缩放后变宽时，
+    // 它并不总会重新测量，导致 canvas 停在默认 300×150、图面空白。显式监听父容器。
+    const wrap = wrapRef.current;
+    const resize = () => chart.resize();
+    const raf = requestAnimationFrame(resize);
+    const observer = typeof ResizeObserver !== 'undefined' && wrap ? new ResizeObserver(resize) : null;
+    observer?.observe(wrap as Element);
+
     return () => {
+      cancelAnimationFrame(raf);
+      observer?.disconnect();
       chart.destroy();
       chartRef.current = null;
     };
-  }, []);
+  }, [yLabel]);
 
   // 数据/范围变化只更新，不重建
   useEffect(() => {
@@ -148,7 +187,8 @@ export const OverlayChart = memo(function OverlayChart({
       pointRadius: 0,
       pointHoverRadius: 2,
       tension: 0.2,
-      spanGaps: false,
+      // 节假日单点缺失（≤2 个点）连起来，长缺口仍然断开：不插值，但不让线碎成一截一截
+      spanGaps: 2,
     }));
 
     const yScale = chart.options.scales?.y;
@@ -157,19 +197,14 @@ export const OverlayChart = memo(function OverlayChart({
       yScale.max = range.max;
     }
     chart.update('none');
+    chart.resize();
   }, [labels, visible, range]);
 
   const toggle = (id: string) => {
     setHidden((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   };
 
-  if (!dates.length || !series.length) {
-    return (
-      <div className="flex items-center justify-center text-[0.6875rem] text-[#636878]" style={{ height: boxHeight }}>
-        {emptyText}
-      </div>
-    );
-  }
+  const empty = !dates.length || !series.length;
 
   return (
     <div>
@@ -196,10 +231,16 @@ export const OverlayChart = memo(function OverlayChart({
         })}
         <span className="ml-auto text-[0.5313rem] text-[#3a4050]">
           纵轴 {range.min} ~ {range.max}
+          {range.clipped && <span className="ml-1 text-[#f59e4b]">（已裁掉少数极值，穿出边界即为被裁部分）</span>}
         </span>
       </div>
-      <div style={{ height: boxHeight }}>
+      <div ref={wrapRef} className="relative w-full" style={{ height: boxHeight }}>
         <canvas ref={canvasRef} />
+        {empty && (
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center text-[0.6875rem] text-[#636878]">
+            {emptyText}
+          </div>
+        )}
       </div>
     </div>
   );

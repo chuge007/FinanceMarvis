@@ -1,125 +1,48 @@
 import { memo, useCallback, useEffect, useMemo, useState } from 'react';
-import type { RhythmSnapshot } from '../../rhythm/services/rhythm';
-import { DAILY_METRICS, METRIC_COLOR } from '../../../core/metrics/registry';
-import { alignToAxis, buildAxis, latestZ, rollingCorrSeries, zDelta, type DatedValue } from '../../../core/analysis/series';
+import type { DatedValue } from '../../../core/analysis/series';
+import { alignToAxis, buildAxis, latestZ, zDelta } from '../../../core/analysis/series';
 import { OverlayChart, type OverlaySeries } from '../../../core/charts/OverlayChart';
-import { CorrelationStrip } from '../../../core/charts/CorrelationStrip';
-import { benchmarkLabel, fetchBenchmarkPoints } from '../../../services/benchmark';
+import { OverlayCorrTable } from './OverlayCorrTable';
+import {
+  DEFAULT_OVERLAY_IDS,
+  OVERLAY_BY_ID,
+  OVERLAY_DEFS,
+  OVERLAY_PRESETS,
+  PRESET_CORR_PAIRS,
+  type OverlayDef,
+} from '../../../core/data/overlayCatalog';
+import { useOverlaySeriesStore } from '../../../stores/useOverlaySeriesStore';
 import { useAppStore } from '../../../stores/useAppStore';
-import { usePositioningStore } from '../../../stores/usePositioningStore';
+import { fetchIndexPoints, indexDef, indexOptions, type IndexDef } from '../../../services/benchmark';
 
-const PRESETS: { id: string; label: string; ids: string[]; note: string }[] = [
-  {
-    id: 'risk',
-    label: '风险温度',
-    ids: ['VIXCLS', 'BAMLH0A0HYM2', 'DTWEXBGS', 'DGS10', 'T10Y2Y', 'FG'],
-    note: '波动、信用、美元、利率、曲线、情绪放在同一条 Z 轴上。',
-  },
-  {
-    id: 'credit',
-    label: '信用-波动',
-    ids: ['BAMLH0A0HYM2', 'VIXCLS'],
-    note: '信用利差先走、VIX 未跟，是最常见的背离组合。',
-  },
-  {
-    id: 'dollar',
-    label: '美元潮汐',
-    ids: ['DTWEXBGS', 'BAMLH0A0HYM2'],
-    note: '美元走强是否同步抬升信用利差，判断全球流动性松紧。',
-  },
-  {
-    id: 'sentiment',
-    label: '情绪-价格',
-    ids: ['FG', 'VIXCLS'],
-    note: '情绪极端与波动率是否同步，避免只看一个读数。',
-  },
-  {
-    id: 'curve',
-    label: '曲线-长端',
-    ids: ['T10Y2Y', 'DGS10'],
-    note: '倒挂后重新陡峭化，往往才是压力显现的阶段。',
-  },
-  {
-    id: 'term',
-    label: '期限结构',
-    ids: ['VIXCLS', 'VIX_TERM'],
-    note: 'VIX÷VIX3M 抬头（尤其越过 1）说明市场开始为眼前风险定价，常先于 VIX 绝对水平变化。',
-  },
-];
+const WINDOWS = [120, 250, 500];
+const MAX_LINES = 6;
 
-/** 派生序列（不在宏观指标表里），单独维护名称与颜色。 */
-const EXTRA_META: Record<string, { name: string; color: string }> = {
-  VIX_TERM: { name: '期限结构', color: '#f7d44c' },
-  BENCH: { name: '大盘基准', color: '#e8ebf0' },
+const GROUP_LABEL: Record<OverlayDef['group'], string> = {
+  rates: '利率 / 通胀',
+  credit: '信用 / 波动',
+  liquidity: '金融条件 / 流动性',
+  equity: '美股指数',
+  factor: '派生因子',
 };
 
-const DEFAULT_IDS = ['VIXCLS', 'BAMLH0A0HYM2', 'DTWEXBGS', 'T10Y2Y', 'FG'];
-const WINDOWS = [120, 250, 500];
-const BENCH_COLOR = '#e8ebf0';
-
-function pointsOf(snapshot: RhythmSnapshot | null, id: string) {
-  return snapshot?.series?.[id]?.points ?? [];
+function isUsable(id: string): boolean {
+  return Boolean(OVERLAY_BY_ID[id]) && OVERLAY_BY_ID[id].axis === 'z';
 }
 
-interface Props {
-  snapshot: RhythmSnapshot | null;
-}
+export const OverlayLab = memo(function OverlayLab() {
+  const market = useAppStore((s) => s.market);
+  const { series, loading, load } = useOverlaySeriesStore();
 
-export const OverlayLab = memo(function OverlayLab({ snapshot }: Props) {
-  const [selected, setSelected] = useState<string[]>(DEFAULT_IDS);
+  const [selected, setSelected] = useState<string[]>(DEFAULT_OVERLAY_IDS);
+  const [presetId, setPresetId] = useState<string | null>('duration');
   const [days, setDays] = useState(250);
   const [corrWindow, setCorrWindow] = useState(60);
 
-  const market = useAppStore((s) => s.market);
-
-  // 期限结构走 store 单例，和首页共用同一份数据，不额外发请求
-  const term = usePositioningStore((s) => s.term);
-  const loadPositioning = usePositioningStore((s) => s.load);
-
-  useEffect(() => {
-    void loadPositioning();
-  }, [loadPositioning]);
-
-  const termPoints = useMemo<DatedValue[]>(
-    () => (term?.points ?? []).map((p) => ({ date: p.date, value: p.ratio, z: p.z })),
-    [term],
-  );
-
-  const pointsFor = useCallback(
-    (id: string): DatedValue[] => (id === 'VIX_TERM' ? termPoints : pointsOf(snapshot, id)),
-    [snapshot, termPoints],
-  );
-
-  const [showBench, setShowBench] = useState(false);
-  const [bench, setBench] = useState<DatedValue[]>([]);
+  // CN 指数仍走原有口径；美股指数已经放进序列目录（SPY/QQQ/SMH/IWM）
+  const [benchIds, setBenchIds] = useState<string[]>([]);
+  const [benchMap, setBenchMap] = useState<Record<string, DatedValue[]>>({});
   const [benchLoading, setBenchLoading] = useState(false);
-  const [benchEmpty, setBenchEmpty] = useState(false);
-
-  // 大盘基准按需加载：只在用户打开时才去拉一年日线，避免拖慢首屏
-  useEffect(() => {
-    if (!showBench) return;
-    let alive = true;
-    setBench([]);
-    setBenchEmpty(false);
-    setBenchLoading(true);
-    fetchBenchmarkPoints(market)
-      .then((points) => {
-        if (!alive) return;
-        setBench(points);
-        setBenchEmpty(points.length === 0);
-      })
-      .catch(() => {
-        if (!alive) return;
-        setBench([]);
-        setBenchEmpty(true);
-      })
-      .finally(() => {
-        if (alive) setBenchLoading(false);
-      });
-    return () => {
-      alive = false;
-    };
-  }, [showBench, market]);
 
   useEffect(() => {
     try {
@@ -127,7 +50,11 @@ export const OverlayLab = memo(function OverlayLab({ snapshot }: Props) {
       if (!raw) return;
       const pair = JSON.parse(raw) as unknown;
       if (Array.isArray(pair) && pair.length === 2 && pair.every((x) => typeof x === 'string')) {
-        setSelected(pair as string[]);
+        const valid = pair.filter(isUsable);
+        if (valid.length) {
+          setSelected(valid);
+          setPresetId(null);
+        }
       }
       window.localStorage.removeItem('marvis.research.pair');
     } catch {
@@ -135,79 +62,140 @@ export const OverlayLab = memo(function OverlayLab({ snapshot }: Props) {
     }
   }, []);
 
-  const toggle = (id: string) => {
-    setSelected((prev) => {
-      if (prev.includes(id)) {
-        if (prev.length <= 1) return prev;
-        return prev.filter((x) => x !== id);
-      }
-      if (prev.length >= 6) return prev;
-      return [...prev, id];
-    });
-  };
+  useEffect(() => {
+    setBenchIds(market === 'CN' ? ['CSI300', 'CYB'] : []);
+  }, [market]);
 
-  const dates = useMemo(
-    () => buildAxis([...selected.map((id) => pointsFor(id)), showBench ? bench : []], days),
-    [selected, days, showBench, bench, pointsFor],
+  const benchDefs = useMemo<IndexDef[]>(
+    () => benchIds.map((id) => indexDef(id)).filter((d): d is IndexDef => Boolean(d)),
+    [benchIds],
   );
 
-  const series = useMemo<OverlaySeries[]>(() => {
+  useEffect(() => {
+    if (!benchDefs.length) return;
+    const missing = benchDefs.filter((d) => !benchMap[d.id]);
+    if (!missing.length) return;
+    let alive = true;
+    setBenchLoading(true);
+    Promise.all(missing.map((d) => fetchIndexPoints(d).then((points) => [d.id, points] as const)))
+      .then((list) => {
+        if (!alive) return;
+        setBenchMap((prev) => {
+          const next = { ...prev };
+          list.forEach(([id, points]) => {
+            next[id] = points;
+          });
+          return next;
+        });
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (alive) setBenchLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [benchDefs, benchMap]);
+
+  const benchPoints = useMemo(
+    () => benchDefs.map((def) => ({ def, points: benchMap[def.id] ?? [] })).filter((b) => b.points.length > 0),
+    [benchDefs, benchMap],
+  );
+
+  const preset = OVERLAY_PRESETS.find((p) => p.id === presetId) ?? null;
+  const corrPairs = useMemo(
+    () => (presetId ? PRESET_CORR_PAIRS[presetId] ?? [] : []),
+    [presetId],
+  );
+
+  // 只加载「图上要画的 + 相关表要算的」，不预取全量
+  useEffect(() => {
+    const ids = [...selected, ...corrPairs.flatMap((p) => [p.a, p.b])];
+    void load(ids);
+  }, [selected, corrPairs, load]);
+
+  const pointsFor = useCallback((id: string): DatedValue[] => series[id] ?? [], [series]);
+
+  const dates = useMemo(
+    () => buildAxis([...selected.map(pointsFor), ...benchPoints.map((b) => b.points)], days),
+    [selected, days, benchPoints, pointsFor],
+  );
+
+  const chartSeries = useMemo<OverlaySeries[]>(() => {
     const list = selected
+      .filter((id) => OVERLAY_BY_ID[id]?.axis === 'z')
       .map((id) => {
-        const meta = DAILY_METRICS.find((m) => m.id === id);
-        const extra = EXTRA_META[id];
+        const def = OVERLAY_BY_ID[id];
+        const values = alignToAxis(pointsFor(id), dates, 'z');
         return {
           id,
-          label: meta?.name.replace(/\s*\(.*\)/, '') ?? extra?.name ?? id,
-          values: alignToAxis(pointsFor(id), dates, 'z'),
-          color: METRIC_COLOR[id] ?? extra?.color ?? '#636878',
-          dash: (meta?.phase === '领先' ? 'dashed' : 'solid') as 'dashed' | 'solid',
+          label: def.label,
+          values,
+          color: def.color,
+          dash: (def.frequency === 'weekly' ? 'dashed' : 'solid') as 'dashed' | 'solid',
         };
       })
       .filter((s) => s.values.some((v) => v !== null));
 
-    if (showBench && bench.length) {
-      const benchValues = alignToAxis(bench, dates, 'z');
-      if (benchValues.some((v) => v !== null)) {
-        list.push({
-          id: 'BENCH',
-          label: benchmarkLabel(market),
-          values: benchValues,
-          color: BENCH_COLOR,
-          dash: 'solid',
-        });
+    benchPoints.forEach(({ def, points }) => {
+      const values = alignToAxis(points, dates, 'z');
+      if (values.some((v) => v !== null)) {
+        list.push({ id: `IDX_${def.id}`, label: def.label, values, color: def.color, dash: 'solid' });
       }
-    }
+    });
     return list;
-  }, [selected, dates, showBench, bench, market, pointsFor]);
+  }, [selected, dates, benchPoints, pointsFor]);
 
-  const benchChip = useMemo(() => {
-    if (!showBench || !bench.length) return null;
-    return { label: benchmarkLabel(market), z: latestZ(bench), dz: zDelta(bench) };
-  }, [showBench, bench, market]);
+  const chips = useMemo(
+    () =>
+      selected
+        .filter((id) => OVERLAY_BY_ID[id]?.axis === 'z')
+        .map((id) => {
+          const def = OVERLAY_BY_ID[id];
+          const points = pointsFor(id);
+          return {
+            id,
+            label: def.label,
+            color: def.color,
+            z: latestZ(points),
+            dz: zDelta(points),
+            ready: points.length > 20,
+          };
+        }),
+    [selected, pointsFor],
+  );
 
-  // 相关性只取“有数据”的前两条，避免默认组合里缺一条就整条不能算。
-  const availableSelected = selected.filter((id) => pointsFor(id).length > 20);
-  const corrPair = availableSelected.slice(0, 2);
-  const corr = useMemo(() => {
-    if (corrPair.length < 2) return { dates: [], values: [] };
-    return rollingCorrSeries(pointsFor(corrPair[0]), pointsFor(corrPair[1]), corrWindow);
-  }, [corrPair[0], corrPair[1], corrWindow, pointsFor]);
+  const missingLabels = useMemo(() => {
+    const out: string[] = [];
+    selected.forEach((id) => {
+      const points = pointsFor(id);
+      if (!points.some((p) => p.z !== null && p.z !== undefined)) {
+        out.push(OVERLAY_BY_ID[id]?.label ?? id);
+      }
+    });
+    benchDefs.forEach((def) => {
+      const loaded = benchMap[def.id];
+      if (loaded && loaded.length === 0) out.push(def.label);
+    });
+    return out;
+  }, [selected, pointsFor, benchDefs, benchMap]);
 
-  const chips = selected.map((id) => {
-    const points = pointsFor(id);
-    const z = latestZ(points);
-    const dz = zDelta(points);
-    const meta = DAILY_METRICS.find((m) => m.id === id);
-    const extra = EXTRA_META[id];
-    return {
-      id,
-      label: meta?.name.replace(/\s*\(.*\)/, '') ?? extra?.name ?? id,
-      z,
-      dz,
-      color: METRIC_COLOR[id] ?? extra?.color ?? '#636878',
-    };
-  });
+  const toggle = (id: string) => {
+    setPresetId(null);
+    setSelected((prev) => {
+      if (prev.includes(id)) {
+        return prev.length <= 1 ? prev : prev.filter((x) => x !== id);
+      }
+      return prev.length >= MAX_LINES ? prev : [...prev, id];
+    });
+  };
+
+  const applyPreset = (id: string) => {
+    const p = OVERLAY_PRESETS.find((x) => x.id === id);
+    if (!p) return;
+    setPresetId(id);
+    setSelected(p.ids);
+  };
 
   return (
     <div className="space-y-3">
@@ -216,7 +204,7 @@ export const OverlayLab = memo(function OverlayLab({ snapshot }: Props) {
           <div>
             <h3 className="text-[0.75rem] font-bold text-[#d8dce6]">叠加实验室</h3>
             <p className="mt-0.5 text-[0.5938rem] text-[#636878]">
-              所有线统一到滚动 Z 轴；最多 6 条。相关性单独放在图下，不用双 Y 轴。
+              宏观/指数线统一滚动 Z；相关系数单独 −1~1 面板，不混轴。宏观最多 6 条、指数最多 5 条。
             </p>
           </div>
           <div className="flex items-center gap-1">
@@ -235,13 +223,13 @@ export const OverlayLab = memo(function OverlayLab({ snapshot }: Props) {
         </div>
 
         <div className="mt-2 flex flex-wrap gap-1">
-          {PRESETS.map((p) => (
+          {OVERLAY_PRESETS.map((p) => (
             <button
               key={p.id}
-              onClick={() => setSelected(p.ids)}
+              onClick={() => applyPreset(p.id)}
               title={p.note}
               className={`rounded border px-2 py-1 text-[0.5938rem] transition-colors ${
-                JSON.stringify(selected) === JSON.stringify(p.ids)
+                presetId === p.id
                   ? 'border-[#4078ff] bg-[rgba(64,120,255,0.12)] text-[#d8dce6]'
                   : 'border-[#1a1d26] text-[#8a8f9d] hover:border-[#2a3040]'
               }`}
@@ -249,40 +237,86 @@ export const OverlayLab = memo(function OverlayLab({ snapshot }: Props) {
               {p.label}
             </button>
           ))}
-          <button
-            onClick={() => setShowBench((v) => !v)}
-            title="把大盘指数也换算成滚动 Z 叠加进来，看资金面指标相对大盘处在什么位置"
-            className={`rounded border px-2 py-1 text-[0.5938rem] transition-colors ${
-              showBench
-                ? 'border-[#e8ebf0] bg-[rgba(232,235,240,0.10)] text-[#e8ebf0]'
-                : 'border-[#1a1d26] text-[#8a8f9d] hover:border-[#2a3040]'
-            }`}
-          >
-            {benchLoading ? '加载大盘…' : benchEmpty ? '大盘暂不可用' : `+ 大盘基准（${benchmarkLabel(market)}）`}
-          </button>
         </div>
 
-        <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1">
-          {DAILY_METRICS.map((m) => {
-            const on = selected.includes(m.id);
-            return (
-              <button
-                key={m.id}
-                onClick={() => toggle(m.id)}
-                className="flex items-center gap-1 text-[0.5625rem]"
-                style={{ color: on ? '#d8dce6' : '#4d5364' }}
-                title={m.explanation}
-              >
-                <span
-                  className="inline-block h-1.5 w-1.5 rounded-full"
-                  style={{ background: on ? METRIC_COLOR[m.id] : '#2a3040' }}
-                />
-                {m.name.replace(/\s*\(.*\)/, '')}
-              </button>
-            );
-          })}
-          <span className="text-[0.5313rem] text-[#3a4050]">已选 {selected.length}/6</span>
+        {preset?.note && (
+          <p className="mt-1.5 text-[0.5625rem] leading-relaxed text-[#636878]">{preset.note}</p>
+        )}
+
+        <div className="mt-2 flex flex-wrap items-center gap-1">
+          <span className="text-[0.5313rem] text-[#3a4050]">已选 {selected.length}/{MAX_LINES}</span>
+          {chips.map((c) => (
+            <button
+              key={c.id}
+              onClick={() => toggle(c.id)}
+              className="flex items-center gap-1 rounded border border-[#1a1d26] px-2 py-0.5 text-[0.5625rem]"
+              style={{ color: c.color }}
+              title="点击移除"
+            >
+              <span className="inline-block h-1.5 w-1.5 rounded-full" style={{ background: c.color }} />
+              {c.label}
+              <span className="text-[#3a4050]">×</span>
+            </button>
+          ))}
+          {loading && <span className="text-[0.5313rem] text-[#3a4050]">取数中…</span>}
         </div>
+
+        <details className="mt-2">
+          <summary className="cursor-pointer text-[0.5625rem] text-[#4d5364] hover:text-[#8a8f9d]">
+            添加序列（按需取数，不会一次性拉全量）
+          </summary>
+          <div className="mt-1.5 space-y-1">
+            {(Object.keys(GROUP_LABEL) as OverlayDef['group'][]).map((group) => (
+              <div key={group} className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                <span className="w-[5.5rem] shrink-0 text-[0.5313rem] text-[#3a4050]">{GROUP_LABEL[group]}</span>
+                {OVERLAY_DEFS.filter((d) => d.group === group && d.axis === 'z').map((d) => {
+                  const on = selected.includes(d.id);
+                  return (
+                    <button
+                      key={d.id}
+                      onClick={() => toggle(d.id)}
+                      className="flex items-center gap-1 text-[0.5625rem]"
+                      style={{ color: on ? '#d8dce6' : '#4d5364' }}
+                      title={d.note}
+                    >
+                      <span
+                        className="inline-block h-1.5 w-1.5 rounded-full"
+                        style={{ background: on ? d.color : '#2a3040' }}
+                      />
+                      {d.label}
+                    </button>
+                  );
+                })}
+              </div>
+            ))}
+          </div>
+        </details>
+
+        {market === 'CN' && (
+          <div className="mt-2 flex flex-wrap items-center gap-1">
+            <span className="text-[0.5313rem] text-[#3a4050]">A 股指数</span>
+            {indexOptions(market).map((o) => {
+              const on = benchIds.includes(o.id);
+              return (
+                <button
+                  key={o.id}
+                  onClick={() => {
+                    setBenchIds((prev) => {
+                      if (prev.includes(o.id)) return prev.length <= 1 ? prev : prev.filter((x) => x !== o.id);
+                      return prev.length >= 3 ? prev : [...prev, o.id];
+                    });
+                  }}
+                  title={o.note}
+                  className="rounded border px-2 py-1 text-[0.5938rem] transition-colors"
+                  style={{ borderColor: on ? `${o.color}88` : '#1a1d26', color: on ? o.color : '#8a8f9d' }}
+                >
+                  {o.label}
+                </button>
+              );
+            })}
+            {benchLoading && <span className="text-[0.5313rem] text-[#3a4050]">取数中…</span>}
+          </div>
+        )}
       </div>
 
       <div className="rounded-[0.3125rem] border border-[#1a1d26] bg-[#0f1118] p-3">
@@ -293,40 +327,41 @@ export const OverlayLab = memo(function OverlayLab({ snapshot }: Props) {
               {c.dz !== null && <span className="ml-1 text-[#636878]">20日 {c.dz >= 0 ? '+' : ''}{c.dz.toFixed(2)}σ</span>}
             </span>
           ))}
-          {benchChip && (
-            <span className="rounded border border-[#2a3040] px-2 py-1 text-[0.5625rem]" style={{ color: BENCH_COLOR }}>
-              {benchChip.label} Z {benchChip.z === null ? '—' : benchChip.z.toFixed(2)}
-              {benchChip.dz !== null && (
-                <span className="ml-1 text-[#636878]">20日 {benchChip.dz >= 0 ? '+' : ''}{benchChip.dz.toFixed(2)}σ</span>
-              )}
+          {benchPoints.map(({ def, points }) => (
+            <span key={def.id} className="rounded border border-[#2a3040] px-2 py-1 text-[0.5625rem]" style={{ color: def.color }}>
+              {def.label} Z {latestZ(points) === null ? '—' : latestZ(points)!.toFixed(2)}
             </span>
-          )}
+          ))}
         </div>
 
-        <OverlayChart dates={dates} series={series} height="20rem" yLabel="滚动 Z-score（统一纵轴）" />
+        <OverlayChart dates={dates} series={chartSeries} height="20rem" yLabel="滚动 Z-score（统一纵轴）" />
 
-        {corrPair.length === 2 && (
-          <div className="mt-2">
-            <div className="flex items-center justify-between">
-              <span className="text-[0.5938rem] text-[#636878]">
-                {chips.find((c) => c.id === corrPair[0])?.label} ↔ {chips.find((c) => c.id === corrPair[1])?.label} · 滚动相关（变化率）
-              </span>
-              <div className="flex items-center gap-1">
-                {[20, 60, 120].map((w) => (
-                  <button
-                    key={w}
-                    onClick={() => setCorrWindow(w)}
-                    className={`rounded px-1 py-0.5 text-[0.5313rem] ${
-                      corrWindow === w ? 'bg-[rgba(255,255,255,0.08)] text-[#d8dce6]' : 'text-[#4d5364]'
-                    }`}
-                  >
-                    {w}D
-                  </button>
-                ))}
-              </div>
-            </div>
-            <CorrelationStrip dates={corr.dates.slice(-Math.max(days, corrWindow))} values={corr.values.slice(-Math.max(days, corrWindow))} label="corr" height="5rem" />
-          </div>
+        <OverlayCorrTable pairs={corrPairs} series={series} window={corrWindow} presetId={presetId} />
+
+        <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+          <span className="text-[0.5313rem] text-[#4d5364]">
+            相关窗口
+            {[20, 60, 120].map((w) => (
+              <button
+                key={w}
+                onClick={() => setCorrWindow(w)}
+                className={`ml-1 rounded px-1 py-0.5 text-[0.5313rem] ${
+                  corrWindow === w ? 'bg-[rgba(255,255,255,0.08)] text-[#d8dce6]' : 'text-[#4d5364]'
+                }`}
+              >
+                {w}D
+              </button>
+            ))}
+          </span>
+          <span className="text-[0.5313rem] text-[#4d5364]">
+            相关用变化率（价格对数收益、利率一阶差分），不拿水平值硬算
+          </span>
+        </div>
+
+        {missingLabels.length > 0 && (
+          <p className="mt-1 text-[0.5625rem] text-[#f59e4b]">
+            未取到数据（未画入图中）：{missingLabels.join('、')}。多数是上游暂时不可达或该序列当天无值，刷新可重试。
+          </p>
         )}
       </div>
     </div>
