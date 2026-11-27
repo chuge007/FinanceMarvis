@@ -1,0 +1,1695 @@
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pytest
+
+from pysdmx.errors import Invalid
+from pysdmx.errors import NotImplemented as NotImplementedError_
+from pysdmx.io.format import Format
+from pysdmx.io.input_processor import process_string_to_read
+from pysdmx.io.reader import read_sdmx
+from pysdmx.io.reader import read_sdmx as reader
+from pysdmx.io.writer import write_sdmx
+from pysdmx.io.xml.sdmx30.reader.structure import read as read_structure
+from pysdmx.io.xml.sdmx30.writer.structure import write as write_structure
+from pysdmx.model import (
+    Agency,
+    AgencyScheme,
+    AvailabilityConstraint,
+    Categorisation,
+    CategoryScheme,
+    Code,
+    Codelist,
+    ConceptScheme,
+    ConstraintAttachment,
+    Contact,
+    CubeKeyValue,
+    CubeRegion,
+    CubeTimeRange,
+    CubeValue,
+    CustomType,
+    CustomTypeScheme,
+    DataConstraint,
+    DataConsumer,
+    DataConsumerScheme,
+    Dataflow,
+    DataflowRef,
+    DataKey,
+    DataKeyValue,
+    DataProvider,
+    DataProviderScheme,
+    Hierarchy,
+    ItemReference,
+    KeySet,
+    MetadataAttribute,
+    Metadataflow,
+    MetadataProvider,
+    MetadataProviderScheme,
+    MetadataProvisionAgreement,
+    MetadataReport,
+    MetadataStructure,
+    NamePersonalisation,
+    NamePersonalisationScheme,
+    Reference,
+    RulesetScheme,
+    TransformationScheme,
+    UserDefinedOperatorScheme,
+    VtlDataflowMapping,
+    VtlMappingScheme,
+)
+from pysdmx.model.dataflow import DataStructureDefinition, ProvisionAgreement
+from pysdmx.model.dataset import ActionType
+
+
+@pytest.fixture
+def samples_folder():
+    return Path(__file__).parent / "samples"
+
+
+@pytest.mark.xml
+def test_hierarchy_30(samples_folder):
+    data_path = samples_folder / "hierarchy.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.STRUCTURE_SDMX_ML_3_0
+    result = read_sdmx(input_str, validate=True).structures
+    hierarchy = result[0]
+    assert isinstance(hierarchy, Hierarchy)
+    assert hierarchy.id == "H1"
+    assert hierarchy.agency == "BIS"
+    assert hierarchy.has_formal_levels is False
+    assert hierarchy.level is None
+    assert len(hierarchy.codes) == 2
+    code_a = hierarchy.codes[0]
+    assert code_a.id == "A"
+    assert (
+        code_a.urn
+        == "urn:sdmx:org.sdmx.infomodel.codelist.Code=BIS:CL_FREQ(1.0).A"
+    )
+    assert len(code_a.codes) == 1
+    assert code_a.codes[0].id == "A1"
+    code_b = hierarchy.codes[1]
+    assert code_b.rel_valid_from == datetime(2021, 1, 1, tzinfo=timezone.utc)
+    assert code_b.rel_valid_to == datetime(2021, 12, 31, tzinfo=timezone.utc)
+
+
+@pytest.mark.xml
+def test_hierarchy_levels_30(samples_folder):
+    data_path = samples_folder / "hierarchy_levels.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.STRUCTURE_SDMX_ML_3_0
+    result = read_sdmx(input_str, validate=True).structures
+    hierarchy = result[0]
+    assert isinstance(hierarchy, Hierarchy)
+    assert hierarchy.has_formal_levels is True
+    assert hierarchy.level is not None
+    assert hierarchy.level.id == "0"
+    assert hierarchy.level.name == "Division"
+    assert hierarchy.level.level.id == "1"
+    assert hierarchy.level.level.name == "Group"
+    assert hierarchy.level.level.level is None
+    assert hierarchy.codes[0].level == "1"
+    assert hierarchy.codes[1].level is None
+
+
+def test_dataflow_30(samples_folder):
+    data_path = samples_folder / "data_dataflow_3.0.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.DATA_SDMX_ML_3_0
+    result = read_sdmx(input_str, validate=True)
+    header = result.header
+    assert header.structure == {
+        "Dataflow=BIS:WEBSTATS_DER_DATAFLOW(1.0)": "AllDimensions"
+    }
+    assert header.receiver[0].id == "AR2"
+    assert header.receiver[1].id == "UY2"
+    assert result.data is not None
+    data = result.data[0].data
+    num_rows = len(data)
+    num_columns = data.shape[1]
+    assert num_rows == 2
+    assert num_columns == 19
+
+
+def test_datastructure_30__series(samples_folder):
+    data_path = samples_folder / "data_datastructure_3.0_series.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.DATA_SDMX_ML_3_0
+    result = read_sdmx(input_str, validate=True)
+    header = result.header
+    assert header.structure == {
+        "DataStructure=BIS:BIS_CBS(1.0)": "TIME_PERIOD"
+    }
+    assert result.data is not None
+    data = result.data[0].data
+    num_rows = len(data)
+    num_columns = data.shape[1]
+    assert num_rows == 3
+    assert num_columns == 17
+
+
+def test_prov_agree_30_groups_series(samples_folder):
+    data_path = samples_folder / "data_prov_agree_3.0.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.DATA_SDMX_ML_3_0
+    result = read_sdmx(input_str, validate=True)
+    header = result.header
+    assert header.structure == {
+        "ProvisionAgreement=BIS:WEBSTATS_DER_DATAFLOW(1.0)": "AllDimensions"
+    }
+    assert result.data is not None
+    data = result.data[0].data
+    num_rows = len(data)
+    num_columns = data.shape[1]
+    assert num_rows == 3
+    assert num_columns == 5
+
+
+def test_data_groups_30():
+    data_path = (
+        Path(__file__).parents[1]
+        / "writer"
+        / "samples"
+        / "test_dataset_with_groups.xml"
+    )
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.DATA_SDMX_ML_3_0
+    data = read_sdmx(input_str, validate=True).data[0].data
+
+    # ATT3 is the attribute of the Groups
+    expected = {
+        "DIM2": ["4", "5", "6"],
+        "ATT1": ["A", "B", "C"],
+        "DIM1": ["1", "2", "3"],
+        "M1": ["10", "11", "12"],
+        "ATT2": ["7", "8", "9"],
+        "ATT3": ["H", "I", "J"],
+    }
+    assert data.to_dict("list") == expected
+    assert list(data.columns) == list(expected)
+    assert all(str(dtype) == "string[pyarrow]" for dtype in data.dtypes)
+
+
+def test_data_set_attributes_in_atts_30():
+    data_path = (
+        Path(__file__).parents[1]
+        / "writer"
+        / "samples"
+        / "test_dataset_with_groups.xml"
+    )
+    text = data_path.read_text(encoding="utf-8")
+    # Unlike the Atts of the sample, this one has a key (DIM2)
+    text = text.replace("<Atts ", '<Atts DIM2="4" ATT9="X" />\n\t\t<Atts ', 1)
+
+    result = read_sdmx(text, validate=True).data[0]
+
+    assert result.attributes == {"ds_att1": "value1", "ds_att2": "10"}
+
+
+def test_data_no_structure_specific(samples_folder):
+    from pysdmx.io.xml.sdmx30.reader.structure_specific import (
+        read as read_str_spe,
+    )
+
+    data_path = samples_folder / "dataflow_no_structure_specific.xml"
+    with open(data_path, "r") as f:
+        text = f.read()
+    with pytest.raises(
+        Invalid,
+        match="This SDMX document is not an SDMX-ML StructureSpecificData.",
+    ):
+        read_str_spe(text, validate=False)
+
+
+@pytest.mark.xml
+def test_agency_scheme_read(samples_folder):
+    data_path = samples_folder / "agencies.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.STRUCTURE_SDMX_ML_3_0
+    result = read_structure(input_str, validate=True)
+    assert result is not None
+
+    assert isinstance(result[0], AgencyScheme)
+    agency_scheme = result[0]
+    assert agency_scheme.id == "AGENCIES"
+    assert agency_scheme.name == "MD Agency Scheme"
+    assert agency_scheme.agency == "MD"
+
+    assert isinstance(agency_scheme.items[0], Agency)
+    agency = agency_scheme.items[0]
+    # The scheme owner ("MD") is not "SDMX", so the sub-agency id is stored
+    # as "owner.local" ("MD.AG"), mirroring the SDMX-JSON reader. The XML
+    # itself carries only the local id ("AG").
+    assert agency.id == "MD.AG"
+    assert agency.name == "AGENCY"
+    assert agency.description == "AGENCY"
+    assert (
+        agency.urn
+        == "urn:sdmx:org.sdmx.infomodel.base.Agency=MD:AGENCIES(1.0).AG"
+    )
+
+    assert isinstance(agency.contacts[0], Contact)
+    contact = agency.contacts[0]
+    assert contact.name == "CONTACT"
+    assert contact.role == "ROLE"
+
+
+@pytest.mark.xml
+@pytest.mark.parametrize(
+    "sdmx_format",
+    [
+        Format.STRUCTURE_SDMX_ML_2_1,
+        Format.STRUCTURE_SDMX_ML_3_0,
+        Format.STRUCTURE_SDMX_ML_3_1,
+    ],
+)
+def test_non_sdmx_agency_scheme_roundtrip(samples_folder, sdmx_format):
+    # A non-"SDMX"-owned AgencyScheme ("MD") stores its sub-agency id as
+    # "MD.AG"; the SDMX-ML id and URN must use the local part ("AG"), and
+    # reading back must reconstruct the owner-prefixed id so the round-trip
+    # is stable.
+    original = read_sdmx(str(samples_folder / "agencies.xml"))
+    assert original.get_agency_schemes()[0].items[0].id == "MD.AG"
+
+    result = write_sdmx(original.get_agency_schemes(), sdmx_format)
+    assert 'id="AG"' in result
+    assert 'id="MD.AG"' not in result
+    assert "Agency=MD:AGENCIES(1.0).AG" in result
+
+    reparsed = read_sdmx(result, validate=True)
+    assert original.get_agency_schemes() == reparsed.get_agency_schemes()
+
+
+@pytest.mark.xml
+def test_org_schemes_read(samples_folder):
+    data_path = samples_folder / "org_schemes.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.STRUCTURE_SDMX_ML_3_0
+    result = read_structure(input_str, validate=True)
+
+    by_type = {type(s): s for s in result}
+    assert set(by_type) == {
+        DataProviderScheme,
+        DataConsumerScheme,
+        MetadataProviderScheme,
+    }
+
+    dps = by_type[DataProviderScheme]
+    assert dps.agency == "MD"
+    provider = dps.items[0]
+    assert isinstance(provider, DataProvider)
+    assert provider.id == "DP"
+    assert provider.description == "DATA PROVIDER"
+    assert (
+        provider.urn == "urn:sdmx:org.sdmx.infomodel.base.DataProvider"
+        "=MD:DATA_PROVIDERS(1.0).DP"
+    )
+    assert provider.contacts[0].name == "CONTACT"
+    assert provider.contacts[0].emails == ("dp.test@md.org",)
+
+    dcs = by_type[DataConsumerScheme]
+    assert isinstance(dcs.items[0], DataConsumer)
+    assert dcs.items[0].id == "DC"
+
+    mps = by_type[MetadataProviderScheme]
+    assert isinstance(mps.items[0], MetadataProvider)
+    assert mps.items[0].id == "MP"
+
+
+@pytest.mark.xml
+def test_provider_scheme_enrichment_read(samples_folder):
+    data_path = samples_folder / "provider_scheme_enrichment.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.STRUCTURE_SDMX_ML_3_0
+    result = read_structure(input_str, validate=True)
+
+    schemes = [s for s in result if isinstance(s, DataProviderScheme)]
+    assert len(schemes) == 1
+    provider = schemes[0].items[0]
+    assert provider.id == "MD"
+    assert provider.dataflows == (
+        DataflowRef(id="TEST", agency="MD", version="1.0"),
+    )
+
+
+@pytest.mark.xml
+def test_metadata_provider_scheme_enrichment_read(samples_folder):
+    data_path = samples_folder / "metadata_provider_scheme_enrichment.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.STRUCTURE_SDMX_ML_3_0
+    result = read_structure(input_str, validate=True)
+
+    # The MetadataProvisionAgreement is parsed into the model.
+    mpas = [s for s in result if isinstance(s, MetadataProvisionAgreement)]
+    assert len(mpas) == 1
+    mpa = mpas[0]
+    assert mpa.short_urn == "MetadataProvisionAgreement=MD:MPA_TEST(1.0)"
+    assert mpa.metadataflow == (
+        "urn:sdmx:org.sdmx.infomodel.metadatastructure."
+        "Metadataflow=MD:MDF_TEST(1.0)"
+    )
+    assert mpa.metadata_provider == (
+        "urn:sdmx:org.sdmx.infomodel.base."
+        "MetadataProvider=MD:METADATA_PROVIDERS(1.0).MP1"
+    )
+
+    # The metadata provider named by the MPA is enriched with its
+    # metadataflow; the one not referenced by any MPA stays empty.
+    schemes = [s for s in result if isinstance(s, MetadataProviderScheme)]
+    assert len(schemes) == 1
+    providers = {p.id: p for p in schemes[0].items}
+    assert providers["MP1"].dataflows == (
+        DataflowRef(id="MDF_TEST", agency="MD", version="1.0"),
+    )
+    assert providers["MP2"].dataflows == ()
+
+
+@pytest.mark.xml
+def test_agency_scheme_defaults_omitted(samples_folder):
+    data_path = samples_folder / "agencies_defaults.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.STRUCTURE_SDMX_ML_3_0
+    result = read_structure(input_str, validate=True)
+
+    agency_scheme = result[0]
+    assert isinstance(agency_scheme, AgencyScheme)
+
+    # When id, name, and version match the SDMX standard defaults,
+    # they should use model defaults (not be explicitly set from XML),
+    # aligning XML reader behavior with JSON reader behavior.
+    assert agency_scheme.id == "AGENCIES"
+    assert agency_scheme.name == "AGENCIES"
+    assert agency_scheme.version == "1.0"
+    assert agency_scheme.agency == "SDMX"
+
+    expected = AgencyScheme(
+        is_final=agency_scheme.is_final,
+        is_external_reference=agency_scheme.is_external_reference,
+        agency="SDMX",
+        items=agency_scheme.items,
+    )
+    assert agency_scheme == expected
+    assert repr(agency_scheme) == repr(expected)
+
+    assert len(agency_scheme.items) == 1
+    assert agency_scheme.items[0].id == "BIS"
+    assert agency_scheme.items[0].name == "Bank for International Settlements"
+
+
+@pytest.mark.xml
+def test_code_list_read(samples_folder):
+    data_path = samples_folder / "codelists.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.STRUCTURE_SDMX_ML_3_0
+    result = read_structure(input_str, validate=True)
+    assert result is not None
+    assert len(result) == 1
+
+    assert isinstance(result[0], Codelist)
+    codelist = result[0]
+    assert codelist.id == "CL_AGE"
+    assert codelist.name == "Age"
+    assert codelist.short_urn == "Codelist=SDMX:CL_AGE(1.0)"
+    assert codelist.version == "1.0"
+    assert codelist.is_final is False
+
+    assert len(codelist.items) == 5
+    assert isinstance(codelist.items[0], Code)
+    assert codelist.items[0].id == "Y"
+    assert codelist.items[0].name == "Year(s)"
+    assert codelist.items[1].id == "M"
+    assert codelist.items[1].name == "Month(s)"
+
+
+@pytest.mark.xml
+def test_code_list_semver_final_read(samples_folder):
+    data_path = samples_folder / "codelists_semver.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.STRUCTURE_SDMX_ML_3_0
+    result = read_structure(input_str, validate=True)
+    assert result is not None
+    assert len(result) == 1
+
+    assert isinstance(result[0], Codelist)
+    codelist = result[0]
+    assert codelist.agency == "SDMX"
+    assert codelist.id == "CL_AGE"
+    assert codelist.name == "Age"
+    assert codelist.short_urn == "Codelist=SDMX:CL_AGE(1.0.0)"
+    assert codelist.version == "1.0.0"
+    assert codelist.is_final is True
+
+    assert len(codelist.items) == 5
+    assert isinstance(codelist.items[0], Code)
+    assert codelist.items[0].id == "Y"
+    assert codelist.items[0].name == "Year(s)"
+    assert codelist.items[1].id == "M"
+    assert codelist.items[1].name == "Month(s)"
+
+
+@pytest.mark.xml
+def test_code_list_semver_non_final_read(samples_folder):
+    data_path = samples_folder / "codelists_semver_nf.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.STRUCTURE_SDMX_ML_3_0
+    result = read_structure(input_str, validate=True)
+    assert result is not None
+    assert len(result) == 1
+
+    assert isinstance(result[0], Codelist)
+    codelist = result[0]
+    assert codelist.agency == "SDMX"
+    assert codelist.id == "CL_AGE"
+    assert codelist.name == "Age"
+    assert codelist.short_urn == "Codelist=SDMX:CL_AGE(1.0.0-draft)"
+    assert codelist.version == "1.0.0-draft"
+    assert codelist.is_final is False
+
+    assert len(codelist.items) == 5
+    assert isinstance(codelist.items[0], Code)
+    assert codelist.items[0].id == "Y"
+    assert codelist.items[0].name == "Year(s)"
+    assert codelist.items[1].id == "M"
+    assert codelist.items[1].name == "Month(s)"
+
+
+def test_codelist_read_draft(samples_folder):
+    data_path = samples_folder / "codelist_draft_version.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.STRUCTURE_SDMX_ML_3_0
+    result = read_structure(input_str, validate=True)
+    assert result is not None
+    assert len(result) == 1
+
+    assert isinstance(result[0], Codelist)
+    codelist: Codelist = result[0]
+    assert codelist.id == "CL_DRAFT"
+    assert codelist.name == "Draft Codelist"
+    assert codelist.short_urn == "Codelist=MD:CL_DRAFT(1.0.0-Draft)"
+    assert codelist.version == "1.0.0-Draft"
+    assert codelist.is_final is False
+    assert len(codelist.codes) == 0
+
+
+def test_codelist_without_is_final_defaults_false(samples_folder):
+    """SDMX 3.0 has no isFinal attribute; is_final defaults to False."""
+    data_path = samples_folder / "codelists.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    result = read_structure(input_str, validate=True)
+
+    codelist = result[0]
+    assert isinstance(codelist, Codelist)
+    assert codelist.is_final is False
+
+
+def test_dataflow_without_is_final_defaults_false(samples_folder):
+    """SDMX 3.0 has no isFinal attribute; is_final defaults to False."""
+    data_path = samples_folder / "dataflow_final_version.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    result = read_structure(input_str, validate=True)
+
+    dataflow = result[0]
+    assert isinstance(dataflow, Dataflow)
+    assert dataflow.is_final is False
+
+
+def test_dataflow_read_final(samples_folder):
+    data_path = samples_folder / "dataflow_final_version.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.STRUCTURE_SDMX_ML_3_0
+    result = read_structure(input_str, validate=True)
+    assert result is not None
+    assert len(result) == 1
+
+    assert isinstance(result[0], Dataflow)
+    dataflow: Dataflow = result[0]
+    assert dataflow.id == "NAMAIN_IDC_N"
+    assert dataflow.agency == "SDMX"
+    assert dataflow.name == "NAMAIN_IDC_N df"
+    assert dataflow.short_urn == "Dataflow=SDMX:NAMAIN_IDC_N(1.0)"
+    assert dataflow.version == "1.0"
+    assert dataflow.is_final is False
+    assert dataflow.is_external_reference is False
+    assert "DataStructure=ESTAT:NA_MAIN(1.6)" in dataflow.structure
+
+
+def test_value_list_read(samples_folder):
+    data_path = samples_folder / "valuelist.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.STRUCTURE_SDMX_ML_3_0
+    result = read_structure(input_str, validate=True)
+    assert result is not None
+    assert len(result) == 1
+    assert isinstance(result[0], Codelist)
+    codelist = result[0]
+    assert codelist.id == "VL_CURRENCY_SYMBOL"
+    assert codelist.name == "Currency Symbol"
+    assert codelist.short_urn == "ValueList=EXAMPLE:VL_CURRENCY_SYMBOL(1.0)"
+    assert codelist.sdmx_type == "valuelist"
+
+
+@pytest.mark.xml
+def test_dataflow_structure_read(samples_folder):
+    data_path = samples_folder / "dataflow_structure.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.STRUCTURE_SDMX_ML_3_0
+    result = read_structure(input_str, validate=True)
+    assert result is not None
+    dataflow = result[0]
+    assert dataflow.id == "EXR"
+    assert dataflow.name == "ECB Exchange Rates"
+    assert (
+        dataflow.description == "ECB Exchange Rates - example of "
+        "a 'non-country-specific' data source"
+    )
+    assert dataflow.short_urn == "Dataflow=ECB:EXR(1.0)"
+    assert dataflow.structure == "DataStructure=ECB:EXR(1.0)"
+    assert (
+        dataflow.urn
+        == "urn:sdmx:org.sdmx.infomodel.datastructure.Dataflow=ECB:EXR(1.0)"
+    )
+
+
+def test_data_structure_read(samples_folder):
+    data_path = samples_folder / "data_structure.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.STRUCTURE_SDMX_ML_3_0
+    result = read_structure(input_str, validate=True)
+    assert result is not None
+    assert isinstance(result[0], DataStructureDefinition)
+    data_structure = result[0]
+    assert data_structure.id == "DS"
+    assert data_structure.agency == "MD"
+    assert data_structure.name == "DS Test"
+    assert data_structure.short_urn == "DataStructure=MD:DS(1.0)"
+
+    attributes = data_structure.components.attributes
+    assert len(attributes) == 3
+    assert attributes[0].required is False
+    assert attributes[0].attachment_level == "FREQ"
+    assert attributes[1].required is True
+    assert attributes[1].attachment_level == "O"
+    assert attributes[2].required is True
+    assert attributes[2].attachment_level == "D"
+
+    dimensions = data_structure.components.dimensions
+    assert len(dimensions) == 2
+    assert dimensions[0].concept == ItemReference(
+        sdmx_type="Concept",
+        agency="MD",
+        id="STANDALONE_CONCEPT_SCHEME",
+        version="1.0",
+        item_id="FREQ",
+    )
+    assert dimensions[1].concept == ItemReference(
+        sdmx_type="Concept",
+        agency="MD",
+        id="STANDALONE_CONCEPT_SCHEME",
+        version="1.0",
+        item_id="TIME_PERIOD",
+    )
+
+    measures = data_structure.components.measures
+    assert len(measures) == 2
+    assert measures[0].id == "OBS_VALUE"
+    assert measures[1].id == "OBS_VALUE1"
+
+
+def test_concepts_read(samples_folder):
+    data_path = samples_folder / "concepts.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.STRUCTURE_SDMX_ML_3_0
+    result = read_structure(input_str, validate=True)
+    assert result is not None
+    concept_scheme = result[0]
+    assert concept_scheme.agency == "MD"
+    assert concept_scheme.id == "STANDALONE_CONCEPT_SCHEME"
+    assert concept_scheme.name == "Default Scheme"
+    concepts = concept_scheme.items
+    assert len(concepts) == 2
+
+
+def test_concept_scheme_read(samples_folder):
+    data_path = samples_folder / "conceptscheme.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.STRUCTURE_SDMX_ML_3_0
+    result = read_structure(input_str, validate=True)
+    assert result is not None
+    assert isinstance(result[0], ConceptScheme)
+    concept_scheme = result[0]
+    assert concept_scheme.id == "ECB_CONCEPTS"
+    assert concept_scheme.name == "ECB concepts"
+    assert concept_scheme.short_urn == "ConceptScheme=ECB:ECB_CONCEPTS(1.0)"
+    assert len(concept_scheme.items) == 342
+
+
+def test_concepts_codelist_read(samples_folder):
+    data_path = samples_folder / "concepts_codelist.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.STRUCTURE_SDMX_ML_3_0
+    result = read_structure(input_str, validate=True)
+    assert result is not None
+    codelist = result[0]
+    assert isinstance(codelist, Codelist)
+    concepts = result[2].items
+    assert len(concepts) == 1
+    concept = concepts[0]
+    assert concept.codes.items[0] == codelist.items[0]
+
+
+def test_dsd_cod_concept_ref_read(samples_folder):
+    data_path = samples_folder / "dsd_cod_concept_ref.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.STRUCTURE_SDMX_ML_3_0
+    result = read_structure(input_str, validate=True)
+    assert result is not None
+    codelist = result[1]
+    code = codelist.items[0]
+    concept_scheme = result[2]
+    concept = concept_scheme.items[0]
+    dsd = result[3]
+    dimensions = dsd.components.dimensions
+    dimension = dimensions[0]
+    assert dimension.concept == concept
+    assert dimension.enumeration.items[0].urn == code.urn
+
+
+def test_data_structure_metadata(samples_folder):
+    data_path = samples_folder / "data_structure_metadata.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.STRUCTURE_SDMX_ML_3_0
+    result = read_structure(input_str, validate=True)
+    assert result is not None
+
+
+def test_data_structure_concept_id_with_ref(samples_folder):
+    """Regression test for issue #596.
+
+    ConceptIdentity URNs whose item id contains the substring "Ref"
+    (e.g. ReferentieDatum) must not be treated as a dict <Ref/> child.
+    """
+    data_path = samples_folder / "datastructure_concept_id_with_ref.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.STRUCTURE_SDMX_ML_3_0
+    result = read_structure(input_str, validate=True)
+    dsd = result[0]
+    dim = next(c for c in dsd.components if c.id == "REFERENTIE_DATUM")
+    assert dim.concept == ItemReference(
+        sdmx_type="Concept",
+        agency="MD",
+        id="STANDALONE_CONCEPT_SCHEME",
+        version="1.0",
+        item_id="ReferentieDatum",
+    )
+
+
+def test_data_structure_with_link_codelist(samples_folder):
+    data_path = samples_folder / "datastructure_complete_with_link.xml"
+    with open(data_path, "r", encoding="utf-8") as file:
+        f = file.read()
+    message = reader(f, validate=True).structures
+    assert message is not None
+
+
+def test_data_structure_no_structure(samples_folder):
+    data_path = samples_folder / "data_structure_no_structure.xml"
+    with open(data_path, "r", encoding="utf-8") as file:
+        f = file.read()
+    with pytest.raises(
+        Invalid, match="This SDMX document is not SDMX-ML 3.0 Structure."
+    ):
+        read_structure(f, validate=False)
+
+
+def test_transformation_scheme_read(samples_folder):
+    data_path = samples_folder / "transformation_scheme.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.STRUCTURE_SDMX_ML_3_0
+    result = read_structure(input_str, validate=True)
+    assert result is not None
+    transformation_scheme = result[0]
+    assert transformation_scheme.id == "TEST"
+    assert transformation_scheme.name == "TEST"
+    assert transformation_scheme.description == "TEST"
+    assert (
+        transformation_scheme.short_urn
+        == "TransformationScheme=SDMX:TEST(1.0)"
+    )
+    tranformations = transformation_scheme.items
+    assert len(tranformations) == 2
+    assert tranformations[0].id == "test_trans"
+    assert tranformations[0].is_persistent is True
+    assert tranformations[0].full_expression == "DS_r <- DS_1 + 1;"
+    assert tranformations[1].id == "test_trans2"
+    assert tranformations[1].is_persistent is False
+    assert tranformations[1].full_expression == "DS_r := DS_1 + 1;"
+    ruleset_schemes = transformation_scheme.ruleset_schemes
+    assert ruleset_schemes[0] == Reference(
+        sdmx_type="RulesetScheme",
+        agency="MD",
+        id="TEST_RULE_SCHEME",
+        version="1.0",
+    )
+    udo_schemes = transformation_scheme.user_defined_operator_schemes
+    assert udo_schemes[0] == Reference(
+        sdmx_type="UserDefinedOperatorScheme",
+        agency="MD",
+        id="TEST_UDO_SCHEME",
+        version="1.0",
+    )
+
+
+def test_ruleset_scheme_read(samples_folder):
+    data_path = samples_folder / "ruleset_scheme.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.STRUCTURE_SDMX_ML_3_0
+    result = read_structure(input_str, validate=True)
+    assert result is not None
+    ruleset_scheme = result[0]
+    assert ruleset_scheme.id == "TEST_RULESET_SCHEME"
+    assert ruleset_scheme.name == "Testing Ruleset Scheme"
+    assert (
+        ruleset_scheme.short_urn == "RulesetScheme=MD:TEST_RULESET_SCHEME(1.0)"
+    )
+    rulesets = ruleset_scheme.items
+    assert len(rulesets) == 1
+    assert rulesets[0].id == "TEST_DATAPOINT_RULESET"
+    assert rulesets[0].name == "Testing Datapoint Ruleset"
+    assert rulesets[0].ruleset_scope == "variable"
+    assert rulesets[0].ruleset_type == "datapoint"
+
+
+def test_udo_scheme_read(samples_folder):
+    data_path = samples_folder / "udo_scheme.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.STRUCTURE_SDMX_ML_3_0
+    result = read_structure(input_str, validate=True)
+    assert result is not None
+    udo_scheme = result[0]
+    assert udo_scheme.id == "TEST_UDO_SCHEME"
+    assert udo_scheme.name == "Testing UDO Scheme"
+    assert (
+        udo_scheme.short_urn
+        == "UserDefinedOperatorScheme=MD:TEST_UDO_SCHEME(1.0)"
+    )
+    udos = udo_scheme.items
+    assert len(udos) == 1
+    assert udos[0].id == "TEST_UDO"
+    assert udos[0].name == "UDO Testing"
+    ruleset_schemes = udo_scheme.ruleset_schemes
+    assert len(ruleset_schemes) == 1
+    assert ruleset_schemes[0] == Reference(
+        sdmx_type="RulesetScheme",
+        agency="MD",
+        id="TEST_RULESET_SCHEME",
+        version="1.0",
+    )
+
+
+def test_vtl_scheme_references_read(samples_folder):
+    data_path = samples_folder / "vtl_scheme_references.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.STRUCTURE_SDMX_ML_3_0
+    result = read_structure(input_str, validate=True)
+    assert result is not None
+    udo_scheme = result[1]
+    assert udo_scheme.id == "TEST_UDO_SCHEME"
+    assert udo_scheme.name == "Testing UDO Scheme"
+    udo_rule_schemes = udo_scheme.ruleset_schemes
+    assert len(udo_rule_schemes) == 1
+    assert udo_rule_schemes[0].id == "TEST_RULESET_SCHEME"
+    assert udo_rule_schemes[0].agency == "MD"
+    assert udo_rule_schemes[0].version == "1.0"
+    assert (
+        udo_rule_schemes[0].short_urn
+        == "RulesetScheme=MD:TEST_RULESET_SCHEME(1.0)"
+    )
+    transformation_scheme = result[2]
+    assert transformation_scheme.id == "TEST"
+    assert transformation_scheme.name == "TEST"
+    trans_rule_schemes = transformation_scheme.ruleset_schemes
+    assert len(trans_rule_schemes) == 1
+    assert trans_rule_schemes[0].id == "TEST_RULESET_SCHEME"
+    assert trans_rule_schemes[0].agency == "MD"
+    assert trans_rule_schemes[0].version == "1.0"
+    assert (
+        trans_rule_schemes[0].short_urn
+        == "RulesetScheme=MD:TEST_RULESET_SCHEME(1.0)"
+    )
+    trans_udo_schemes = transformation_scheme.user_defined_operator_schemes
+    assert len(trans_udo_schemes) == 1
+    assert trans_udo_schemes[0].id == "TEST_UDO_SCHEME"
+    assert trans_udo_schemes[0].agency == "MD"
+    assert trans_udo_schemes[0].version == "1.0"
+    assert (
+        trans_udo_schemes[0].short_urn
+        == "UserDefinedOperatorScheme=MD:TEST_UDO_SCHEME(1.0)"
+    )
+
+
+def test_vtl_mapping_read(samples_folder):
+    data_path = samples_folder / "vtlmapping.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.STRUCTURE_SDMX_ML_3_0
+    result = read_structure(input_str, validate=True)
+    assert result is not None
+    assert len(result) == 3
+    # Vtl Mapping Scheme
+    assert isinstance(result[0], VtlMappingScheme)
+    vtl_mapping_scheme = result[0]
+    assert vtl_mapping_scheme.id == "VTLMS1"
+    assert vtl_mapping_scheme.name == "Test Vtl Mapping Scheme"
+    assert vtl_mapping_scheme.short_urn == "VtlMappingScheme=MD:VTLMS1(1.0)"
+    assert isinstance(vtl_mapping_scheme.items[0], VtlDataflowMapping)
+    vtl_dataflow = vtl_mapping_scheme.items[0]
+    assert vtl_dataflow.id == "VTLM1"
+    assert vtl_dataflow.name == "Test Vtl Mapping"
+    # Name Personalisation Scheme
+    assert isinstance(result[1], NamePersonalisationScheme)
+    name_personalisation_scheme = result[1]
+    assert name_personalisation_scheme.id == "NPS1"
+    assert (
+        name_personalisation_scheme.name == "Test Name Personalisation Scheme"
+    )
+    assert (
+        name_personalisation_scheme.short_urn
+        == "NamePersonalisationScheme=MD:NPS1(1.0)"
+    )
+    assert isinstance(
+        name_personalisation_scheme.items[0], NamePersonalisation
+    )
+    name_personalisation = name_personalisation_scheme.items[0]
+    assert name_personalisation.id == "NP1"
+    assert name_personalisation.name == "Test Name Personalisation"
+    assert name_personalisation.vtl_artefact == "TEST_VTL_ARTEFACT"
+    assert name_personalisation.vtl_default_name == "TEST_DEFAULT"
+    # Custom Type Scheme
+    assert isinstance(result[2], CustomTypeScheme)
+    custom_type_scheme = result[2]
+    assert custom_type_scheme.id == "CTS1"
+    assert custom_type_scheme.name == "Test Custom Type Scheme"
+    assert custom_type_scheme.short_urn == "CustomTypeScheme=MD:CTS1(1.0)"
+    assert isinstance(custom_type_scheme.items[0], CustomType)
+    custom_type = custom_type_scheme.items[0]
+    assert custom_type.id == "CT1"
+    assert custom_type.name == "Test Custom Type"
+    assert custom_type.null_value == "Test_literal_format"
+    assert custom_type.output_format == "Test_null_value"
+    assert custom_type.vtl_literal_format == "Test_output_format"
+    assert custom_type.vtl_scalar_type == "Test_scalar_type"
+
+
+def test_vtl_mapping_no_sub_space_read(samples_folder):
+    data_path = samples_folder / "vtlmapping_no_sub_space.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.STRUCTURE_SDMX_ML_3_0
+    result = read_structure(input_str, validate=True)
+    vtl_mapping_Scheme = result[0]
+    assert len(vtl_mapping_Scheme.items) == 2
+    items = vtl_mapping_Scheme.items
+    assert isinstance(items[0], VtlDataflowMapping)
+    item1 = items[0]
+    assert item1.name == "VTL Mapping #1"
+    assert len(item1.from_vtl_mapping_method.from_vtl_sub_space) == 0
+    item2 = items[1]
+    assert item2.name == "VTL Mapping #2"
+    assert len(item2.to_vtl_mapping_method.to_vtl_sub_space) == 0
+    assert result is not None
+
+
+def test_vtl_complete_read(samples_folder):
+    data_path = samples_folder / "vtl_complete.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.STRUCTURE_SDMX_ML_3_0
+    result = read_structure(input_str, validate=True)
+    assert result is not None
+    assert len(result) == 6
+
+    assert isinstance(result[1], RulesetScheme)
+    ruleset_scheme = result[1]
+    rule_vtl_mapping = ruleset_scheme.vtl_mapping_scheme
+    assert rule_vtl_mapping.id == "VMS1"
+    assert rule_vtl_mapping.name == "Test VTL Mapping Scheme"
+    assert rule_vtl_mapping.short_urn == "VtlMappingScheme=MD:VMS1(1.0)"
+
+    assert isinstance(result[2], UserDefinedOperatorScheme)
+    udo_scheme = result[2]
+    udo_vtl_mapping = udo_scheme.vtl_mapping_scheme
+    assert udo_vtl_mapping.id == "VMS1"
+    assert udo_vtl_mapping.name == "Test VTL Mapping Scheme"
+    assert udo_vtl_mapping.short_urn == "VtlMappingScheme=MD:VMS1(1.0)"
+
+    assert isinstance(result[5], TransformationScheme)
+    transformation_scheme = result[5]
+    trans_custom_Scheme = transformation_scheme.custom_type_scheme
+    assert trans_custom_Scheme.id == "CTS1"
+    assert trans_custom_Scheme.name == "Test Custom Type Scheme"
+    assert trans_custom_Scheme.short_urn == "CustomTypeScheme=MD:CTS1(1.0)"
+    trans_name_personalisation_scheme = (
+        transformation_scheme.name_personalisation_scheme
+    )
+    assert trans_name_personalisation_scheme.id == "NPS1"
+    assert (
+        trans_name_personalisation_scheme.name
+        == "Test Name Personalisation Scheme"
+    )
+    assert (
+        trans_name_personalisation_scheme.short_urn
+        == "NamePersonalisationScheme=MD:NPS1(1.0)"
+    )
+    trans_vtl_mapping_scheme = transformation_scheme.vtl_mapping_scheme
+    assert trans_vtl_mapping_scheme.id == "VMS1"
+    assert trans_vtl_mapping_scheme.name == "Test VTL Mapping Scheme"
+    assert (
+        trans_vtl_mapping_scheme.short_urn == "VtlMappingScheme=MD:VMS1(1.0)"
+    )
+
+
+def test_vtl_sample_no_code(samples_folder):
+    data_path = samples_folder / "VTL_Sample_1.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.STRUCTURE_SDMX_ML_3_0
+    result = read_structure(input_str, validate=True)
+    assert result is not None
+    assert len(result) == 12
+    assert isinstance(result[0], Codelist)
+    codelist = result[0]
+    assert len(codelist.items) == 0
+
+
+def test_datastructure_group(samples_folder):
+    data_path = samples_folder / "datastructure_group.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.STRUCTURE_SDMX_ML_3_0
+    result = read_sdmx(input_str, validate=True).structures
+    dsd = result[0]
+    assert isinstance(dsd, DataStructureDefinition)
+    group = dsd.groups
+    assert group[0].id == "Sibling"
+    assert group[0].dimensions == (
+        "L_MEASURE",
+        "L_REP_CTY",
+        "CBS_BANK_TYPE",
+        "CBS_BASIS",
+        "L_POSITION",
+        "L_INSTR",
+        "REM_MATURITY",
+        "CURR_TYPE_BOOK",
+        "L_CP_SECTOR",
+        "L_CP_COUNTRY",
+    )
+    attribute_1 = dsd.components.attributes[4]
+    assert attribute_1.attachment_level == ",".join(group[0].dimensions)
+    attribute_2 = dsd.components.attributes[8]
+    assert attribute_2.attachment_level == ",".join(group[0].dimensions)
+
+
+def test_value_list_enum(samples_folder):
+    data_path = samples_folder / "valuelist_enum.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.STRUCTURE_SDMX_ML_3_0
+    result = read_sdmx(input_str, validate=True)
+    # Get structure
+    structure = result.structures
+    assert structure is not None
+    # Get attributes to check the enumeration
+    attributes = structure[2].components.attributes
+    enumeration = attributes[0].enumeration
+    # Assertions for the enumeration
+    assert enumeration is not None
+    assert enumeration.sdmx_type == "valuelist"
+    assert enumeration.id == "VL_TEST"
+    # Get the valueslist from the message
+    # and check it is the same as the enumeration
+    valuelist = result.get_value_lists()[0]
+    assert valuelist.short_urn == "ValueList=MD:VL_TEST(1.0)"
+    assert valuelist.sdmx_type == enumeration.sdmx_type
+    assert valuelist.id == enumeration.id
+    assert valuelist.items == enumeration.items
+
+
+def test_prov_agreement(samples_folder):
+    data_path = samples_folder / "prov_agreement_3.0.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.STRUCTURE_SDMX_ML_3_0
+    result = read_sdmx(input_str, validate=True).get_provision_agreements()
+    assert result is not None
+    prov_agreement = result[0]
+    assert isinstance(prov_agreement, ProvisionAgreement)
+    assert prov_agreement.id == "TEST"
+    assert prov_agreement.short_urn == "ProvisionAgreement=MD:TEST(1.0)"
+    assert prov_agreement.dataflow == "Dataflow=MD:TEST(1.0)"
+    assert prov_agreement.provider == "DataProvider=MD:DATA_PROVIDERS(1.0).MD"
+
+
+def test_read_multiple_measure_relationship(samples_folder):
+    data_path = samples_folder / "datastructure_group.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.STRUCTURE_SDMX_ML_3_0
+    result = read_sdmx(input_str, validate=True).structures
+    dsd = result[0]
+    assert isinstance(dsd, DataStructureDefinition)
+    attr = dsd.components.attributes[2]
+    assert attr.id == "OBS_CONF"
+    assert attr.attachment_level == "OBS_VALUE,OBS_VALUE1"
+
+
+def test_constraint_with_cube_region(samples_folder):
+    data_path = samples_folder / "constraint_cube.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.STRUCTURE_SDMX_ML_3_0
+    result = read_sdmx(input_str, validate=True).get_data_constraints()
+    assert result is not None
+    assert len(result) == 1
+    constraint = result[0]
+    assert isinstance(constraint, DataConstraint)
+    assert constraint.id == "TEST_CONSTRAINT_CUBE"
+    assert constraint.agency == "TEST_AGENCY"
+    assert constraint.version == "1.0"
+    assert constraint.name == "Test Constraint with Cube Region"
+    assert constraint.description == "A test constraint with cube region"
+    # Attachment
+    att = constraint.constraint_attachment
+    assert isinstance(att, ConstraintAttachment)
+    assert att.dataflows == (
+        "urn:sdmx:org.sdmx.infomodel.datastructure."
+        "Dataflow=TEST_AGENCY:TEST_DF(1.0)",
+    )
+    # Cube Region
+    assert len(constraint.cube_regions) == 1
+    region = constraint.cube_regions[0]
+    assert isinstance(region, CubeRegion)
+    assert region.is_included is True
+    assert len(region.key_values) == 2
+    assert isinstance(region.key_values[0], CubeKeyValue)
+    assert region.key_values[0].id == "FREQ"
+    assert isinstance(region.key_values[0].values[0], CubeValue)
+    assert [v.value for v in region.key_values[0].values] == ["M", "Q"]
+    assert region.key_values[1].id == "REF_AREA"
+    assert [v.value for v in region.key_values[1].values] == ["US", "UK"]
+
+
+def test_constraint_with_keyset(samples_folder):
+    data_path = samples_folder / "constraint_keyset.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.STRUCTURE_SDMX_ML_3_0
+    result = read_sdmx(input_str, validate=True).get_data_constraints()
+    assert result is not None
+    assert len(result) == 1
+    constraint = result[0]
+    assert isinstance(constraint, DataConstraint)
+    assert constraint.id == "TEST_CONSTRAINT_KEYSET"
+    assert constraint.name == "Test Constraint with Key Set"
+    # Attachment
+    att = constraint.constraint_attachment
+    assert isinstance(att, ConstraintAttachment)
+    assert att.dataflows == (
+        "urn:sdmx:org.sdmx.infomodel.datastructure."
+        "Dataflow=TEST_AGENCY:TEST_DF(1.0)",
+    )
+    # Key Set
+    assert len(constraint.key_sets) == 1
+    ks = constraint.key_sets[0]
+    assert isinstance(ks, KeySet)
+    assert ks.is_included is True
+    assert len(ks.keys) == 4
+    assert isinstance(ks.keys[0], DataKey)
+    assert isinstance(ks.keys[0].keys_values[0], DataKeyValue)
+    assert ks.keys[0].keys_values[0].id == "FREQ"
+    assert ks.keys[0].keys_values[0].value == "M"
+    assert ks.keys[0].keys_values[1].id == "REF_AREA"
+    assert ks.keys[0].keys_values[1].value == "US"
+    assert ks.keys[1].keys_values[0].id == "FREQ"
+    assert ks.keys[1].keys_values[0].value == "Q"
+    assert ks.keys[1].keys_values[1].id == "REF_AREA"
+    assert ks.keys[1].keys_values[1].value == "UK"
+    # Key with Component but no KeyValue
+    assert len(ks.keys[2].keys_values) == 0
+    # Empty Key
+    assert len(ks.keys[3].keys_values) == 0
+
+
+def test_constraint_with_data_structure(samples_folder):
+    data_path = samples_folder / "constraint_datastructure.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.STRUCTURE_SDMX_ML_3_0
+    result = read_sdmx(input_str, validate=True).get_data_constraints()
+    assert result is not None
+    assert len(result) == 1
+    constraint = result[0]
+    assert isinstance(constraint, DataConstraint)
+    assert constraint.id == "TEST_CONSTRAINT_DSD"
+    assert constraint.name == "Test Constraint with Data Structure"
+    # Attachment
+    att = constraint.constraint_attachment
+    assert isinstance(att, ConstraintAttachment)
+    assert att.data_structures == (
+        "urn:sdmx:org.sdmx.infomodel.datastructure."
+        "DataStructure=TEST_AGENCY:TEST_DSD(1.0)",
+    )
+    # Cube Region
+    assert len(constraint.cube_regions) == 1
+    assert isinstance(constraint.cube_regions[0], CubeRegion)
+    assert constraint.cube_regions[0].is_included is True
+    assert constraint.cube_regions[0].key_values[0].id == "FREQ"
+    assert [
+        v.value for v in constraint.cube_regions[0].key_values[0].values
+    ] == ["A"]
+
+
+def test_constraint_with_provider(samples_folder):
+    data_path = samples_folder / "constraint_provider.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.STRUCTURE_SDMX_ML_3_0
+    result = read_sdmx(input_str, validate=True).get_data_constraints()
+    assert result is not None
+    assert len(result) == 1
+    constraint = result[0]
+    assert isinstance(constraint, DataConstraint)
+    assert constraint.id == "TEST_CONSTRAINT_PROV"
+    assert constraint.name == "Test Constraint with Provider"
+    # Attachment
+    att = constraint.constraint_attachment
+    assert isinstance(att, ConstraintAttachment)
+    assert (
+        att.data_provider == "urn:sdmx:org.sdmx.infomodel.base.DataProvider="
+        "TEST_AGENCY:DATA_PROVIDERS(1.0).PROVIDER_ID"
+    )
+    # Cube Region
+    assert len(constraint.cube_regions) == 1
+    assert isinstance(constraint.cube_regions[0], CubeRegion)
+    assert constraint.cube_regions[0].key_values[0].id == "FREQ"
+    assert [
+        v.value for v in constraint.cube_regions[0].key_values[0].values
+    ] == ["M"]
+
+
+def test_constraint_with_provision_agreement(samples_folder):
+    data_path = samples_folder / "constraint_provision_agreement.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.STRUCTURE_SDMX_ML_3_0
+    result = read_sdmx(input_str, validate=True).get_data_constraints()
+    assert result is not None
+    assert len(result) == 1
+    constraint = result[0]
+    assert isinstance(constraint, DataConstraint)
+    assert constraint.id == "TEST_CONSTRAINT_PA"
+    assert constraint.name == "Test Constraint with Provision Agreement"
+    # Attachment
+    att = constraint.constraint_attachment
+    assert isinstance(att, ConstraintAttachment)
+    assert att.provision_agreements == (
+        "urn:sdmx:org.sdmx.infomodel.registry."
+        "ProvisionAgreement=TEST_AGENCY:TEST_PA(1.0)",
+    )
+    # Cube Region
+    assert len(constraint.cube_regions) == 1
+    assert isinstance(constraint.cube_regions[0], CubeRegion)
+    assert constraint.cube_regions[0].key_values[0].id == "FREQ"
+    assert [
+        v.value for v in constraint.cube_regions[0].key_values[0].values
+    ] == ["A"]
+
+
+def test_constraint_without_attachment(samples_folder):
+    data_path = samples_folder / "constraint_no_attachment.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.STRUCTURE_SDMX_ML_3_0
+    result = read_sdmx(input_str, validate=True).get_data_constraints()
+    assert result is not None
+    assert len(result) == 1
+    constraint = result[0]
+    assert isinstance(constraint, DataConstraint)
+    assert constraint.id == "TEST_CONSTRAINT_NO_ATTACH"
+    assert constraint.name == "Test Constraint without Attachment"
+    assert constraint.constraint_attachment is None
+    # Cube Region
+    assert len(constraint.cube_regions) == 1
+    assert isinstance(constraint.cube_regions[0], CubeRegion)
+    assert constraint.cube_regions[0].is_included is True
+    assert constraint.cube_regions[0].key_values[0].id == "FREQ"
+    assert [
+        v.value for v in constraint.cube_regions[0].key_values[0].values
+    ] == ["Q"]
+
+
+def test_constraint_with_actual_role(samples_folder):
+    data_path = samples_folder / "constraint_actual.xml"
+    input_str, _ = process_string_to_read(data_path)
+    result = read_sdmx(input_str, validate=True).structures
+    assert len(result) == 1
+    assert isinstance(result[0], AvailabilityConstraint)
+
+
+def test_constraint_role_absent_30_defaults_allowed(samples_folder):
+    # role is required by the SDMX 3.0 schema, so this document is
+    # intentionally not schema-valid; it exercises the defensive
+    # fallback to the reader's default (ALLOWED) when role is missing.
+    data_path = samples_folder / "constraint_role_absent.xml"
+    input_str, _ = process_string_to_read(data_path)
+    result = read_sdmx(input_str, validate=False).get_data_constraints()
+    assert len(result) == 1
+    assert isinstance(result[0], DataConstraint)
+
+
+def test_constraint_with_time_range_30(samples_folder):
+    from datetime import datetime
+
+    data_path = samples_folder / "constraint_time_range.xml"
+    input_str, _ = process_string_to_read(data_path)
+    result = read_sdmx(input_str, validate=True).get_data_constraints()
+    assert isinstance(result[0], DataConstraint)
+    region = result[0].cube_regions[0]
+    freq = region.key_values[0]
+    time = region.key_values[1]
+    assert freq.valid_from == datetime(2020, 1, 1, tzinfo=timezone.utc)
+    assert freq.valid_to == datetime(2024, 1, 1, tzinfo=timezone.utc)
+    assert isinstance(time.time_range, CubeTimeRange)
+    assert time.time_range.start_period.period == "1989-01-01T00:00:00"
+
+
+@pytest.fixture
+def metadata_family_msg(samples_folder):
+    data_path = samples_folder / "metadata_family.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.STRUCTURE_SDMX_ML_3_0
+    return read_sdmx(input_str, validate=True)
+
+
+@pytest.mark.xml
+def test_metadata_structure_30(metadata_family_msg):
+    msds = metadata_family_msg.get_metadata_structures()
+    assert len(msds) == 1
+    msd = msds[0]
+    assert isinstance(msd, MetadataStructure)
+    assert msd.id == "MSD_TEST"
+    assert msd.agency == "BIS"
+    assert msd.version == "1.0"
+    # Two top-level components, three total (one nested)
+    assert len(msd.components) == 2
+    assert len(msd) == 3
+
+    contact = msd["CONTACT"]
+    assert contact is not None
+    assert contact.is_presentational is True
+    assert len(contact.components) == 1
+
+    # Nested coded attribute (resolved Enumeration -> Codelist)
+    freq = msd["CONTACT.FREQ"]
+    assert freq is not None
+    assert freq.is_presentational is False
+    assert isinstance(freq.local_codes, Codelist)
+    assert freq.local_enum_ref == (
+        "urn:sdmx:org.sdmx.infomodel.codelist.Codelist=BIS:CL_FREQ(1.0)"
+    )
+
+    # Uncoded attribute with array (maxOccurs unbounded)
+    note = msd["NOTE"]
+    assert note is not None
+    assert note.local_dtype is not None
+    assert note.local_facets is not None
+    assert note.local_facets.max_length == "500"
+    assert note.array_def is not None
+    assert note.array_def.min_size == 0
+    assert note.array_def.max_size is None
+
+
+@pytest.mark.xml
+def test_metadataflow_30_resolved_structure(metadata_family_msg):
+    flows = metadata_family_msg.get_metadataflows()
+    assert len(flows) == 1
+    flow = flows[0]
+    assert isinstance(flow, Metadataflow)
+    assert flow.id == "MDF_TEST"
+    # Structure resolved to the MetadataStructure object
+    assert isinstance(flow.structure, MetadataStructure)
+    assert flow.structure.short_urn == "MetadataStructure=BIS:MSD_TEST(1.0)"
+    assert flow.targets == (
+        "urn:sdmx:org.sdmx.infomodel.datastructure.Dataflow=*:*(*)",
+    )
+
+
+@pytest.mark.xml
+def test_metadata_provision_agreement_30(metadata_family_msg):
+    mpas = metadata_family_msg.get_metadata_provision_agreements()
+    assert len(mpas) == 1
+    mpa = mpas[0]
+    assert isinstance(mpa, MetadataProvisionAgreement)
+    assert mpa.id == "MPA_TEST"
+    assert mpa.metadataflow == (
+        "urn:sdmx:org.sdmx.infomodel.metadatastructure."
+        "Metadataflow=BIS:MDF_TEST(1.0)"
+    )
+    assert mpa.metadata_provider == (
+        "urn:sdmx:org.sdmx.infomodel.base."
+        "MetadataProvider=BIS:METADATA_PROVIDERS(1.0).PROV1"
+    )
+
+
+@pytest.mark.xml
+def test_metadata_family_refs_30(samples_folder):
+    data_path = samples_folder / "metadata_family_refs.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.STRUCTURE_SDMX_ML_3_0
+    msg = read_sdmx(input_str, validate=True)
+
+    msds = {m.id: m for m in msg.get_metadata_structures()}
+    # MSD without components and without an isExternalReference attribute
+    empty = msds["MSD_EMPTY"]
+    assert len(empty.components) == 0
+    assert empty.is_external_reference is False
+
+    # MSD with a bounded array (maxOccurs="3")
+    msd = msds["MSD_REFS"]
+    freq = msd["FREQ"]
+    assert freq is not None
+    assert freq.array_def is not None
+    assert freq.array_def.min_size == 1
+    assert freq.array_def.max_size == 3
+
+    # Metadataflow without a structure reference (but with a target)
+    flow = msg.get_metadataflows()[0]
+    assert flow.id == "MDF_NO_STRUCTURE"
+    assert flow.structure is None
+    assert flow.targets == (
+        "urn:sdmx:org.sdmx.infomodel.datastructure.Dataflow=*:*(*)",
+    )
+
+    # MetadataProvisionAgreement referenced by URN
+    mpa = msg.get_metadata_provision_agreements()[0]
+    assert mpa.metadataflow == (
+        "urn:sdmx:org.sdmx.infomodel.metadatastructure."
+        "Metadataflow=BIS:MDF_NO_STRUCTURE(1.0)"
+    )
+    assert mpa.metadata_provider == (
+        "urn:sdmx:org.sdmx.infomodel.base."
+        "MetadataProvider=BIS:METADATA_PROVIDERS(1.0).PROV2"
+    )
+
+
+@pytest.mark.xml
+def test_generic_metadata_30(samples_folder):
+    data_path = samples_folder / "generic_metadata.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.REFMETA_SDMX_ML_3_0
+    msg = read_sdmx(input_str, validate=True)
+    reports = msg.get_reports()
+    assert len(reports) == 1
+    report = reports[0]
+    assert isinstance(report, MetadataReport)
+    assert report.id == "RPT1"
+    assert report.name == "Report 1"
+    assert report.agency == "BIS"
+    assert report.version == "1.0"
+    assert report.metadataflow == (
+        "urn:sdmx:org.sdmx.infomodel.metadatastructure."
+        "Metadataflow=BIS:MDF_TEST(1.0)"
+    )
+    assert report.targets == (
+        "urn:sdmx:org.sdmx.infomodel.datastructure.Dataflow=BIS:DF(1.0)",
+    )
+    # reportingBeginDate / reportingEndDate map to reportingBegin / End
+    assert report.action == ActionType.Replace
+    assert report.publicationYear == "2021"
+    assert report.reportingBegin == "2020-01-01"
+    assert report.reportingEnd == "2020-12-31"
+
+    # Recursion + dotted lookup + single vs. multiple values
+    assert len(report) == 4
+    assert report["CONTACT.NAME"].value == "John Doe"
+    assert report["CONTACT.EMAIL"].value == (
+        "john@example.org",
+        "doe@example.org",
+    )
+    assert report["NOTE"].value == "A single note"
+
+
+@pytest.mark.xml
+def test_generic_metadata_30_attributes_are_tuples(samples_folder):
+    # Nested attributes and repeated values were read as lists, so the
+    # report was unhashable and unequal to a tuple-built one (issue #680).
+    data_path = samples_folder / "generic_metadata.xml"
+    report = read_sdmx(data_path, validate=True).get_reports()[0]
+
+    assert report.attributes == (
+        MetadataAttribute(
+            "CONTACT",
+            attributes=(
+                MetadataAttribute("NAME", "John Doe"),
+                MetadataAttribute(
+                    "EMAIL", ("john@example.org", "doe@example.org")
+                ),
+            ),
+        ),
+        MetadataAttribute("NOTE", "A single note"),
+    )
+    hash(report)  # must not raise TypeError (unhashable list field)
+
+
+@pytest.mark.xml
+def test_generic_metadata_mpa_choice_30(samples_folder):
+    data_path = samples_folder / "generic_metadata_mpa.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.REFMETA_SDMX_ML_3_0
+    report = read_sdmx(input_str, validate=True).get_reports()[0]
+    assert report.metadataProvisionAgreement == (
+        "urn:sdmx:org.sdmx.infomodel.registry."
+        "MetadataProvisionAgreement=BIS:MPA_TEST(1.0)"
+    )
+    assert report.metadataflow == ""
+    assert report["NOTE"].value == "Reported against a provision agreement"
+
+
+@pytest.mark.xml
+def test_generic_metadata_detection_regression():
+    # GenericMetadata must be detected as REFMETA, not generic DATA.
+    doc = (
+        '<?xml version="1.0"?>'
+        "<mes:GenericMetadata "
+        'xmlns:mes="http://www.sdmx.org/resources/sdmxml/schemas/'
+        'v3_0/message">'
+        "</mes:GenericMetadata>"
+    )
+    _, read_format = process_string_to_read(doc)
+    assert read_format == Format.REFMETA_SDMX_ML_3_0
+
+
+@pytest.mark.xml
+def test_generic_metadata_21_not_implemented():
+    # There is no SDMX-ML 2.1 reference metadata format in pysdmx.
+    doc = (
+        '<?xml version="1.0"?>'
+        "<mes:GenericMetadata "
+        'xmlns:mes="http://www.sdmx.org/resources/sdmxml/schemas/'
+        'v2_1/message">'
+        "</mes:GenericMetadata>"
+    )
+    with pytest.raises(NotImplementedError_):
+        process_string_to_read(doc)
+
+
+@pytest.mark.xml
+def test_generic_metadata_reader_rejects_structure(samples_folder):
+    from pysdmx.io.xml.sdmx30.reader.metadata import read as read_refmeta
+
+    # A structure document is not a GenericMetadata message.
+    data_path = samples_folder / "metadata_family.xml"
+    with open(data_path, "r") as f:
+        text = f.read()
+    with pytest.raises(Invalid, match="not SDMX-ML GenericMetadata"):
+        read_refmeta(text, validate=True)
+
+
+@pytest.mark.xml
+def test_generic_metadata_empty_set():
+    from pysdmx.io.xml.sdmx30.reader.metadata import read as read_refmeta
+
+    # A GenericMetadata message with no MetadataSet yields no reports.
+    doc = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        "<mes:GenericMetadata "
+        'xmlns:mes="http://www.sdmx.org/resources/sdmxml/schemas/'
+        'v3_0/message" '
+        'xmlns:com="http://www.sdmx.org/resources/sdmxml/schemas/'
+        'v3_0/common">'
+        "<mes:Header>"
+        "<mes:ID>test</mes:ID>"
+        "<mes:Test>true</mes:Test>"
+        "<mes:Prepared>2021-01-01T10:00:00Z</mes:Prepared>"
+        '<mes:Sender id="ZZZ"/>'
+        '<mes:Structure structureID="MDS1">'
+        "<com:Structure>urn:sdmx:org.sdmx.infomodel.metadatastructure."
+        "MetadataStructure=BIS:MSD(1.0)</com:Structure>"
+        "</mes:Structure>"
+        "</mes:Header>"
+        "</mes:GenericMetadata>"
+    )
+    assert read_refmeta(doc, validate=True) == []
+
+    # ...and read_sdmx returns it as a Message without reports.
+    msg = read_sdmx(doc, validate=True)
+    assert msg.header is not None
+    assert msg.reports == ()
+    assert msg.get_reports() == ()
+
+
+@pytest.mark.xml
+def test_category_scheme_30(samples_folder):
+    data_path = samples_folder / "category_scheme.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.STRUCTURE_SDMX_ML_3_0
+    result = read_sdmx(input_str, validate=True).structures
+    cs = next(s for s in result if isinstance(s, CategoryScheme))
+    assert cs.id == "CS1"
+    assert cs.agency == "BIS"
+    assert cs.version == "1.0.0"
+    # is_final derived from the semantic version in SDMX 3.0
+    assert cs.is_final is True
+    # Recursion: TOP -> MID -> LEAF (3 deep)
+    assert cs.items[0].id == "TOP"
+    assert cs.items[0].categories[0].id == "MID"
+    assert cs.items[0].categories[0].categories[0].id == "LEAF"
+    assert cs["TOP.MID.LEAF"].id == "LEAF"
+    assert len(cs) == 4
+    assert {c.id for c in cs.all_items} == {"TOP", "MID", "LEAF", "OTHER"}
+
+
+@pytest.mark.xml
+def test_category_scheme_30_enrichment(samples_folder):
+    data_path = samples_folder / "category_scheme.xml"
+    input_str, _ = process_string_to_read(data_path)
+    result = read_sdmx(input_str, validate=True).structures
+    cs = next(s for s in result if isinstance(s, CategoryScheme))
+    leaf = cs["TOP.MID.LEAF"]
+    assert len(leaf.dataflows) == 1
+    assert isinstance(leaf.dataflows[0], DataflowRef)
+    assert leaf.dataflows[0].agency == "BIS"
+    assert leaf.dataflows[0].id == "DF1"
+    assert leaf.dataflows[0].version == "1.0.0"
+    assert leaf.dataflows[0].name == "Dataflow 1"
+    other = cs["OTHER"]
+    assert len(other.other_references) == 1
+    ref = other.other_references[0]
+    assert isinstance(ref, Reference)
+    assert ref.sdmx_type == "Codelist"
+    assert ref.id == "CL_FREQ"
+
+
+@pytest.mark.xml
+def test_categorisation_30(samples_folder):
+    data_path = samples_folder / "category_scheme.xml"
+    input_str, _ = process_string_to_read(data_path)
+    result = read_sdmx(input_str, validate=True).structures
+    cats = [s for s in result if isinstance(s, Categorisation)]
+    assert len(cats) == 2
+    by_id = {c.id: c for c in cats}
+    cat1 = by_id["CAT1"]
+    assert cat1.is_final is True
+    assert cat1.source == (
+        "urn:sdmx:org.sdmx.infomodel.datastructure.Dataflow=BIS:DF1(1.0.0)"
+    )
+    assert cat1.target == (
+        "urn:sdmx:org.sdmx.infomodel.categoryscheme."
+        "Category=BIS:CS1(1.0.0).TOP.MID.LEAF"
+    )
+    cat2 = by_id["CAT2"]
+    assert cat2.source == (
+        "urn:sdmx:org.sdmx.infomodel.codelist.Codelist=BIS:CL_FREQ(1.0.0)"
+    )
+    assert cat2.target == (
+        "urn:sdmx:org.sdmx.infomodel.categoryscheme."
+        "Category=BIS:CS1(1.0.0).OTHER"
+    )
+
+
+def test_component_enum_ref_kept_without_codelist_30(samples_folder):
+    data_path = samples_folder / "dsd_enum_ref_no_codelist.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.STRUCTURE_SDMX_ML_3_0
+
+    dsd = read_structure(input_str, validate=True)[0]
+    freq = next(c for c in dsd.components if c.id == "FREQ")
+
+    assert freq.enum_ref == (
+        "urn:sdmx:org.sdmx.infomodel.codelist.Codelist=ZZZ:CL_FREQ(1.0)"
+    )
+    assert freq.enumeration is None
+
+
+def test_component_enum_ref_with_codelist_in_message_30(samples_folder):
+    data_path = samples_folder / "dsd_enum_ref_with_codelist.xml"
+    input_str, _ = process_string_to_read(data_path)
+
+    structures = read_structure(input_str, validate=True)
+    dsd = next(s for s in structures if isinstance(s, DataStructureDefinition))
+    freq = next(c for c in dsd.components if c.id == "FREQ")
+
+    assert isinstance(freq.enumeration, Codelist)
+    assert freq.enumeration.short_urn == "Codelist=ZZZ:CL_FREQ(1.0)"
+    assert freq.enum_ref == (
+        "urn:sdmx:org.sdmx.infomodel.codelist.Codelist=ZZZ:CL_FREQ(1.0)"
+    )
+
+
+def test_component_enum_ref_round_trip_30(samples_folder):
+    data_path = samples_folder / "dsd_enum_ref_no_codelist.xml"
+    input_str, _ = process_string_to_read(data_path)
+
+    dsd = read_structure(input_str, validate=True)
+    written = write_structure(dsd, prettyprint=True)
+
+    re_read = read_structure(written, validate=True)[0]
+    freq = next(c for c in re_read.components if c.id == "FREQ")
+    assert freq.enum_ref == (
+        "urn:sdmx:org.sdmx.infomodel.codelist.Codelist=ZZZ:CL_FREQ(1.0)"
+    )
+
+
+def test_read_empty_structure_containers_30(samples_folder):
+    data_path = samples_folder / "structures_empty_containers.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.STRUCTURE_SDMX_ML_3_0
+
+    assert len(read_structure(input_str, validate=False)) == 0
+
+    # An empty catalogue is a valid structure message, so read_sdmx
+    # returns an empty Message instead of raising.
+    msg = read_sdmx(input_str, validate=False)
+    assert msg.header is not None
+    assert msg.structures == ()
+    assert msg.get_dataflows() == []
+
+
+def test_read_no_structure_containers_30(samples_folder):
+    data_path = samples_folder / "structures_no_containers.xml"
+    input_str, _ = process_string_to_read(data_path)
+
+    assert len(read_structure(input_str, validate=True)) == 0
+
+    msg = read_sdmx(input_str, validate=True)
+    assert msg.header is not None
+    assert msg.structures == ()
+    assert msg.get_dataflows() == []
+
+
+def test_read_header_only_structure_message_30(samples_folder):
+    data_path = samples_folder / "structures_header_only.xml"
+    input_str, _ = process_string_to_read(data_path)
+
+    assert len(read_structure(input_str, validate=True)) == 0
+
+    msg = read_sdmx(input_str, validate=True)
+    assert msg.header is not None
+    assert msg.structures == ()
+    assert msg.get_dataflows() == []
+
+
+def test_read_header_only_data_message_30(samples_folder):
+    # A StructureSpecificData message without any DataSet is valid SDMX,
+    # so read_sdmx returns an empty Message instead of raising.
+    data_path = samples_folder / "data_header_only.xml"
+    input_str, read_format = process_string_to_read(data_path)
+    assert read_format == Format.DATA_SDMX_ML_3_0
+
+    msg = read_sdmx(input_str, validate=True)
+    assert msg.header is not None
+    assert msg.data == []

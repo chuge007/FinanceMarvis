@@ -1,0 +1,227 @@
+from typing import Iterable, Sized
+
+import msgspec
+import pytest
+
+from pysdmx import errors
+from pysdmx.model import (
+    MultiRepresentationMap,
+    MultiValueMap,
+    decoders,
+    encoders,
+)
+
+
+@pytest.fixture
+def id():
+    return "id"
+
+
+@pytest.fixture
+def name():
+    return "name"
+
+
+@pytest.fixture
+def agency():
+    return "5B0"
+
+
+@pytest.fixture
+def source():
+    return [
+        "urn:sdmx:org.sdmx.infomodel.codelist.Codelist=BIS:CL1(1.0)",
+        "urn:sdmx:org.sdmx.infomodel.codelist.Codelist=BIS:CL2(1.0)",
+    ]
+
+
+@pytest.fixture
+def target():
+    return ["urn:sdmx:org.sdmx.infomodel.codelist.Codelist=BIS:CL3(1.0)"]
+
+
+@pytest.fixture
+def version():
+    return "2.0"
+
+
+@pytest.fixture
+def desc():
+    return "my desc"
+
+
+@pytest.fixture
+def mappings():
+    vm1 = MultiValueMap(source=["AR", "XDC"], target=["ARS"])
+    vm2 = MultiValueMap(source=["UY", "XDC"], target=["UYU"])
+    return [vm1, vm2]
+
+
+def test_default_initialization(id, name, agency, source, target, mappings):
+    sm = MultiRepresentationMap(
+        id=id,
+        name=name,
+        agency=agency,
+        source=source,
+        target=target,
+        maps=mappings,
+    )
+
+    assert sm.id == id
+    assert sm.name == name
+    assert sm.agency == agency
+    assert sm.source == source
+    assert sm.target == target
+    assert sm.maps == mappings
+    assert sm.description is None
+    assert sm.version == "1.0"
+
+
+def test_full_initialization(
+    id, name, agency, source, target, mappings, version, desc
+):
+    sm = MultiRepresentationMap(
+        id=id,
+        name=name,
+        agency=agency,
+        source=source,
+        target=target,
+        maps=mappings,
+        description=desc,
+        version=version,
+    )
+
+    assert sm.id == id
+    assert sm.name == name
+    assert sm.agency == agency
+    assert sm.source == source
+    assert sm.target == target
+    assert sm.maps == mappings
+    assert sm.description == desc
+    assert sm.version == version
+
+
+def test_immutable(id, name, agency, source, target, mappings):
+    sm = MultiRepresentationMap(
+        id=id,
+        name=name,
+        agency=agency,
+        source=source,
+        target=target,
+        maps=mappings,
+    )
+
+    with pytest.raises(AttributeError):
+        sm.description = "blah"
+
+
+def test_iterable(id, name, agency, source, target, mappings):
+    sm = MultiRepresentationMap(
+        id=id,
+        name=name,
+        agency=agency,
+        source=source,
+        target=target,
+        maps=mappings,
+    )
+
+    assert isinstance(sm, Iterable)
+
+    for m in sm:
+        assert isinstance(m, MultiValueMap)
+
+
+def test_sized(id, name, agency, source, target, mappings):
+    sm = MultiRepresentationMap(
+        id=id,
+        name=name,
+        agency=agency,
+        source=source,
+        target=target,
+        maps=mappings,
+    )
+
+    assert isinstance(sm, Sized)
+    assert len(sm) == len(mappings)
+
+
+def test_serialization(
+    id, name, agency, source, target, mappings, version, desc
+):
+    rm = MultiRepresentationMap(
+        id=id,
+        name=name,
+        agency=agency,
+        source=source,
+        target=target,
+        maps=mappings,
+        description=desc,
+        version=version,
+    )
+    ser = msgspec.msgpack.Encoder(enc_hook=encoders).encode(rm)
+    out = msgspec.msgpack.Decoder(
+        MultiRepresentationMap, dec_hook=decoders
+    ).decode(ser)
+    assert out == rm
+
+
+def test_empty_maps_allow_missing_source_and_target(id, name, agency):
+    sm = MultiRepresentationMap(id=id, name=name, agency=agency)
+
+    assert sm.source == ()
+    assert sm.target == ()
+    assert sm.maps == ()
+
+
+def test_missing_source(id, name, agency, target, mappings):
+    with pytest.raises(errors.Invalid, match="source is required"):
+        MultiRepresentationMap(
+            id=id, name=name, agency=agency, target=target, maps=mappings
+        )
+
+
+def test_missing_target(id, name, agency, source, mappings):
+    with pytest.raises(errors.Invalid, match="target is required"):
+        MultiRepresentationMap(
+            id=id, name=name, agency=agency, source=source, maps=mappings
+        )
+
+
+def test_invalid_source_length(id, name, agency, target, mappings):
+    with pytest.raises(errors.Invalid, match="same number of entries"):
+        MultiRepresentationMap(
+            id=id,
+            name=name,
+            agency=agency,
+            source=[
+                "urn:sdmx:org.sdmx.infomodel.codelist.Codelist=BIS:CL1(1.0)"
+            ],
+            target=target,
+            maps=mappings,
+        )
+
+
+def test_invalid_target_length(id, name, agency, source, mappings):
+    with pytest.raises(errors.Invalid, match="same number of entries"):
+        MultiRepresentationMap(
+            id=id,
+            name=name,
+            agency=agency,
+            source=source,
+            target=[
+                "urn:sdmx:org.sdmx.infomodel.codelist.Codelist=BIS:CL3(1.0)",
+                "urn:sdmx:org.sdmx.infomodel.codelist.Codelist=BIS:CL4(1.0)",
+            ],
+            maps=mappings,
+        )
+
+
+def test_default_sequences_are_tuples_and_hashable(id, name, agency):
+    # Sequence fields default to () so that instances built without them
+    # stay hashable and compare equal to tuple-built ones (issue #680).
+    mrm = MultiRepresentationMap(id=id, name=name, agency=agency)
+
+    hash(mrm)  # must not raise TypeError (unhashable list field)
+    assert mrm == MultiRepresentationMap(
+        id=id, name=name, agency=agency, source=(), target=(), maps=()
+    )

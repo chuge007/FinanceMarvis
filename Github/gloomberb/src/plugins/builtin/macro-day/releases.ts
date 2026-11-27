@@ -1,0 +1,191 @@
+// Published release days, not a rule engine: the dates each release came
+// out, read from the publishers' own archives. A release cancelled or moved (the
+// 2025 shutdown) is as published, and a scheduled date is not a release day
+// until it is out. Dates are New York calendar days, but for the Bank of
+// Japan's decisions, which are its own Tokyo days (announced around noon in
+// Tokyo, after the New York close the evening before), so a day's close is the
+// first to carry the decision. Brazil's IPCA days and the ECB's and BoJ's
+// decision days come from Gloom Cloud only; the list the app ships with has
+// the US releases.
+import { zonedDateKey } from "../../../utils/zoned-date-time";
+import { MACRO_RELEASE_TABLE } from "./release-table";
+
+/** The US releases the bundled list carries, and the ones HIVG reads around. */
+export type UsMacroEventKind = "cpi" | "jobs" | "fomc";
+export type MacroEventKind = UsMacroEventKind | "ipca" | "ecb" | "boj";
+
+export const US_MACRO_EVENT_KINDS: readonly UsMacroEventKind[] = ["cpi", "jobs", "fomc"];
+/** The releases Gloom Cloud alone lists: Brazil's IPCA and the ECB's and BoJ's decisions. */
+const SERVED_MACRO_EVENT_KINDS = ["ipca", "ecb", "boj"] as const satisfies readonly MacroEventKind[];
+export const MACRO_EVENT_KINDS: readonly MacroEventKind[] = [...US_MACRO_EVENT_KINDS, ...SERVED_MACRO_EVENT_KINDS];
+/** The releases HIVG reads around: the US ones and the ECB's and BoJ's decisions. */
+export const IV_EVENT_KINDS: readonly MacroEventKind[] = [...US_MACRO_EVENT_KINDS, "ecb", "boj"];
+/** The central banks' decisions: each day's row says what the meeting did and the rate after it. */
+export const POLICY_DECISION_KINDS: ReadonlySet<MacroEventKind> = new Set(["fomc", "ecb", "boj"]);
+/** The decisions whose next meeting Gloom Cloud lists ahead with their days. */
+type ScheduledMacroEventKind = "ecb" | "boj";
+
+export const MACRO_EVENT_LABELS: Record<MacroEventKind, string> = { cpi: "CPI", jobs: "Jobs", fomc: "FOMC", ipca: "IPCA", ecb: "ECB", boj: "BoJ" };
+
+/**
+ * BLS news release archives for CPI and the Employment Situation, the Federal Reserve's meeting calendar, IBGE's
+ * calendar, the ECB's monetary policy decisions, the BoJ's monetary policy meetings.
+ */
+export const MACRO_RELEASE_SOURCES: Record<MacroEventKind, string> = {
+  cpi: "https://www.bls.gov/bls/news-release/cpi.htm",
+  jobs: "https://www.bls.gov/bls/news-release/empsit.htm",
+  fomc: "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm",
+  ipca: "https://www.ibge.gov.br/calendario-indicadores-novoportal.html",
+  ecb: "https://www.ecb.europa.eu/press/govcdec/mopo/html/index.en.html",
+  boj: "https://www.boj.or.jp/en/mopo/mpmsche_minu/index.htm",
+};
+
+/** A list more than this many days behind today says so: a release day may be missing from its end. */
+export const MACRO_RELEASES_STALE_DAYS = 14;
+
+/** Above the consensus (hot), below it (cool), at it (in-line). */
+export type MacroSurprise = "hot" | "cool" | "in-line";
+export const MACRO_SURPRISES: readonly MacroSurprise[] = ["hot", "cool", "in-line"];
+export const MACRO_SURPRISE_LABELS: Record<MacroSurprise, string> = { hot: "Hot", cool: "Cool", "in-line": "In line" };
+
+/** What a release day came out with: the headline, its print, the consensus before it and the figure before that. */
+export interface MacroReleaseFigures {
+  /** The headline the figures are for: "Inflation Rate YoY", "IPCA m/m". */
+  event: string;
+  actual: string | null;
+  forecast: string | null;
+  prior: string | null;
+  surprise: MacroSurprise | null;
+  /** A policy decision's move: "held", "cut 25bp", "raised 50bp". */
+  decision?: string;
+  /** How the actual was computed where the calendar lists none: a CPI's year-on-year change from the index. */
+  computed?: string;
+  /** Why a day with a consensus or a prior has no actual, where it cannot be computed either. */
+  actualMissing?: string;
+  /**
+   * Where the headline has no actual (a CPI day without its y/y), the print its surprise is read from instead:
+   * core m/m, else m/m, against its own consensus. `surprise` stays the headline's own, null.
+   */
+  surpriseBasis?: MacroSurpriseBasis;
+}
+
+/** The print a day's surprise is read from when its headline has none: `core m/m`, 0.3% against 0.2%, hot. */
+interface MacroSurpriseBasis {
+  basis: string;
+  actual: string;
+  forecast: string;
+  surprise: MacroSurprise;
+}
+
+export interface MacroRelease {
+  kind: MacroEventKind;
+  date: string;
+  figures?: MacroReleaseFigures;
+  /** Why a day Gloom Cloud's economic calendar covers has no figures: it lists the release without them, or not at all. */
+  figuresMissing?: string;
+}
+
+export interface MacroReleaseList {
+  /** Oldest first. */
+  releases: MacroRelease[];
+  /** The last day the list is complete for: later sessions are left out, release day or not. */
+  coveredThrough: string;
+  /** The first day Gloom Cloud's economic calendar covers: days before it have no figures. */
+  figuresFrom?: string;
+  /** The ECB's and the BoJ's next decisions, which Gloom Cloud lists ahead. */
+  scheduled?: Partial<Record<ScheduledMacroEventKind, string>>;
+}
+
+const DAY_MS = 86_400_000;
+const isDate = (value: unknown): value is string => typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value)
+  && new Date(`${value}T00:00:00Z`).toISOString().startsWith(value);
+const byDate = (left: MacroRelease, right: MacroRelease) => left.date.localeCompare(right.date) || left.kind.localeCompare(right.kind);
+
+/** The list the app ships with: the floor whenever the server's list is missing or older. */
+export function bundledMacroReleases(): MacroReleaseList {
+  const releases = US_MACRO_EVENT_KINDS.flatMap((kind) => Object.entries(MACRO_RELEASE_TABLE.days[kind]).flatMap(([year, days]) =>
+    days.map((day) => ({ kind, date: `${year}-${day}` }))));
+  return { releases: releases.sort(byDate), coveredThrough: MACRO_RELEASE_TABLE.coveredThrough };
+}
+
+const text = (value: unknown) => typeof value === "string" && value.trim() ? value.trim() : null;
+
+/** A day's figures as served, or undefined when they break the contract. */
+function servedFigures(value: unknown): MacroReleaseFigures | undefined {
+  const figures = value as Partial<Record<keyof MacroReleaseFigures, unknown>> | null;
+  const event = text(figures?.event);
+  if (!event) return undefined;
+  const surprise = MACRO_SURPRISES.find((candidate) => candidate === figures?.surprise) ?? null;
+  const decision = text(figures?.decision);
+  const computed = text(figures?.computed);
+  const actualMissing = text(figures?.actualMissing);
+  const surpriseBasis = servedSurpriseBasis(figures?.surpriseBasis);
+  return { event, actual: text(figures?.actual), forecast: text(figures?.forecast), prior: text(figures?.prior), surprise,
+    ...(decision ? { decision } : {}), ...(computed ? { computed } : {}), ...(actualMissing ? { actualMissing } : {}),
+    ...(surpriseBasis ? { surpriseBasis } : {}) };
+}
+
+/** The print a surprise is read from as served, or undefined when it breaks the contract. */
+function servedSurpriseBasis(value: unknown): MacroSurpriseBasis | undefined {
+  const served = value as Partial<Record<keyof MacroSurpriseBasis, unknown>> | null;
+  const basis = text(served?.basis), actual = text(served?.actual), forecast = text(served?.forecast);
+  const surprise = MACRO_SURPRISES.find((candidate) => candidate === served?.surprise);
+  return basis && actual && forecast && surprise ? { basis, actual, forecast, surprise } : undefined;
+}
+
+/**
+ * The served list extends the floor past its end; the floor keeps its own
+ * days up to there. IPCA and the ECB's and BoJ's decisions, which the floor does not
+ * carry, are the served list's through its end, and left out when the server
+ * lists none. Every day, the
+ * floor's included, takes the figures the server has for it, or the reason it
+ * gives for having none, whether or not the served list reaches past the
+ * floor's end; US days before its economic calendar (`figuresFrom`) have none.
+ * A served list that breaks the contract adds nothing.
+ */
+export function mergeMacroReleases(floor: MacroReleaseList, served: unknown): MacroReleaseList {
+  const payload = served as { coveredThrough?: unknown; releases?: Partial<Record<MacroEventKind, unknown>>;
+    figures?: Partial<Record<MacroEventKind, Record<string, unknown>>>; figuresFrom?: unknown;
+    figureGaps?: Partial<Record<MacroEventKind, Record<string, unknown>>>; scheduled?: Partial<Record<ScheduledMacroEventKind, unknown>> } | null;
+  const servedThrough = payload?.coveredThrough;
+  if (!isDate(servedThrough)) return floor;
+  // The list is complete through the later of the two ends; a served list that stops short of the floor's adds figures only.
+  const coveredThrough = servedThrough > floor.coveredThrough ? servedThrough : floor.coveredThrough;
+  const later: MacroRelease[] = [];
+  for (const kind of US_MACRO_EVENT_KINDS) {
+    const dates = payload?.releases?.[kind];
+    if (!Array.isArray(dates) || !dates.every(isDate)) return floor;
+    for (const date of new Set(dates)) {
+      if (date > floor.coveredThrough && date <= servedThrough) later.push({ kind, date });
+    }
+  }
+  for (const kind of SERVED_MACRO_EVENT_KINDS) {
+    const dates = payload?.releases?.[kind];
+    if (!Array.isArray(dates) || !dates.every(isDate)) continue;
+    for (const date of new Set(dates)) if (date <= servedThrough) later.push({ kind, date });
+  }
+  const figuresFrom = isDate(payload?.figuresFrom) ? payload.figuresFrom : null;
+  const scheduled = Object.fromEntries((["ecb", "boj"] as const)
+    .flatMap((kind) => isDate(payload?.scheduled?.[kind]) ? [[kind, payload.scheduled[kind]]] : [])) as Partial<Record<ScheduledMacroEventKind, string>>;
+  const figuresOf = (release: MacroRelease): MacroRelease => {
+    const figures = servedFigures(payload?.figures?.[release.kind]?.[release.date]);
+    if (figures) return { ...release, figures };
+    const missing = text(payload?.figureGaps?.[release.kind]?.[release.date]);
+    return missing ? { ...release, figuresMissing: missing } : release;
+  };
+  return { releases: [...floor.releases, ...later].map(figuresOf).sort(byDate), coveredThrough, ...(figuresFrom ? { figuresFrom } : {}),
+    ...(Object.keys(scheduled).length ? { scheduled } : {}) };
+}
+
+/** Whole days from the list's last covered day to today in New York. */
+export function macroReleasesBehind(coveredThrough: string, now = Date.now()): number {
+  const today = zonedDateKey(now, "America/New_York");
+  return Math.round((Date.parse(`${today}T00:00:00Z`) - Date.parse(`${coveredThrough}T00:00:00Z`)) / DAY_MS);
+}
+
+/** The pane footer and the report notes say so once the list is old enough to miss a release day. */
+export function staleMacroReleasesNotice(list: MacroReleaseList, now = Date.now()): string | null {
+  return macroReleasesBehind(list.coveredThrough, now) > MACRO_RELEASES_STALE_DAYS
+    ? `Release days are listed through ${list.coveredThrough}; later sessions are left out.`
+    : null;
+}

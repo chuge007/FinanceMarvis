@@ -1,0 +1,230 @@
+import { MISSING_VALUE } from "../../../utils/format";
+import { formatFilingDate } from "../../../utils/datetime-format";
+import type { SupplyRow } from "../../../api-client/supply-chain";
+import { DATE_OPTION_EXAMPLES, isoDateOption } from "../../../utils/calendar-date";
+import type { GraphEvidence, GraphPath, GraphPayload } from "../../../api-client/supply-chain-graph";
+import type { HeadlessBundleResult, HeadlessBundleSection, HeadlessPaneColumn, HeadlessPaneDefinition, HeadlessPaneRow } from "../../../types/plugin";
+import { directoryColumns, directoryRows } from "./directories";
+import { fetchSupplyChain } from "./client";
+import { evidenceDate, evidenceLabel, isUnconfirmed, matchesSupplyOptions, supplyOptions, trustTier } from "./trust";
+import { fetchSupplyGraph, graphOptions } from "./graph-client";
+import { entityTicker, exposureLabel, pathLabel } from "./graph-model";
+import { graphEvidenceRow } from "./graph-evidence";
+import { counterpartyKind, counterpartyName, disclosedValue, disclosureText, earlierRows, isRelatedParty, isTaggedFact, lockedDisclosures, nativeValue, periodText, relationshipLabel, shareParts, supplyEmptyText, supplyPreviewNote,
+  supplyRoleCounts } from "./model";
+
+/**
+ * The Table tab's columns, printed as the pane prints them: the share with
+ * what it is a share of (31.5% of AIRI revenue), the value in its disclosed
+ * currency and scale (53,412,000,000 USD), and Value only when a row has one.
+ * Each printed row reads the relationship it was exported from; the exported
+ * rows keep every field, quotes and evidence included.
+ */
+function tableColumns(rows: HeadlessPaneRow[], sources: ReadonlyMap<HeadlessPaneRow, SupplyRow>, focusId: string | undefined): HeadlessPaneColumn[] {
+  const cell = (read: (row: SupplyRow) => string | null) => (value: unknown, row: HeadlessPaneRow) => {
+    const source = sources.get(row);
+    return (source ? read(source) : value == null ? null : String(value)) ?? MISSING_VALUE;
+  };
+  const valued = rows.some((row) => { const source = sources.get(row); return !!source && (nativeValue(source) !== null || source.usd !== null); });
+  const lengths = rows.some((row) => sources.get(row)?.periodMonths != null);
+  return [
+    // The text names a company with its subsidiaries (X及其子公司) as the group, as the pane's label beside the name does
+    // (the Role says whether it is a related party); a cohort or an undisclosed name already says what it is.
+    { key: "counterparty", header: "Counterparty", format: cell(counterpartyName),
+      textFormat: cell((row) => counterpartyKind(row) === "company" && row.entityScope === "group" ? `${counterpartyName(row)} (group)` : counterpartyName(row)) },
+    // As the pane: one kind of evidence for every row is no column.
+    { key: "evidenceTier", header: "Evidence", omitWhenSame: true },
+    { key: "ticker", header: "Ticker" },
+    // A related-party trade reads as one, never as a plain supplier or customer.
+    { key: "role", header: "Role", format: cell(relationshipLabel) },
+    // Exports keep the share a number, what it is a share of beside it in the Table's words ("% of total revenue (gold sales)").
+    { key: "pct", header: "Share", unitKey: "shareUnit", unitColumn: true, format: cell((row) => shareParts(row, focusId)?.value ?? null),
+      textFormat: cell((row) => { const share = shareParts(row, focusId); return share ? `${share.value} ${share.basis}` : null; }) },
+    ...(valued ? [{ key: "usd", header: "Value", align: "right" as const,
+      format: cell((row) => nativeValue(row) === null && row.usd === null ? null : disclosedValue(row).replace(/ (disclosed|derived)$/, "")) }] : []),
+    // Exports keep the end date; the text adds the period's length when the source states it ("year to 31 Dec
+    // 2025", "as of 26 Sep 2026"), and a narrow table never cuts it, so the date is never lost behind the length.
+    { key: "period", header: "Period", textFormat: cell(periodText), ...(lengths ? { minWidth: Math.max(...rows.map((row) => { const source = sources.get(row); return source ? periodText(source).length : 0; })) } : {}) },
+    { key: "filed", header: "Published", format: cell(evidenceDate), textFormat: cell((row) => formatFilingDate(evidenceDate(row), MISSING_VALUE)) },
+  ];
+}
+
+const pathColumns = [
+  { key: "route", header: "Route" }, { key: "hops", header: "Hops" },
+  { key: "score", header: "Rank score", description: "Product of normalized edge weights; not a probability." },
+  { key: "confidence", header: "Confidence" }, { key: "exposureLabel", header: "Exposure" },
+];
+/**
+ * What a graph disclosure says in words: the text itself, or for a tagged
+ * XBRL fact the sentence a filing-text disclosure of the same link quotes,
+ * else the fact read out ("Customer, Gold, revenue").
+ */
+function graphStatement(item: GraphEvidence, siblings: readonly GraphEvidence[]): string {
+  const row = graphEvidenceRow(item);
+  if (!isTaggedFact(row)) return item.quote;
+  const sentence = siblings.find((other) => other.id !== item.id && other.sourceKind === "filing_text" && other.reporter.id === item.reporter.id && other.quote.trim());
+  return sentence?.quote ?? disclosureText(row);
+}
+
+/** A graph disclosure's share as the Table words it, naming the company it is a share of; null when none is disclosed. */
+function graphShare(item: GraphEvidence): string | null {
+  const share = shareParts(graphEvidenceRow(item), undefined, { includeReporter: true });
+  return share ? `${share.value} ${share.basis}` : null;
+}
+
+function graphReport(data: GraphPayload, target: string): HeadlessBundleResult {
+  const links = new Map(data.links.map(link => [link.id, link]));
+  const nodes = new Map(data.nodes.map(node => [node.id, node]));
+  const route = (path: GraphPath) => ({ ...path, route: pathLabel(path, data), exposureLabel: exposureLabel(path, data),
+    exposure: path.exposure ? { ...path.exposure, denominatorEntity: nodes.get(path.exposure.denominatorEntityId) } : null,
+    evidence: path.linkIds.map((id, index) => ({ hop: index + 1, linkId: id, from: nodes.get(path.nodeIds[index]!),
+      to: nodes.get(path.nodeIds[index + 1]!), primaryEvidenceId: links.get(id)!.primaryEvidenceId, disclosures: links.get(id)!.evidence })),
+  });
+  const sections: HeadlessBundleResult["sections"] = target
+    ? [{ title: `Routes to ${data.target?.name ?? target}`, columns: pathColumns, rows: data.paths.map(route) }]
+    : (["upstream", "downstream", "related"] as const).map(direction => ({
+      title: direction === "upstream" ? "Upstream suppliers" : direction === "downstream" ? "Downstream customers" : "Related companies",
+      columns: [{ key: "company", header: "Company" }, { key: "ticker", header: "Ticker" }, ...pathColumns],
+      rows: data[direction].map(reach => ({ ...route(data.options.ranking === "shortest" ? reach.shortestPath : reach.bestPath), entityId: reach.entityId, company: nodes.get(reach.entityId)?.name,
+        ticker: nodes.get(reach.entityId) ? entityTicker(nodes.get(reach.entityId)!) : null, direction: reach.direction, bestPath: route(reach.bestPath), shortestPath: route(reach.shortestPath) })),
+    }));
+  sections.push({ title: "Disclosure evidence", columns: [
+    { key: "reporter", header: "Reporting company" }, { key: "from", header: "Supplier / from" }, { key: "to", header: "Customer / to" },
+    // The share in the Table's words, its reporter named ("27% of NEM total revenue (gold sales)"); exports keep pct and denominator apart.
+    { key: "role", header: "Role", textFormat: (value, row) => row.relatedParty ? `related-party ${String(value)}` : String(value) },
+    { key: "pct", header: "Share", textFormat: (_value, row) => String(row.share ?? MISSING_VALUE) },
+    { key: "period", header: "Period", textFormat: (value, row) => periodText({ period: String(value), periodMonths: row.periodMonths as number | null }) },
+    { key: "filed", header: "Filed" }, { key: "confidence", header: "Confidence" },
+    // A tagged XBRL fact prints the link's filing sentence when one names the same pair, otherwise the fact in words; exports keep the stored text.
+    { key: "quote", header: "Quote", textFormat: (value, row) => row.statement == null ? String(value ?? "") : String(row.statement) }, { key: "filingUrl", header: "Filing" },
+  ], rows: data.links.flatMap(link => link.evidence.map(item => ({ id: item.id, linkId: link.id, primary: item.id === link.primaryEvidenceId,
+    statement: graphStatement(item, link.evidence), share: graphShare(item),
+    reporter: item.reporter.name, from: item.from.name, to: item.to.name, role: item.role, relatedParty: isRelatedParty(item), pct: item.pctOfRevenue ?? null,
+    denominator: item.pctBasis && !(item.sourceKind === "xbrl" && item.pctScope) ? `${item.reporter.name} ${item.pctBasis}${item.pctScope ? ` (${item.pctScope})` : ""}` : null,
+    pctBasis: item.pctBasis, pctScope: item.pctScope, period: item.period, periodMonths: item.periodMonths ?? null, filed: item.filedDate, asOf: item.asOf,
+    confidence: item.confidence, quote: item.quote, quoteLanguage: item.quoteLanguage, quoteGloss: item.quoteGloss ?? null,
+    quoteGlossKind: item.quoteGloss ? "machine_translation" : null, nativeAmount: item.nativeAmount ?? null,
+    nativeCurrency: item.nativeCurrency ?? null, nativeScale: item.nativeScale ?? null, jurisdiction: item.jurisdiction,
+    entityScope: item.entityScope ?? null, sectionRef: item.sectionRef ?? null, sourceAttribution: item.sourceAttribution ?? null,
+    filingUrl: item.filingUrl, evidence: item,
+  }))) });
+  const errors = data.search.reasons.map(reason => `Graph search incomplete: ${reason.replaceAll("_", " ")}`);
+  if (data.access === "preview") errors.push("Gloom Pro is required for full graph depth and results");
+  if (!data.entity) errors.push("The focus company could not be resolved");
+  if (target && !data.target) errors.push("The target company could not be resolved");
+  if (data.truncated && !errors.length) errors.push("Graph results are truncated");
+  return { sections, complete: data.access === "full" && !!data.entity && (!target || !!data.target) && data.search.complete && !data.truncated && data.requestedDepth <= data.maxDepth,
+    errors, metadata: { symbol: data.symbol, target: data.target, asOf: data.asOf, snapshotAt: data.snapshotAt,
+      access: data.access, requestedDepth: data.requestedDepth, maxDepth: data.maxDepth, options: data.options,
+      search: data.search, truncated: data.truncated, methodology: data.methodology, graph: data } };
+}
+
+export const supplyChainHeadless: HeadlessPaneDefinition<"bundle"> = {
+  shape: "bundle",
+  freshness: { source: "Company filings, calls and news", status: "not-a-feed", basis: "disclosed relationships" },
+  argument: { kind: "ticker", description: "Company ticker, exchange-qualified ticker, or id:<entity-id>.", placeholder: "ticker" },
+  discovery: { aliases: ["SPLC", "SUPPLY"], dataRequirements: ["Gloom Cloud relationship evidence (Pro with free preview)"],
+    limitations: ["Filings, company announcements, earnings calls and news where evidence is available globally.", "Japan filings await an API key and Taiwan report ingestion is disabled.", "English glosses are machine translations, separate from original evidence.", "Absence is not proof of no relationship.",
+      "Table/Flow free preview: three relationships per role in each direction.", "Pro: up to four hops; free graph preview: one hop and three results per section.", "Reverse percentages belong to the reporting company.",
+      "Path rank scores are not probabilities; chained percentages are estimates.", "Search limits and incomplete reasons accompany every graph report.",
+      "Unconfirmed leads are opt-in and excluded from flow and disclosed values.", "Restricted publisher articles expose links only.",
+      "Table and Flow evidence tiers differ from Graph and Path evidence tiers."] },
+  options: [
+    // No default: left out, the report prints both views; the pane opens on what the company says.
+    { key: "view", type: "enum", settingKey: "view", values: [{ value: "says" }, { value: "names" }], description: "Statements by the company, or other sources naming it; both when left out." },
+    { key: "tab", type: "enum", settingKey: "tab", defaultValue: "table", values: ["table", "directories", "flow", "graph", "path"].map(value => ({ value })), description: "Disclosures table, issuer supplier directories, direct flow, multi-hop graph or routes to a target." },
+    { key: "route", type: "integer", minimum: 1, maximum: 50, defaultValue: 1, settingKey: "route", description: "Selected route for graph and evidence screenshots." },
+    { key: "evidence", type: "boolean", settingKey: "evidence", defaultValue: false, description: "Open selected relationship or path evidence in screenshots." },
+    { key: "depth", type: "integer", settingKey: "depth", minimum: 1, maximum: 4, defaultValue: 2, description: "Maximum graph depth in hops (Pro)." },
+    { key: "direction", type: "enum", settingKey: "direction", defaultValue: "both", values: ["upstream", "downstream", "both"].map(value => ({ value })), description: "Follow upstream suppliers, downstream customers, or both." },
+    { key: "roles", type: "string", settingKey: "roles", description: "Comma-separated customer,supplier,partner,competitor,investee roles." },
+    { key: "sources", type: "string", settingKey: "sources", description: "Comma-separated xbrl,filing_text,press_release,call,news,web,import source kinds." },
+    { key: "tiers", type: "string", settingKey: "tiers", description: "Table/Flow: sec (regulatory filings),company,call,reported,unconfirmed (default sec,company,call; unconfirmed opts into leads). Graph/Path: structured,primary,secondary,imported (default all)." },
+    { key: "min-pct", type: "string", settingKey: "minPct", defaultValue: "0", description: "Minimum disclosed percentage, 0 to 100; positive thresholds exclude unknown percentages." },
+    { key: "min-confidence", type: "string", settingKey: "minConfidence", defaultValue: "0", description: "Minimum edge confidence, 0 to 1." },
+    { key: "limit", type: "integer", settingKey: "limit", minimum: 1, maximum: 50, defaultValue: 50, description: "Maximum results per graph section or paths." },
+    { key: "ranking", type: "enum", settingKey: "ranking", defaultValue: "score", values: [{ value: "score" }, { value: "shortest" }], description: "Rank paths by edge-weight product or fewest hops." },
+    { key: "as-of", type: "string", settingKey: "asOf", placeholder: "date", description: `Include disclosures known by this date, as ${DATE_OPTION_EXAMPLES}.`, normalize: (value) => isoDateOption(value, "as-of") },
+    { key: "to", type: "string", settingKey: "to", description: "Target company ticker or id:<entity-id>; required for Path." },
+  ],
+  describe: (args) => `Supply chain | ${args.symbols[0]}${args.options.to ? ` → ${args.options.to}` : ""}`,
+  async load(args, ctx) {
+    const asOfOption = args.options.asOf ?? args.options["as-of"];
+    const asOf = typeof asOfOption === "string" && asOfOption ? asOfOption : undefined;
+    if (args.options.tab === "graph" || args.options.tab === "path") {
+      const target = String(args.options.to ?? "").trim();
+      if (args.options.tab === "path" && !target) throw new Error("Path requires a target company: --to TICKER");
+      const graph = await fetchSupplyGraph(args.symbols[0]!, graphOptions(args.options), target, ctx.apiClient);
+      // The free preview reads the graph's latest snapshot whatever the cutoff: said, never served as if it were that day's.
+      if (asOf && graph.options.asOf !== asOf) {
+        throw new Error(`--as-of ${asOf} on the ${args.options.tab === "path" ? "Path" : "Graph"} tab needs Gloom Pro; the free preview reads the latest disclosures. `
+          + `The Table tab reads it for everyone: gloom fn SPLC ${args.symbols[0]} --as-of ${asOf}`);
+      }
+      return graphReport(graph, target);
+    }
+    const options = supplyOptions(args.options.tiers);
+    const data = await fetchSupplyChain(args.symbols[0]!, ctx.apiClient, { ...options, ...asOf ? { asOf } : {} });
+    const sources = new Map<HeadlessPaneRow, SupplyRow>();
+    const sourced = (source: SupplyRow, row: HeadlessPaneRow) => { sources.set(row, source); return row; };
+    // The pane's figures, per tab: Table shows one direction, Flow both.
+    const figures = (key: "counterparties" | "locked") => Object.fromEntries(([["says", ["says"]], ["names", ["names"]], ["flow", ["says", "names"]]] as const)
+      .map(([scope, views]) => [scope, Object.fromEntries(supplyRoleCounts(data, views, options).filter((entry) => entry[key] > 0).map((entry) => [entry.role, entry[key]]))]));
+    const shareOf = (row: SupplyRow) => { const share = shareParts(row, data.entity?.id); return share ? `% ${share.basis}` : null; };
+    const record = (row: SupplyRow) => sourced(row, { counterparty: row.counterparty.name, ticker: entityTicker(row.counterparty), aggregate: row.counterparty.aggregate, role: row.role, direction: row.direction,
+      pct: row.pctOfRevenue, shareUnit: shareOf(row), pctBasis: row.pctBasis, pctScope: row.pctScope, usd: row.usd, usdBasis: row.usdBasis, period: row.period, periodMonths: row.periodMonths ?? null, fiscalYear: row.fiscalYear,
+      nativeAmount: row.nativeAmount ?? null, nativeCurrency: row.nativeCurrency ?? null, nativeScale: row.nativeScale ?? null,
+      jurisdiction: row.jurisdiction ?? null, entityScope: row.entityScope ?? null, relatedParty: isRelatedParty(row),
+      evidenceTier: evidenceLabel(row), tier: trustTier(row), claimType: row.claimType, corroboration: row.corroboration ?? 1,
+      leadStatus: row.leadStatus ?? "none", whyUnconfirmed: row.whyUnconfirmed ?? null,
+      firstSeenAt: row.firstSeenAt, lastSeenAt: row.lastSeenAt, lastConfirmedAt: row.lastConfirmedAt,
+      source: row.sourceKind, filed: row.filedDate, confidence: row.confidence, reportingCompany: row.reportingEntity.name,
+      quote: row.quote, quoteLanguage: row.quoteLanguage, quoteGloss: row.quoteGloss ?? null, quoteGlossKind: row.quoteGloss ? "machine_translation" : null,
+      quoteMatchMode: row.quoteMatchMode, sourceUrl: row.filingUrl, filingUrl: row.filingUrl, sectionRef: row.sectionRef ?? null, sourceAttribution: row.sourceAttribution ?? null,
+      evidence: row.evidence ?? [] });
+    // --view prints that view alone and says when it is empty; left out, both views print, each only when it has rows.
+    const requested: "says" | "names" | null = args.options.view === "says" || args.options.view === "names" ? args.options.view : null;
+    const views: ("says" | "names")[] = requested ? [requested] : ["says", "names"];
+    const viewTitle = (view: "says" | "names") => view === "says" ? `${data.symbol} says` : `Names ${data.symbol}`;
+    const sections = args.options.tab === "directories" ? [] : views.flatMap((view): HeadlessBundleSection[] => {
+      const shown = (rows: SupplyRow[]) => rows.filter((row) => matchesSupplyOptions(row, options));
+      const parts = [
+        { title: viewTitle(view), rows: shown(data[view]).filter((row) => !isUnconfirmed(row)).map(record) },
+        { title: `${viewTitle(view)} | Unconfirmed`, rows: shown(data[view]).filter(isUnconfirmed).map(record) },
+        // Shares from before the reporter's latest period on the same basis: each dated by its own period, never current.
+        { title: `${viewTitle(view)} | Earlier periods`, rows: shown(earlierRows(data, view)).map(record) },
+      ].filter((section) => section.rows.length > 0).map((section) => ({ ...section, columns: tableColumns(section.rows, sources, data.entity?.id) }));
+      if (parts.length || !requested || args.options.tab !== "flow" && data.directories?.some(report => (report.buyerView ? "says" : "names") === view)) return parts;
+      // "In the free preview" only when this view holds rows the preview leaves out.
+      const scope = lockedDisclosures(data, [view]) > 0 ? " in the free preview" : "";
+      return [{ title: viewTitle(view), rows: [], empty: view === "names"
+        ? `No other company's disclosures name ${data.symbol}${scope}.`
+        : `${data.symbol}'s own disclosures name no relationship${scope}.` }];
+    });
+    const directories = args.options.tab === "flow" ? [] : (data.directories ?? []).filter(report =>
+      !requested || (report.buyerView ? "says" : "names") === requested);
+    let directoryLocked = 0;
+    for (const report of directories) {
+      const rows = directoryRows(report);
+      sections.push({ title: report.buyer + " supplier directory", rows,
+        columns: directoryColumns(rows).map(([key, header]) => ({ key, header })) });
+      directoryLocked += report.total - rows.length;
+    }
+    // A requested view is complete when the preview leaves none of its own rows out.
+    const locked = lockedDisclosures(data, views);
+    const truncated = args.options.tab !== "directories" && data.truncated && (!requested || locked > 0);
+    // A company with no relationship at all says what SPLC reads and where else to look, not that it is "not covered".
+    const none = !sections.every((section) => !section.rows?.length) ? null
+      : args.options.tab === "directories" ? "No issuer supplier directory for this selection."
+      : asOf && data.status === "available" ? `No relationship of ${data.symbol}'s was disclosed by ${asOf}.`
+        : asOf ? `No relationship of ${data.symbol}'s was disclosed by ${asOf}; ${supplyEmptyText(data, (symbol) => `fn SPLC ${symbol}`)}`
+          : supplyEmptyText(data, (symbol) => `fn SPLC ${symbol}`);
+    // Dated by the newest disclosure shown, as each row's Published says, never by the latest period one covers: a
+    // filing published on 29 Oct about June is known from 29 Oct.
+    const published = [...sources.values()].map(evidenceDate).sort().at(-1) ?? null;
+    return { complete: !truncated && !directoryLocked, errors: directoryLocked ? [`${directoryLocked} further directory entries require Gloom Pro`] : truncated ? [data.access === "preview" ? supplyPreviewNote(data, locked) : "Additional relationships need Gloom Pro"] : [],
+      sections, ...(none && !requested ? { empty: none } : {}),
+      metadata: { symbol: data.symbol, asOf: published, latestPeriod: data.asOf, ...asOf ? { knownBy: asOf } : {},
+        view: requested ?? "both", counterparties: figures("counterparties"), locked: figures("locked"),
+        counts: data.counts, earlierCounts: data.earlierCounts ?? null, tierCounts: data.tierCounts, tiers: options.tiers, disclaimer: data.disclaimer } };
+  },
+};

@@ -1,0 +1,1357 @@
+/*+*****************************************************************************
+ *     ___                  _   ____  ____
+ *    / _ \ _   _  ___  ___| |_|  _ \| __ )
+ *   | | | | | | |/ _ \/ __| __| | | |  _ \
+ *   | |_| | |_| |  __/\__ \ |_| |_| | |_) |
+ *    \__\_\\__,_|\___||___/\__|____/|____/
+ *
+ *  Copyright (c) 2014-2019 Appsicle
+ *  Copyright (c) 2019-2026 QuestDB
+ *
+ *  Licensed under the Apache License, Version 2.0 (the "License");
+ *  you may not use this file except in compliance with the License.
+ *  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ ******************************************************************************/
+
+//! Symbol RLE-dictionary encoder.
+//!
+//! Symbol columns share a single global symbol table across all partitions in
+//! a row group. The encoder builds the dict page from the union of used keys
+//! across input partitions and emits one or more DataPages for the logical
+//! column chunk, re-using those local-is-global keys. A column whose
+//! `dense_symbol_dictionary` is set instead gets a dict page of only the
+//! symbols the chunk uses, and its DataPages hold indices into that page.
+
+use std::collections::HashSet;
+use std::ops::Range;
+use std::sync::{Arc, Mutex};
+
+use parquet2::bloom_filter::hash_byte;
+use parquet2::encoding::hybrid_rle::encode_u32;
+use parquet2::encoding::Encoding;
+use parquet2::page::{DictPage, Page};
+use parquet2::schema::types::PrimitiveType;
+use parquet2::statistics::ParquetStatistics;
+use parquet2::write::DynIter;
+use rapidhash::RapidHashMap;
+
+use qdb_core::col_type::{ColumnType, ColumnTypeTag};
+
+use crate::parquet::error::{fmt_err, ParquetErrorReason, ParquetResult};
+use crate::parquet_write::encoders::helpers::{
+    column_chunk_row_count, lock_bloom_set, page_row_windows, partition_chunk_slice,
+    rows_per_primitive_page, write_utf8_from_utf16_iter, FlatValidity,
+};
+use crate::parquet_write::file::WriteOptions;
+use crate::parquet_write::schema::Column;
+use crate::parquet_write::util;
+use crate::parquet_write::util::{
+    build_plain_page, transmute_slice, BinaryMaxMinStats, ExactSizedIter,
+};
+
+const BITS_PER_WORD: usize = u64::BITS as usize;
+
+/// Largest dictionary size (number of symbol keys) for which page statistics
+/// deduplicate via the per-page `seen` bitmap. The bitmap holds one bit per key
+/// and `build_symbol_page_stats` clears the whole thing once per page, so its
+/// cost grows with the dictionary size, not with the keys a page actually
+/// references. Below this many keys the clear is cheap (an 8 KiB, L1-resident
+/// bitmap) and the dedup turns a per-row min/max comparison into one per
+/// distinct key. Above it the per-page clear outweighs what the dedup saves, so
+/// the encoder updates statistics once per row instead (no bitmap). The
+/// serialized statistics are identical either way; only the work to compute
+/// them differs.
+const MAX_SYMBOL_STATS_BITMAP_KEYS: usize = 1 << 16;
+
+pub struct SymbolGlobalInfo {
+    pub used_keys: HashSet<u32>,
+    pub max_key: u32,
+}
+
+/// Encode a Symbol column as RleDictionary pages: 1 DictPage built from the
+/// union of used keys across all partitions, plus one or more DataPages for
+/// the whole column chunk depending on `data_page_size`.
+pub fn encode(
+    columns: &[Column],
+    first_partition_start: usize,
+    last_partition_end: usize,
+    primitive_type: &PrimitiveType,
+    options: WriteOptions,
+    bloom_set: Option<Arc<Mutex<HashSet<u64>>>>,
+) -> ParquetResult<Vec<Page>> {
+    if columns.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let total_rows = column_chunk_row_count(columns, first_partition_start, last_partition_end);
+    if total_rows == 0 {
+        return Ok(vec![]);
+    }
+
+    let num_partitions = columns.len();
+
+    // All partitions of a single column chunk share the same symbol table
+    // (offsets + chars come from the column's secondary buffers).
+    let first_column = &columns[0];
+    let offsets = first_column.symbol_offsets;
+    let chars = first_column.secondary_data;
+    let is_dictionary_dense = first_column.dense_symbol_dictionary;
+
+    // The row keys, or with a dense dictionary their dictionary indices; NULL stays negative.
+    let mut merged_keys = Vec::with_capacity(total_rows);
+    let mut used_keys = HashSet::new();
+    let mut max_key = 0u32;
+    // Dense dictionary only: the index of each used key, and the key of each index in the
+    // order the keys first appear.
+    let mut dense_indexes: RapidHashMap<u32, i32> = RapidHashMap::default();
+    let mut dense_dict_keys: Vec<u32> = Vec::new();
+    for (part_idx, column) in columns.iter().enumerate() {
+        let chunk = partition_chunk_slice(
+            part_idx,
+            num_partitions,
+            column,
+            first_partition_start,
+            last_partition_end,
+        );
+        merged_keys.resize(merged_keys.len() + chunk.adjusted_column_top, -1);
+        // SAFETY: JNI-backed, page-aligned, valid `i32` symbol keys.
+        let all_keys: &[i32] = unsafe { transmute_slice(column.primary_data) };
+        let chunk_keys = &all_keys[chunk.lower_bound..chunk.upper_bound];
+        if is_dictionary_dense {
+            for &key in chunk_keys {
+                if key >= 0 {
+                    let index = *dense_indexes.entry(key as u32).or_insert_with(|| {
+                        dense_dict_keys.push(key as u32);
+                        (dense_dict_keys.len() - 1) as i32
+                    });
+                    merged_keys.push(index);
+                } else {
+                    merged_keys.push(key);
+                }
+            }
+        } else {
+            for &key in chunk_keys {
+                if key >= 0 {
+                    let key = key as u32;
+                    used_keys.insert(key);
+                    max_key = max_key.max(key);
+                }
+            }
+            merged_keys.extend_from_slice(chunk_keys);
+        }
+    }
+
+    // Build dict page (with bloom hashes) under a single lock. max_key is the largest
+    // value the data pages hold, which sizes their bit width.
+    let (dict_buffer, dict_entry_count, value_ranges, max_key) = {
+        let mut bloom_guard = lock_bloom_set(bloom_set.as_ref())?;
+        let bloom = bloom_guard.as_deref_mut();
+        if is_dictionary_dense {
+            let (dict_buffer, value_ranges) =
+                build_dense_dict_buffer(&dense_dict_keys, offsets, chars, bloom)?;
+            let max_index = dense_dict_keys.len().saturating_sub(1) as u32;
+            (dict_buffer, dense_dict_keys.len(), value_ranges, max_index)
+        } else {
+            let global_info = SymbolGlobalInfo { used_keys, max_key };
+            let (dict_buffer, dict_entry_count, value_ranges) =
+                prepare_symbol_dictionary(&global_info, offsets, chars, bloom)?;
+            (dict_buffer, dict_entry_count, value_ranges, max_key)
+        }
+    };
+
+    let rows_per_page = rows_per_primitive_page(&options, primitive_type.physical_type);
+    let mut data_pages = Vec::with_capacity(total_rows.div_ceil(rows_per_page));
+    // Scratch "key already seen in this page" bitmap (1 bit per key), reused
+    // across pages so page statistics visit each distinct dictionary key once
+    // instead of once per row. Only build_symbol_page_stats consults it, and
+    // only for a small enough dictionary (see MAX_SYMBOL_STATS_BITMAP_KEYS);
+    // skip the allocation entirely otherwise.
+    let dedup_page_stats =
+        options.write_statistics && value_ranges.len() <= MAX_SYMBOL_STATS_BITMAP_KEYS;
+    let mut seen_in_page = if dedup_page_stats {
+        vec![0u64; value_ranges.len().div_ceil(BITS_PER_WORD)]
+    } else {
+        Vec::new()
+    };
+    // Reused across pages: reset() keeps the backing bitmap and only grows it,
+    // so each page refills the validity in place without a fresh allocation.
+    let mut validity = FlatValidity::new();
+    for window in page_row_windows(total_rows, rows_per_page) {
+        let page_values = &merged_keys[window.row_offset..window.row_offset + window.row_count];
+        build_symbol_validity(&mut validity, page_values);
+        // build_symbol_validity counted the nulls while filling the bitmap, so
+        // read that count back instead of scanning the page keys a second time.
+        let null_count = validity.null_count();
+        debug_assert_eq!(
+            null_count,
+            page_values.iter().filter(|&&key| key < 0).count(),
+            "validity null count disagrees with a direct scan of the page keys"
+        );
+        let page_stats = options.write_statistics.then(|| {
+            let seen = if dedup_page_stats {
+                Some(seen_in_page.as_mut_slice())
+            } else {
+                None
+            };
+            build_symbol_page_stats(
+                page_values,
+                &dict_buffer,
+                &value_ranges,
+                primitive_type,
+                null_count,
+                seen,
+            )
+        });
+        let data_page = symbol_to_data_page_with_validity(
+            page_values,
+            window.row_count,
+            max_key,
+            options,
+            primitive_type.clone(),
+            &validity,
+            page_stats,
+        )?;
+        data_pages.push(data_page);
+    }
+
+    let mut pages = Vec::with_capacity(1 + data_pages.len());
+    pages.push(Page::Dict(DictPage::new(
+        dict_buffer,
+        dict_entry_count,
+        false,
+    )));
+    pages.extend(data_pages);
+    Ok(pages)
+}
+
+pub(crate) fn prepare_symbol_dictionary(
+    global_info: &SymbolGlobalInfo,
+    offsets: &[u64],
+    chars: &[u8],
+    bloom_hashes: Option<&mut HashSet<u64>>,
+) -> ParquetResult<(Vec<u8>, usize, Vec<Range<usize>>)> {
+    let (dict_buffer, value_ranges) = build_dict_buffer(
+        &global_info.used_keys,
+        global_info.max_key,
+        offsets,
+        chars,
+        bloom_hashes,
+    )?;
+    let dict_entry_count = if global_info.used_keys.is_empty() {
+        0
+    } else {
+        (global_info.max_key + 1) as usize
+    };
+    Ok((dict_buffer, dict_entry_count, value_ranges))
+}
+
+fn symbol_to_data_page_with_validity(
+    column_values: &[i32],
+    num_rows: usize,
+    max_key: u32,
+    options: WriteOptions,
+    primitive_type: PrimitiveType,
+    validity: &FlatValidity,
+    page_stats: Option<ParquetStatistics>,
+) -> ParquetResult<Page> {
+    let mut data_buffer = vec![];
+    debug_assert!(
+        column_values
+            .iter()
+            .filter(|&&k| k >= 0)
+            .all(|&k| (k as u32) <= max_key),
+        "local key exceeds max_key, encoding would be invalid"
+    );
+
+    // Always encode def levels so the file-level schema stays OPTIONAL
+    // across O3 merges. All-present chunks collapse to a single RLE run of
+    // 1s; otherwise we fall back to per-row def levels.
+    let def_levels = validity.encode_def_levels(&mut data_buffer, options.version)?;
+    let definition_levels_byte_length = def_levels.definition_levels_byte_length;
+    let total_null_count = def_levels.null_count;
+
+    let bits_per_key = util::bit_width(max_key as u64);
+    // encode_def_levels reported the page's null count from the validity
+    // bitmap. Every remaining row carries a key, so derive the non-null count
+    // by subtraction rather than scanning the keys a second time.
+    let non_null_len = column_values.len() - total_null_count;
+    debug_assert_eq!(
+        non_null_len,
+        column_values.iter().filter(|&&value| value >= 0).count(),
+        "derived non-null length disagrees with a direct scan; validity is out of sync with column_values"
+    );
+    let local_keys =
+        column_values
+            .iter()
+            .filter_map(|&value| if value >= 0 { Some(value as u32) } else { None });
+    let keys = ExactSizedIter::new(local_keys, non_null_len);
+    data_buffer.push(bits_per_key);
+    encode_u32(&mut data_buffer, keys, non_null_len, bits_per_key as u32)?;
+
+    let data_page = build_plain_page(
+        data_buffer,
+        num_rows,
+        total_null_count,
+        definition_levels_byte_length,
+        page_stats,
+        primitive_type,
+        options,
+        Encoding::RleDictionary,
+        false,
+    )?;
+
+    Ok(Page::Data(data_page))
+}
+
+/// Refill `validity` in place from a page's symbol keys, treating any negative
+/// key as null. Reuses the caller's bitmap across pages via
+/// [`FlatValidity::reset`], which keeps the backing storage allocated.
+fn build_symbol_validity(validity: &mut FlatValidity, column_values: &[i32]) {
+    validity.reset(column_values.len());
+    for &value in column_values {
+        if value >= 0 {
+            validity.push_present();
+        } else {
+            validity.push_null();
+        }
+    }
+}
+
+const UTF16_LEN_SIZE: usize = 4;
+
+fn get_symbol_utf16_bytes(chars: &[u8], qdb_global_offset: usize) -> Option<&[u8]> {
+    // Use checked_add so a corrupt offset near usize::MAX can't wrap through the guard.
+    if qdb_global_offset
+        .checked_add(UTF16_LEN_SIZE)
+        .is_none_or(|end| end > chars.len())
+    {
+        return None;
+    }
+
+    let qdb_utf16_len_buf = &chars[qdb_global_offset..];
+    let qdb_utf16_len =
+        i32::from_le_bytes(qdb_utf16_len_buf[..4].try_into().expect("4 bytes")) as usize;
+
+    let required_len = UTF16_LEN_SIZE + qdb_utf16_len * 2;
+    if qdb_utf16_len_buf.len() < required_len {
+        return None;
+    }
+
+    Some(&qdb_utf16_len_buf[UTF16_LEN_SIZE..UTF16_LEN_SIZE + qdb_utf16_len * 2])
+}
+
+fn read_symbol_to_utf8(
+    chars: &[u8],
+    qdb_global_offset: usize,
+    dest: &mut Vec<u8>,
+) -> ParquetResult<usize> {
+    let utf16_bytes = get_symbol_utf16_bytes(chars, qdb_global_offset).ok_or_else(|| {
+        fmt_err!(
+            Layout,
+            "global symbol map character data too small, offset {qdb_global_offset} out of bounds"
+        )
+    })?;
+
+    let utf16_iter = utf16_bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|b| u16::from_le_bytes([b[0], b[1]]));
+
+    let utf8_len = write_utf8_from_utf16_iter(dest, utf16_iter)
+        .map_err(|e| ParquetErrorReason::Utf16Decode(e).into_err())?;
+    Ok(utf8_len)
+}
+
+fn build_dict_buffer(
+    used_keys: &HashSet<u32>,
+    max_key: u32,
+    offsets: &[u64],
+    chars: &[u8],
+    mut bloom_hashes: Option<&mut HashSet<u64>>,
+) -> ParquetResult<(Vec<u8>, Vec<Range<usize>>)> {
+    let end_value = if used_keys.is_empty() { 0 } else { max_key + 1 };
+
+    let dense_count = used_keys.len() as u32;
+    let sparse_count = end_value.saturating_sub(dense_count);
+    let dict_buffer_size_estimate = (sparse_count * 4) + (dense_count * 10);
+
+    let mut dict_buffer = Vec::with_capacity(dict_buffer_size_estimate as usize);
+    let mut value_ranges = vec![0..0; end_value as usize];
+
+    for key in 0..end_value {
+        let key_index = dict_buffer.len();
+        dict_buffer.extend_from_slice(&(0u32).to_le_bytes());
+
+        if used_keys.contains(&key) {
+            let qdb_global_offset = *offsets.get(key as usize).ok_or_else(|| {
+                fmt_err!(Layout, "could not find symbol with key {key} in global map")
+            })? as usize;
+
+            let utf8_len = read_symbol_to_utf8(chars, qdb_global_offset, &mut dict_buffer)?;
+            let value_range = (key_index + 4)..(key_index + 4 + utf8_len);
+            let utf8_buf = &dict_buffer[value_range.clone()];
+
+            if let Some(ref mut h) = bloom_hashes {
+                h.insert(hash_byte(utf8_buf));
+            }
+            value_ranges[key as usize] = value_range;
+
+            let utf8_len_bytes = (utf8_len as u32).to_le_bytes();
+            dict_buffer[key_index..(key_index + 4)].copy_from_slice(&utf8_len_bytes);
+        }
+    }
+
+    Ok((dict_buffer, value_ranges))
+}
+
+/// Builds the dictionary of a column chunk that holds only the symbols its rows use:
+/// entry i holds the symbol of `dict_keys[i]`, read from the table's symbol map. Its
+/// buffers grow with the used symbols, never with the largest key.
+fn build_dense_dict_buffer(
+    dict_keys: &[u32],
+    offsets: &[u64],
+    chars: &[u8],
+    mut bloom_hashes: Option<&mut HashSet<u64>>,
+) -> ParquetResult<(Vec<u8>, Vec<Range<usize>>)> {
+    let mut dict_buffer = Vec::with_capacity(dict_keys.len() * 10);
+    let mut value_ranges = Vec::with_capacity(dict_keys.len());
+    for &key in dict_keys {
+        let key_index = dict_buffer.len();
+        dict_buffer.extend_from_slice(&(0u32).to_le_bytes());
+
+        let qdb_global_offset = *offsets
+            .get(key as usize)
+            .ok_or_else(|| fmt_err!(Layout, "could not find symbol with key {key} in global map"))?
+            as usize;
+
+        let utf8_len = read_symbol_to_utf8(chars, qdb_global_offset, &mut dict_buffer)?;
+        let value_range = (key_index + 4)..(key_index + 4 + utf8_len);
+        if let Some(ref mut h) = bloom_hashes {
+            h.insert(hash_byte(&dict_buffer[value_range.clone()]));
+        }
+        value_ranges.push(value_range);
+
+        let utf8_len_bytes = (utf8_len as u32).to_le_bytes();
+        dict_buffer[key_index..(key_index + 4)].copy_from_slice(&utf8_len_bytes);
+    }
+    Ok((dict_buffer, value_ranges))
+}
+
+fn build_symbol_page_stats(
+    page_values: &[i32],
+    dict_buffer: &[u8],
+    value_ranges: &[Range<usize>],
+    primitive_type: &PrimitiveType,
+    null_count: usize,
+    seen: Option<&mut [u64]>,
+) -> ParquetStatistics {
+    let mut stats = BinaryMaxMinStats::new(primitive_type);
+    // A page's min/max is decided solely by the distinct dictionary keys it
+    // references. With a small dictionary, dedup via the `seen` bitmap (one bit
+    // per key) so each distinct key's bytes are compared once instead of on
+    // every row. With a large dictionary the caller passes None: clearing a
+    // key-sized bitmap each page would cost more than the dedup saves, so we
+    // compare on every row. Both modes yield identical min/max.
+    match seen {
+        Some(seen) => {
+            seen.fill(0);
+            for &key in page_values {
+                if key >= 0 {
+                    let key = key as usize;
+                    let word = key / BITS_PER_WORD;
+                    let bit = 1u64 << (key % BITS_PER_WORD);
+                    if seen[word] & bit == 0 {
+                        seen[word] |= bit;
+                        stats.update(&dict_buffer[value_ranges[key].clone()]);
+                    }
+                }
+            }
+        }
+        None => {
+            for &key in page_values {
+                if key >= 0 {
+                    stats.update(&dict_buffer[value_ranges[key as usize].clone()]);
+                }
+            }
+        }
+    }
+    stats.into_parquet_stats(null_count)
+}
+
+/// Legacy single-partition API kept for benchmarks.  Delegates to [`encode`].
+#[allow(clippy::too_many_arguments)]
+pub fn symbol_to_pages(
+    column_values: &[i32],
+    offsets: &[u64],
+    chars: &[u8],
+    column_top: usize,
+    options: WriteOptions,
+    primitive_type: PrimitiveType,
+    _not_null_hint: bool,
+    bloom_set: Option<Arc<Mutex<HashSet<u64>>>>,
+) -> ParquetResult<DynIter<'static, ParquetResult<Page>>> {
+    let primary_data = unsafe {
+        std::slice::from_raw_parts(
+            column_values.as_ptr() as *const u8,
+            std::mem::size_of_val(column_values),
+        )
+    };
+    let column = Column::from_raw_data(
+        0,
+        "symbol",
+        ColumnType::new(ColumnTypeTag::Symbol, 0).code(),
+        column_top as i64,
+        column_top + column_values.len(),
+        primary_data.as_ptr(),
+        primary_data.len(),
+        chars.as_ptr(),
+        chars.len(),
+        offsets.as_ptr(),
+        offsets.len(),
+        false,
+        false,
+        0,
+    )?;
+    let row_count = column.row_count;
+    let pages = encode(&[column], 0, row_count, &primitive_type, options, bloom_set)?;
+    Ok(DynIter::new(pages.into_iter().map(Ok)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parquet::tests::ColumnTypeTagExt;
+    use crate::parquet_write::tests::serialize_as_symbols;
+    use parquet2::compression::CompressionOptions;
+    use parquet2::page::DataPageHeader;
+    use parquet2::schema::types::PhysicalType;
+    use parquet2::statistics::BinaryStatistics;
+    use parquet2::write::Version;
+    use qdb_core::col_type::ColumnTypeTag;
+
+    fn write_options() -> WriteOptions {
+        WriteOptions {
+            write_statistics: true,
+            version: Version::V2,
+            compression: CompressionOptions::Uncompressed,
+            row_group_size: None,
+            data_page_size: None,
+            raw_array_encoding: false,
+            bloom_filter_fpp: 0.01,
+            min_compression_ratio: 0.0,
+        }
+    }
+
+    fn primitive_type() -> PrimitiveType {
+        PrimitiveType::from_physical("col".to_string(), PhysicalType::ByteArray)
+    }
+
+    fn page_v2_num_values(page: &Page) -> i32 {
+        match page {
+            Page::Data(data) => match &data.header {
+                DataPageHeader::V2(h) => h.num_values,
+                DataPageHeader::V1(_) => panic!("expected V2 header"),
+            },
+            _ => panic!("expected data page"),
+        }
+    }
+
+    fn page_v2_num_nulls(page: &Page) -> i32 {
+        match page {
+            Page::Data(data) => match &data.header {
+                DataPageHeader::V2(h) => h.num_nulls,
+                DataPageHeader::V1(_) => panic!("expected V2 header"),
+            },
+            _ => panic!("expected data page"),
+        }
+    }
+
+    /// Read back a data page's (min, max, null_count) statistics.
+    fn page_binary_stats(page: &Page) -> (Vec<u8>, Vec<u8>, i64) {
+        let data = match page {
+            Page::Data(data) => data,
+            _ => panic!("expected data page"),
+        };
+        let arc = data.statistics().expect("statistics present").expect("ok");
+        let stats = arc
+            .as_any()
+            .downcast_ref::<BinaryStatistics>()
+            .expect("BinaryStatistics");
+        (
+            stats.min_value.clone().expect("min"),
+            stats.max_value.clone().expect("max"),
+            stats.null_count.expect("null_count"),
+        )
+    }
+
+    /// Build a Symbol Column borrowing the supplied keys / chars / offsets.
+    fn make_symbol_column(
+        keys: &[i32],
+        chars: &[u8],
+        offsets: &[u64],
+        column_top: usize,
+    ) -> Column {
+        Column::from_raw_data(
+            0,
+            "sym",
+            ColumnTypeTag::Symbol.into_type().code(),
+            column_top as i64,
+            keys.len(),
+            keys.as_ptr() as *const u8,
+            std::mem::size_of_val(keys),
+            chars.as_ptr(),
+            chars.len(),
+            offsets.as_ptr(),
+            offsets.len(),
+            false,
+            false,
+            0,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn symbol_empty_columns_slice() {
+        // Calling encode with zero partitions returns an empty page list.
+        let pages =
+            encode(&[], 0, 0, &primitive_type(), write_options(), None).expect("encode empty");
+        assert!(pages.is_empty());
+    }
+
+    #[test]
+    fn symbol_all_partitions_same_key() {
+        // Two partitions, each referencing only key 0.
+        let (chars, offsets) = serialize_as_symbols(vec!["only"]);
+        let keys1: Vec<i32> = vec![0, 0, 0];
+        let keys2: Vec<i32> = vec![0, 0];
+        let col1 = make_symbol_column(&keys1, &chars, &offsets, 0);
+        let col2 = make_symbol_column(&keys2, &chars, &offsets, 0);
+
+        let columns = vec![col1, col2];
+        let pages = encode(
+            &columns,
+            0,
+            keys2.len(),
+            &primitive_type(),
+            write_options(),
+            None,
+        )
+        .expect("encode");
+
+        // 1 dict page + 1 data page.
+        assert_eq!(pages.len(), 2);
+        assert!(matches!(pages[0], Page::Dict(_)));
+        assert!(matches!(pages[1], Page::Data(_)));
+    }
+
+    #[test]
+    fn symbol_honors_data_page_size() {
+        let (chars, offsets) = serialize_as_symbols(vec!["foo", "bar", "baz"]);
+        let keys: Vec<i32> = (0..20).map(|i| i % 3).collect();
+        let col = make_symbol_column(&keys, &chars, &offsets, 0);
+        let opts = WriteOptions { data_page_size: Some(64), ..write_options() };
+        let pages = encode(&[col], 0, keys.len(), &primitive_type(), opts, None).expect("encode");
+
+        assert_eq!(pages.len(), 4);
+        assert!(matches!(pages[0], Page::Dict(_)));
+        assert_eq!(page_v2_num_values(&pages[1]), 8);
+        assert_eq!(page_v2_num_values(&pages[2]), 8);
+        assert_eq!(page_v2_num_values(&pages[3]), 4);
+    }
+
+    #[test]
+    fn symbol_emits_bloom_hashes_when_set_present() {
+        // Pass a non-None bloom set to exercise the Some branch of
+        // lock_bloom_set inside symbol::encode and the bloom.insert path
+        // inside build_symbol_dict_page. The set should end up populated
+        // with one hash per distinct symbol value across all partitions.
+        let (chars, offsets) = serialize_as_symbols(vec!["foo", "bar", "baz"]);
+        let keys1: Vec<i32> = vec![0, 1, 2];
+        let keys2: Vec<i32> = vec![1, 2];
+        let col1 = make_symbol_column(&keys1, &chars, &offsets, 0);
+        let col2 = make_symbol_column(&keys2, &chars, &offsets, 0);
+
+        let bloom = Arc::new(Mutex::new(HashSet::<u64>::new()));
+        let pages = encode(
+            &[col1, col2],
+            0,
+            keys2.len(),
+            &primitive_type(),
+            write_options(),
+            Some(bloom.clone()),
+        )
+        .expect("encode");
+
+        // Sanity-check the page layout (1 dict + 1 data) hasn't drifted.
+        assert_eq!(pages.len(), 2);
+
+        // The bloom set is populated from the *union* of all referenced
+        // dict entries — three symbols total.
+        let set = bloom.lock().expect("bloom lock");
+        assert_eq!(set.len(), 3, "expected one hash per distinct symbol");
+    }
+
+    #[test]
+    fn symbol_to_pages_legacy_api() {
+        let (chars, offsets) = serialize_as_symbols(vec!["foo", "bar"]);
+        let keys: Vec<i32> = vec![0, 1, -1, 0];
+        let pages = symbol_to_pages(
+            &keys,
+            &offsets,
+            &chars,
+            0,
+            write_options(),
+            primitive_type(),
+            false,
+            None,
+        )
+        .expect("encode");
+        let pages: Vec<_> = pages.map(|r| r.expect("page")).collect();
+        assert_eq!(pages.len(), 2); // 1 dict + 1 data
+        assert!(matches!(pages[0], Page::Dict(_)));
+    }
+
+    #[test]
+    fn symbol_to_pages_legacy_with_column_top() {
+        let (chars, offsets) = serialize_as_symbols(vec!["foo"]);
+        let keys: Vec<i32> = vec![0, 0];
+        let pages = symbol_to_pages(
+            &keys,
+            &offsets,
+            &chars,
+            3,
+            write_options(),
+            primitive_type(),
+            false,
+            None,
+        )
+        .expect("encode");
+        let pages: Vec<_> = pages.map(|r| r.expect("page")).collect();
+        assert_eq!(pages.len(), 2);
+        // Data page should have 5 rows total (3 top + 2 data)
+        assert_eq!(page_v2_num_values(&pages[1]), 5);
+    }
+
+    #[test]
+    fn symbol_no_stats() {
+        let (chars, offsets) = serialize_as_symbols(vec!["foo"]);
+        let keys: Vec<i32> = vec![0, 0];
+        let col = make_symbol_column(&keys, &chars, &offsets, 0);
+        let opts = WriteOptions { write_statistics: false, ..write_options() };
+        let pages = encode(&[col], 0, keys.len(), &primitive_type(), opts, None).expect("encode");
+        assert_eq!(pages.len(), 2);
+    }
+
+    #[test]
+    fn symbol_partition_with_column_top() {
+        // Symbol column with column_top = 5: rows 0..5 are nulls, rows 5..10 are
+        // data referencing the dict.
+        let (chars, offsets) = serialize_as_symbols(vec!["a", "b"]);
+        let keys: Vec<i32> = vec![0, 1, 0, 1, 0]; // 5 data rows
+        let col = make_symbol_column(&keys, &chars, &offsets, 5);
+
+        let columns = vec![col];
+        // Column has 5 column-top rows + 5 data rows = 10 logical rows.
+        let pages =
+            encode(&columns, 0, 10, &primitive_type(), write_options(), None).expect("encode");
+        assert_eq!(pages.len(), 2); // 1 dict + 1 data
+        match &pages[1] {
+            Page::Data(data_page) => {
+                // The header should report 5 nulls (the column-top rows).
+                let header = &data_page.header;
+                let num_nulls = match header {
+                    parquet2::page::DataPageHeader::V1(h) => {
+                        // V1 doesn't carry num_nulls in the header — fall through.
+                        h.num_values
+                    }
+                    parquet2::page::DataPageHeader::V2(h) => h.num_nulls,
+                };
+                let _ = num_nulls; // V1 num_values, V2 num_nulls; both expected to be sensible
+                                   // Use the V2 path that we configured in write_options().
+                if let parquet2::page::DataPageHeader::V2(h) = header {
+                    assert_eq!(h.num_nulls, 5, "expected 5 column-top nulls");
+                    assert_eq!(h.num_values, 10);
+                } else {
+                    panic!("expected V2 page header");
+                }
+            }
+            _ => panic!("expected data page at index 1"),
+        }
+    }
+
+    #[test]
+    fn symbol_multi_page_with_nulls_derives_counts_and_stats() {
+        // Spread distinct keys and interspersed nulls across several pages so
+        // the fused per-page null derivation (null_count from the validity
+        // bitmap, non_null_len = rows - null_count) is exercised on every
+        // page, and each page's statistics cover only the distinct keys it
+        // references. With data_page_size 64 the encoder packs 8 rows per
+        // page, giving pages of 8, 8 and 4 rows.
+        let (chars, offsets) = serialize_as_symbols(vec!["aaa", "bbb", "ccc", "ddd"]);
+        let keys: Vec<i32> = vec![
+            0, -1, 1, 0, -1, 1, 0, 1, // page 1: keys {0,1}, 2 nulls
+            2, 3, -1, 2, 3, 2, -1, 3, // page 2: keys {2,3}, 2 nulls
+            0, 3, -1, -1, // page 3: keys {0,3}, 2 nulls
+        ];
+        let col = make_symbol_column(&keys, &chars, &offsets, 0);
+        let opts = WriteOptions { data_page_size: Some(64), ..write_options() };
+        let pages = encode(&[col], 0, keys.len(), &primitive_type(), opts, None).expect("encode");
+
+        // 1 dict page + 3 data pages.
+        assert_eq!(pages.len(), 4);
+        assert!(matches!(pages[0], Page::Dict(_)));
+
+        // Row and null counts per page come straight from the validity bitmap.
+        assert_eq!(page_v2_num_values(&pages[1]), 8);
+        assert_eq!(page_v2_num_nulls(&pages[1]), 2);
+        assert_eq!(page_v2_num_values(&pages[2]), 8);
+        assert_eq!(page_v2_num_nulls(&pages[2]), 2);
+        assert_eq!(page_v2_num_values(&pages[3]), 4);
+        assert_eq!(page_v2_num_nulls(&pages[3]), 2);
+
+        // Statistics are scoped to each page's referenced keys; the reported
+        // null_count must match the derived per-page null count.
+        assert_eq!(
+            page_binary_stats(&pages[1]),
+            (b"aaa".to_vec(), b"bbb".to_vec(), 2)
+        );
+        assert_eq!(
+            page_binary_stats(&pages[2]),
+            (b"ccc".to_vec(), b"ddd".to_vec(), 2)
+        );
+        assert_eq!(
+            page_binary_stats(&pages[3]),
+            (b"aaa".to_vec(), b"ddd".to_vec(), 2)
+        );
+    }
+
+    #[test]
+    fn symbol_multi_word_bitmap_stats_reset_across_pages() {
+        // Dictionary keys spanning multiple 64-bit words of the `seen` bitmap
+        // (70 -> word 1, 130 -> word 2) exercise the word indexing beyond word
+        // 0. Page 2 references only keys already visited in page 1, so its
+        // statistics are correct only if `seen.fill(0)` cleared every touched
+        // word between pages; a stale bitmap would skip both keys and report an
+        // empty (None) min/max for page 2.
+        let names: Vec<String> = (0..=130).map(|i| format!("s{i:03}")).collect();
+        let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let (chars, offsets) = serialize_as_symbols(name_refs);
+        let keys: Vec<i32> = vec![
+            0, 70, 130, -1, 0, 70, 130, 0, // page 1: keys {0,70,130}, 1 null
+            70, 130, 70, 130, 70, 130, 70, 130, // page 2: keys {70,130}, 0 null
+        ];
+        let col = make_symbol_column(&keys, &chars, &offsets, 0);
+        let opts = WriteOptions { data_page_size: Some(64), ..write_options() };
+        let pages = encode(&[col], 0, keys.len(), &primitive_type(), opts, None).expect("encode");
+
+        // 1 dict page + 2 data pages of 8 rows each.
+        assert_eq!(pages.len(), 3);
+        assert_eq!(page_v2_num_values(&pages[1]), 8);
+        assert_eq!(page_v2_num_nulls(&pages[1]), 1);
+        assert_eq!(page_v2_num_values(&pages[2]), 8);
+        assert_eq!(page_v2_num_nulls(&pages[2]), 0);
+
+        // Page 1 spans words 0..=2; min/max are the extreme referenced symbols.
+        assert_eq!(
+            page_binary_stats(&pages[1]),
+            (b"s000".to_vec(), b"s130".to_vec(), 1)
+        );
+        // Page 2 re-references the high keys; correct stats require the bitmap
+        // words touched in page 1 to have been cleared.
+        assert_eq!(
+            page_binary_stats(&pages[2]),
+            (b"s070".to_vec(), b"s130".to_vec(), 0)
+        );
+    }
+
+    #[test]
+    fn symbol_all_null_page_has_absent_stats() {
+        // A page that references no dictionary key reports no min/max and counts
+        // every row as null.
+        let (chars, offsets) = serialize_as_symbols(vec!["x", "y"]);
+        let keys: Vec<i32> = vec![-1, -1, -1, -1];
+        let col = make_symbol_column(&keys, &chars, &offsets, 0);
+        let pages = encode(
+            &[col],
+            0,
+            keys.len(),
+            &primitive_type(),
+            write_options(),
+            None,
+        )
+        .expect("encode");
+
+        assert_eq!(pages.len(), 2); // 1 dict + 1 data
+        assert_eq!(page_v2_num_nulls(&pages[1]), 4);
+
+        let data = match &pages[1] {
+            Page::Data(data) => data,
+            _ => panic!("expected data page"),
+        };
+        let arc = data.statistics().expect("statistics present").expect("ok");
+        let stats = arc
+            .as_any()
+            .downcast_ref::<BinaryStatistics>()
+            .expect("BinaryStatistics");
+        assert!(stats.min_value.is_none(), "all-null page must have no min");
+        assert!(stats.max_value.is_none(), "all-null page must have no max");
+        assert_eq!(stats.null_count, Some(4));
+    }
+
+    #[test]
+    fn symbol_page_stats_dedup_and_per_row_agree() {
+        // build_symbol_page_stats must produce identical statistics whether it
+        // deduplicates via the `seen` bitmap (small dictionary) or compares
+        // every row (large dictionary, seen = None). Build the dictionary the
+        // way encode does, then run both modes over the same page of repeated,
+        // null-interspersed keys and assert the serialized stats are equal.
+        let (chars, offsets) = serialize_as_symbols(vec!["aaa", "bbb", "ccc", "ddd"]);
+        let used_keys: HashSet<u32> = [0, 1, 2, 3].into_iter().collect();
+        let global_info = SymbolGlobalInfo { used_keys, max_key: 3 };
+        let (dict_buffer, _entry_count, value_ranges) =
+            prepare_symbol_dictionary(&global_info, &offsets, &chars, None).expect("dict");
+
+        let page_values: Vec<i32> = vec![3, 0, -1, 1, 0, 2, 3, -1, 1, 0, 3];
+        let null_count = page_values.iter().filter(|&&k| k < 0).count();
+        let pt = primitive_type();
+
+        let mut seen = vec![0u64; value_ranges.len().div_ceil(BITS_PER_WORD)];
+        let deduped = build_symbol_page_stats(
+            &page_values,
+            &dict_buffer,
+            &value_ranges,
+            &pt,
+            null_count,
+            Some(&mut seen),
+        );
+        let per_row = build_symbol_page_stats(
+            &page_values,
+            &dict_buffer,
+            &value_ranges,
+            &pt,
+            null_count,
+            None,
+        );
+
+        assert_eq!(
+            deduped, per_row,
+            "dedup and per-row stats must be identical"
+        );
+        assert_eq!(deduped.null_count, Some(2));
+    }
+
+    /// Build a Symbol Column whose column chunk dictionary holds only the symbols its rows use.
+    fn make_dense_symbol_column(
+        keys: &[i32],
+        chars: &[u8],
+        offsets: &[u64],
+        column_top: usize,
+    ) -> Column {
+        let mut column = make_symbol_column(keys, chars, offsets, column_top);
+        column.dense_symbol_dictionary = true;
+        column
+    }
+
+    fn dict_page(page: &Page) -> &DictPage {
+        match page {
+            Page::Dict(dict) => dict,
+            _ => panic!("expected dictionary page"),
+        }
+    }
+
+    /// The dictionary bytes of `values`: a 4-byte length and the UTF-8 bytes per entry.
+    fn dictionary_bytes(values: &[&str]) -> Vec<u8> {
+        let mut buffer = Vec::new();
+        for value in values {
+            buffer.extend_from_slice(&(value.len() as u32).to_le_bytes());
+            buffer.extend_from_slice(value.as_bytes());
+        }
+        buffer
+    }
+
+    /// Read back a data page's dictionary bit width and the dictionary indices of its
+    /// non-null rows.
+    fn data_page_dictionary_indices(page: &Page, non_null_count: usize) -> (u8, Vec<u32>) {
+        let data = match page {
+            Page::Data(data) => data,
+            _ => panic!("expected data page"),
+        };
+        let (_, _, values) = parquet2::page::split_buffer(data).expect("split page buffer");
+        let bit_width = values[0];
+        let indices = parquet2::encoding::hybrid_rle::HybridRleDecoder::try_new(
+            &values[1..],
+            bit_width as u32,
+            non_null_count,
+        )
+        .expect("index decoder")
+        .collect::<Result<Vec<u32>, _>>()
+        .expect("indices");
+        (bit_width, indices)
+    }
+
+    // A map of 1_000_000 symbols, key k -> "s{k}".
+    fn million_symbol_map() -> (Vec<u8>, Vec<u64>) {
+        let names: Vec<String> = (0..1_000_000).map(|k| format!("s{k}")).collect();
+        serialize_as_symbols(names.iter().map(String::as_str).collect())
+    }
+
+    #[test]
+    fn symbol_dense_dictionary_holds_only_used_keys() {
+        // The chunk uses keys 999_999 and 5 of a 1_000_000-symbol map. The global layout
+        // writes an entry for every key up to 999_999 (>= 4_000_000 bytes); the dense one
+        // holds the two used symbols in first-appearance order: (4 + 7) + (4 + 2) = 17 bytes.
+        let (chars, offsets) = million_symbol_map();
+        let keys: Vec<i32> = vec![999_999, -1, 5, 999_999];
+        let col = make_dense_symbol_column(&keys, &chars, &offsets, 0);
+        let pages = encode(
+            &[col],
+            0,
+            keys.len(),
+            &primitive_type(),
+            write_options(),
+            None,
+        )
+        .expect("encode");
+
+        assert_eq!(pages.len(), 2); // 1 dict + 1 data
+        let dict = dict_page(&pages[0]);
+        assert_eq!(dict.num_values, 2);
+        assert_eq!(dict.buffer.len(), 17);
+        assert_eq!(dict.buffer, dictionary_bytes(&["s999999", "s5"]));
+
+        assert_eq!(page_v2_num_values(&pages[1]), 4);
+        assert_eq!(page_v2_num_nulls(&pages[1]), 1);
+        // rows [s999999, null, s5, s999999] -> indices [0, 1, 0] with 1 bit per index
+        assert_eq!(
+            data_page_dictionary_indices(&pages[1], 3),
+            (1, vec![0, 1, 0])
+        );
+        assert_eq!(
+            page_binary_stats(&pages[1]),
+            (b"s5".to_vec(), b"s999999".to_vec(), 1)
+        );
+
+        // The dense dictionary sizes its buffers by the used symbols, never by the largest
+        // key: the global estimate for this input is 4_000_012 bytes and 1_000_000 ranges.
+        let (dict_buffer, value_ranges) =
+            build_dense_dict_buffer(&[999_999, 5], &offsets, &chars, None).expect("dict");
+        assert_eq!(value_ranges.len(), 2);
+        assert!(
+            dict_buffer.capacity() < 1_000,
+            "dense dictionary buffer capacity: {}",
+            dict_buffer.capacity()
+        );
+        assert_eq!(dict_buffer, dictionary_bytes(&["s999999", "s5"]));
+        assert_eq!(value_ranges, vec![4..11, 15..17]);
+    }
+
+    #[test]
+    fn symbol_dense_dictionary_spans_frames_from_mid_frame() {
+        // A row group that starts at row 2 of the first frame and ends at row 1 of the
+        // second: the dictionary holds the symbols of those rows only, in first-appearance
+        // order across the frames.
+        let (chars, offsets) = serialize_as_symbols(vec!["k0", "k1", "k2", "k3", "k4", "k5", "k6"]);
+        let keys1: Vec<i32> = vec![6, 5, 4, -1, 2];
+        let keys2: Vec<i32> = vec![4, 0, 1];
+        let col1 = make_dense_symbol_column(&keys1, &chars, &offsets, 0);
+        let col2 = make_dense_symbol_column(&keys2, &chars, &offsets, 0);
+        let bloom = Arc::new(Mutex::new(HashSet::<u64>::new()));
+        let pages = encode(
+            &[col1, col2],
+            2,
+            2,
+            &primitive_type(),
+            write_options(),
+            Some(bloom.clone()),
+        )
+        .expect("encode");
+
+        // rows [k4, null, k2, k4, k0]
+        assert_eq!(pages.len(), 2);
+        let dict = dict_page(&pages[0]);
+        assert_eq!(dict.num_values, 3);
+        assert_eq!(dict.buffer, dictionary_bytes(&["k4", "k2", "k0"]));
+        assert_eq!(page_v2_num_values(&pages[1]), 5);
+        assert_eq!(page_v2_num_nulls(&pages[1]), 1);
+        assert_eq!(
+            data_page_dictionary_indices(&pages[1], 4),
+            (2, vec![0, 1, 0, 2])
+        );
+        assert_eq!(
+            page_binary_stats(&pages[1]),
+            (b"k0".to_vec(), b"k4".to_vec(), 1)
+        );
+        // The bloom filter holds the hashes of the used symbols only.
+        let expected_hashes: HashSet<u64> = ["k4", "k2", "k0"]
+            .iter()
+            .map(|value| hash_byte(value.as_bytes()))
+            .collect();
+        assert_eq!(*bloom.lock().expect("bloom lock"), expected_hashes);
+    }
+
+    #[test]
+    fn symbol_dense_dictionary_with_column_top_and_no_stats() {
+        // Column top rows are NULL and take no dictionary entry; statistics off writes the
+        // same dictionary and indices.
+        let (chars, offsets) = serialize_as_symbols(vec!["x", "y", "z"]);
+        let keys: Vec<i32> = vec![2, 2, 1];
+        let col = make_dense_symbol_column(&keys, &chars, &offsets, 2);
+        let opts = WriteOptions { write_statistics: false, ..write_options() };
+        let pages = encode(&[col], 0, 5, &primitive_type(), opts, None).expect("encode");
+
+        assert_eq!(pages.len(), 2);
+        let dict = dict_page(&pages[0]);
+        assert_eq!(dict.num_values, 2);
+        assert_eq!(dict.buffer, dictionary_bytes(&["z", "y"]));
+        assert_eq!(page_v2_num_values(&pages[1]), 5);
+        assert_eq!(page_v2_num_nulls(&pages[1]), 2);
+        assert_eq!(
+            data_page_dictionary_indices(&pages[1], 3),
+            (1, vec![0, 0, 1])
+        );
+        match &pages[1] {
+            Page::Data(data) => assert!(data.statistics().is_none(), "statistics are off"),
+            _ => panic!("expected data page"),
+        }
+    }
+
+    #[test]
+    fn symbol_dense_dictionary_all_null_chunk() {
+        // A chunk whose rows are all NULL has an empty dictionary.
+        let (chars, offsets) = serialize_as_symbols(vec!["x", "y"]);
+        let keys: Vec<i32> = vec![-1, -1, -1];
+        let col = make_dense_symbol_column(&keys, &chars, &offsets, 0);
+        let pages = encode(
+            &[col],
+            0,
+            keys.len(),
+            &primitive_type(),
+            write_options(),
+            None,
+        )
+        .expect("encode");
+
+        assert_eq!(pages.len(), 2);
+        let dict = dict_page(&pages[0]);
+        assert_eq!(dict.num_values, 0);
+        assert!(dict.buffer.is_empty());
+        assert_eq!(page_v2_num_values(&pages[1]), 3);
+        assert_eq!(page_v2_num_nulls(&pages[1]), 3);
+    }
+
+    #[test]
+    fn symbol_dense_dictionary_key_beyond_map_fails() {
+        // A key the map does not hold is an error, never a panic or a wrong symbol.
+        let (chars, offsets) = serialize_as_symbols(vec!["x", "y", "z"]);
+        let keys: Vec<i32> = vec![0, 5];
+        let col = make_dense_symbol_column(&keys, &chars, &offsets, 0);
+        let err = encode(
+            &[col],
+            0,
+            keys.len(),
+            &primitive_type(),
+            write_options(),
+            None,
+        )
+        .expect_err("a key beyond the map must fail");
+        assert!(
+            err.to_string()
+                .contains("could not find symbol with key 5 in global map"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn symbol_dense_multi_page_with_nulls_derives_counts_and_stats() {
+        // The dense version of symbol_multi_page_with_nulls_derives_counts_and_stats. The
+        // used keys 6, 1, 5 and 3 get the dictionary indices 0, 1, 2 and 3, so a page
+        // statistic that read the symbol at the key instead of the index would differ.
+        // With data_page_size 64 the encoder packs 8 rows per page: pages of 8, 8 and 4.
+        let (chars, offsets) =
+            serialize_as_symbols(vec!["zzz", "aaa", "un1", "bbb", "un2", "ccc", "ddd"]);
+        let keys: Vec<i32> = vec![
+            6, -1, 1, 6, -1, 1, 6, 1, // page 1: ddd, aaa, 2 nulls
+            5, 3, -1, 5, 3, 5, -1, 3, // page 2: ccc, bbb, 2 nulls
+            6, 3, -1, -1, // page 3: ddd, bbb, 2 nulls
+        ];
+        let col = make_dense_symbol_column(&keys, &chars, &offsets, 0);
+        let opts = WriteOptions { data_page_size: Some(64), ..write_options() };
+        let pages = encode(&[col], 0, keys.len(), &primitive_type(), opts, None).expect("encode");
+
+        assert_eq!(pages.len(), 4);
+        let dict = dict_page(&pages[0]);
+        assert_eq!(dict.num_values, 4);
+        assert_eq!(dict.buffer, dictionary_bytes(&["ddd", "aaa", "ccc", "bbb"]));
+
+        assert_eq!(page_v2_num_values(&pages[1]), 8);
+        assert_eq!(page_v2_num_nulls(&pages[1]), 2);
+        assert_eq!(page_v2_num_values(&pages[2]), 8);
+        assert_eq!(page_v2_num_nulls(&pages[2]), 2);
+        assert_eq!(page_v2_num_values(&pages[3]), 4);
+        assert_eq!(page_v2_num_nulls(&pages[3]), 2);
+
+        assert_eq!(
+            page_binary_stats(&pages[1]),
+            (b"aaa".to_vec(), b"ddd".to_vec(), 2)
+        );
+        assert_eq!(
+            page_binary_stats(&pages[2]),
+            (b"bbb".to_vec(), b"ccc".to_vec(), 2)
+        );
+        assert_eq!(
+            page_binary_stats(&pages[3]),
+            (b"bbb".to_vec(), b"ddd".to_vec(), 2)
+        );
+
+        assert_eq!(
+            data_page_dictionary_indices(&pages[1], 6),
+            (2, vec![0, 1, 0, 1, 0, 1])
+        );
+        assert_eq!(
+            data_page_dictionary_indices(&pages[2], 6),
+            (2, vec![2, 3, 2, 3, 2, 3])
+        );
+        assert_eq!(data_page_dictionary_indices(&pages[3], 2), (2, vec![0, 3]));
+    }
+
+    #[test]
+    fn symbol_dense_large_dictionary_uses_per_row_stats() {
+        // The dense version of symbol_large_dictionary_uses_per_row_stats: 70_000 distinct
+        // keys, more than MAX_SYMBOL_STATS_BITMAP_KEYS, route the page statistics through
+        // the per-row path. The rows are NULL, the odd keys 139_999 down to 1 of a
+        // 140_000-symbol map (key k -> "k{k:06}"), and NULL; 40_000 rows per page.
+        let names: Vec<String> = (0..140_000).map(|k| format!("k{k:06}")).collect();
+        let (chars, offsets) = serialize_as_symbols(names.iter().map(String::as_str).collect());
+        let mut keys: Vec<i32> = vec![-1];
+        keys.extend((0..70_000).map(|i| 139_999 - 2 * i));
+        keys.push(-1);
+        let col = make_dense_symbol_column(&keys, &chars, &offsets, 0);
+        let opts = WriteOptions {
+            data_page_size: Some(8 * 40_000),
+            ..write_options()
+        };
+        let pages = encode(&[col], 0, keys.len(), &primitive_type(), opts, None).expect("encode");
+
+        assert_eq!(pages.len(), 3); // 1 dict + 2 data
+        let dict = dict_page(&pages[0]);
+        assert_eq!(dict.num_values, 70_000);
+        assert!(
+            dict.num_values > MAX_SYMBOL_STATS_BITMAP_KEYS,
+            "the dictionary must be too large for the stats bitmap"
+        );
+        // page 1: NULL and keys 139_999 down to 60_003
+        assert_eq!(page_v2_num_values(&pages[1]), 40_000);
+        assert_eq!(
+            page_binary_stats(&pages[1]),
+            (b"k060003".to_vec(), b"k139999".to_vec(), 1)
+        );
+        // page 2: keys 60_001 down to 1 and NULL
+        assert_eq!(page_v2_num_values(&pages[2]), 30_002);
+        assert_eq!(
+            page_binary_stats(&pages[2]),
+            (b"k000001".to_vec(), b"k060001".to_vec(), 1)
+        );
+    }
+
+    #[test]
+    fn symbol_dense_dictionary_repeats_keys_after_map_growth() {
+        // The key-to-index map grows through many resizes while frame 1 adds its 17_143
+        // distinct keys. Frame 2 then repeats every one of them in another order, interleaved
+        // with the 2_857 keys that frame 1's NULL rows skipped and the keys 20_000..20_099:
+        // each repeated key must find its entry. A model that tracks first appearances in a
+        // plain Vec, not a map, gives the dictionary order and every row's index.
+        const SYMBOL_COUNT: i32 = 20_100;
+        let names: Vec<String> = (0..SYMBOL_COUNT).map(|k| format!("s{k}")).collect();
+        let (chars, offsets) = serialize_as_symbols(names.iter().map(String::as_str).collect());
+        // 7_919 is prime and coprime with 20_000, so the non-NULL rows (i % 7 != 6) of frame 1
+        // hold distinct keys; gcd(12_347, 20_100) = 1, so frame 2 holds each key of the map once.
+        let keys1: Vec<i32> = (0..20_000)
+            .map(|i| if i % 7 == 6 { -1 } else { (i * 7_919) % 20_000 })
+            .collect();
+        let keys2: Vec<i32> = (0..SYMBOL_COUNT)
+            .map(|j| (j * 12_347) % SYMBOL_COUNT)
+            .collect();
+        let col1 = make_dense_symbol_column(&keys1, &chars, &offsets, 0);
+        let col2 = make_dense_symbol_column(&keys2, &chars, &offsets, 0);
+        let pages = encode(
+            &[col1, col2],
+            0,
+            keys2.len(),
+            &primitive_type(),
+            write_options(),
+            None,
+        )
+        .expect("encode");
+
+        // The model: a key takes the next index at its first appearance.
+        let mut model_index_of_key = vec![-1i32; SYMBOL_COUNT as usize];
+        let mut model_dictionary: Vec<&str> = Vec::new();
+        let mut model_indices: Vec<u32> = Vec::new();
+        for &key in keys1.iter().chain(&keys2) {
+            if key >= 0 {
+                let index = &mut model_index_of_key[key as usize];
+                if *index < 0 {
+                    *index = model_dictionary.len() as i32;
+                    model_dictionary.push(names[key as usize].as_str());
+                }
+                model_indices.push(*index as u32);
+            }
+        }
+
+        assert_eq!(pages.len(), 2); // 1 dict + 1 data: 40_100 rows fit a 1 MiB page
+        let dict = dict_page(&pages[0]);
+        assert_eq!(dict.num_values, 20_100);
+        assert_eq!(dict.buffer, dictionary_bytes(&model_dictionary));
+        assert_eq!(page_v2_num_values(&pages[1]), 40_100);
+        // frame 1's rows 6, 13, ..., 19_998
+        assert_eq!(page_v2_num_nulls(&pages[1]), 2_857);
+        // 37_243 non-NULL rows; the largest index, 20_099, takes 15 bits
+        assert_eq!(
+            data_page_dictionary_indices(&pages[1], 37_243),
+            (15, model_indices)
+        );
+        assert_eq!(
+            page_binary_stats(&pages[1]),
+            (b"s0".to_vec(), b"s9999".to_vec(), 2_857)
+        );
+    }
+
+    #[test]
+    fn symbol_large_dictionary_uses_per_row_stats() {
+        // A dictionary larger than MAX_SYMBOL_STATS_BITMAP_KEYS routes
+        // build_symbol_page_stats through its per-row path (no `seen` bitmap).
+        // Only two keys are used, but the highest key value forces a dictionary
+        // bigger than the threshold; the page statistics must still be correct.
+        let (chars, base_offsets) = serialize_as_symbols(vec!["lo", "hi"]);
+        // "hi" (0x68,0x69) sorts before "lo" (0x6c,0x6f): min="hi", max="lo".
+        let high_key = MAX_SYMBOL_STATS_BITMAP_KEYS as i32; // dict size = high_key + 1 > threshold
+                                                            // Sparse offsets: build_dict_buffer reads offsets only for used keys, so
+                                                            // the gaps between 0 and high_key are never dereferenced.
+        let mut offsets = vec![0u64; high_key as usize + 1];
+        offsets[0] = base_offsets[0];
+        offsets[high_key as usize] = base_offsets[1];
+
+        let keys: Vec<i32> = vec![0, high_key, -1, high_key, 0, 0, high_key];
+        let col = make_symbol_column(&keys, &chars, &offsets, 0);
+        let pages = encode(
+            &[col],
+            0,
+            keys.len(),
+            &primitive_type(),
+            write_options(),
+            None,
+        )
+        .expect("encode");
+
+        assert_eq!(pages.len(), 2); // 1 dict + 1 data
+        assert_eq!(page_v2_num_nulls(&pages[1]), 1);
+        assert_eq!(
+            page_binary_stats(&pages[1]),
+            (b"hi".to_vec(), b"lo".to_vec(), 1)
+        );
+    }
+}

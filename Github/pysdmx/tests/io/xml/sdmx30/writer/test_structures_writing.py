@@ -1,0 +1,2092 @@
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pytest
+from msgspec.structs import replace
+
+from pysdmx.io import write_sdmx
+from pysdmx.io.format import Format
+from pysdmx.io.reader import read_sdmx
+from pysdmx.io.xml.sdmx30.reader.structure import read
+from pysdmx.io.xml.sdmx30.writer.structure import write
+from pysdmx.model import (
+    Agency,
+    AgencyScheme,
+    AvailabilityConstraint,
+    Categorisation,
+    Category,
+    CategoryScheme,
+    Code,
+    Codelist,
+    Concept,
+    ConceptScheme,
+    ConstraintAttachment,
+    Contact,
+    CubeKeyValue,
+    CubeRegion,
+    CubeValue,
+    CustomType,
+    CustomTypeScheme,
+    DataConstraint,
+    DataConsumer,
+    DataConsumerScheme,
+    DataKey,
+    DataKeyValue,
+    DataProvider,
+    DataProviderScheme,
+    DataType,
+    Facets,
+    FromVtlMapping,
+    KeySet,
+    MetadataComponent,
+    Metadataflow,
+    MetadataProvider,
+    MetadataProviderScheme,
+    MetadataProvisionAgreement,
+    MetadataStructure,
+    NamePersonalisation,
+    NamePersonalisationScheme,
+    Ruleset,
+    RulesetScheme,
+    ToVtlMapping,
+    Transformation,
+    TransformationScheme,
+    UserDefinedOperator,
+    UserDefinedOperatorScheme,
+    VtlCodelistMapping,
+    VtlConceptMapping,
+    VtlDataflowMapping,
+    VtlMappingScheme,
+)
+from pysdmx.model.__base import (
+    Annotation,
+    DataflowRef,
+    ItemReference,
+    Organisation,
+    Reference,
+)
+from pysdmx.model.dataflow import (
+    ArrayBoundaries,
+    Component,
+    Components,
+    Dataflow,
+    DataStructureDefinition,
+    Group,
+    ProvisionAgreement,
+    Role,
+)
+from pysdmx.model.message import Header
+
+TEST_CS_URN = (
+    "urn:sdmx:org.sdmx.infomodel.conceptscheme.ConceptScheme=BIS:CS_FREQ(1.0)"
+)
+
+
+@pytest.fixture
+def samples_folder():
+    return Path(__file__).parent / "samples"
+
+
+@pytest.fixture
+def complete_header():
+    return Header(
+        id="ID",
+        prepared=datetime.strptime("2021-01-01", "%Y-%m-%d"),
+        sender=Organisation(
+            id="ZZZ",
+        ),
+        receiver=Organisation(
+            id="Not_Supplied",
+        ),
+        source="PySDMX",
+    )
+
+
+@pytest.fixture
+def codelist():
+    return Codelist(
+        annotations=[
+            Annotation(
+                id="FREQ_ANOT",
+                title="Frequency",
+                text="Frequency",
+                type="text",
+            ),
+            Annotation(
+                text="Frequency",
+                type="text",
+            ),
+            Annotation(
+                id="FREQ_ANOT2",
+                title="Frequency",
+            ),
+        ],
+        id="CL_FREQ",
+        name="Frequency",
+        items=[
+            Code(id="A", name="Annual"),
+            Code(id="M", name="Monthly"),
+            Code(id="Q", name="Quarterly"),
+            Code(id="W", name="Weekly"),
+        ],
+        agency="BIS",
+        version="1.0",
+        valid_from=datetime(2021, 1, 1, tzinfo=timezone.utc),
+        valid_to=datetime(2021, 12, 31, tzinfo=timezone.utc),
+    )
+
+
+@pytest.fixture
+def valuelist():
+    return Codelist(
+        id="VL_CURRENCY_SYMBOL",
+        name="Currency Symbol",
+        description="Enumerated list of currencies identified by symbol",
+        agency="EXAMPLE",
+        version="1.0",
+        urn="urn:sdmx:org.sdmx.infomodel.codelist.ValueList=SDMX:VL_CURRENCY_SYMBOL(1.0)",
+        sdmx_type="valuelist",
+        items=[
+            Code(id="$", name="USD", description="US Dollar"),
+            Code(id="£", name="GBP", description="UK Pound"),
+            Code(id="€", name="EUR", description="Euro"),
+            Code(id="¥", name="CNY", description="China Yuan Renminbi"),
+            Code(id="﷼", name="IRR", description="Iran Rial"),
+            Code(id="¥", name="JPY", description="Japan Yen"),
+        ],
+    )
+
+
+@pytest.fixture
+def concept():
+    return ConceptScheme(
+        id="FREQ",
+        name="Frequency",
+        agency=Agency(id="BIS"),
+        version="1.0",
+        uri=TEST_CS_URN,
+        urn=TEST_CS_URN,
+        is_external_reference=False,
+        is_partial=False,
+        items=[
+            Concept(
+                id="A",
+                name="Annual",
+                description="Annual",
+            ),
+            Concept(
+                id="M",
+                name="Monthly",
+                description="Monthly",
+            ),
+            Concept(
+                id="Q",
+                name="Quarterly",
+                description="Quarterly",
+            ),
+        ],
+    )
+
+
+@pytest.fixture
+def agency():
+    return AgencyScheme(
+        id="AGENCIES",
+        uri=None,
+        urn="urn:sdmx:org.sdmx.infomodel.base.AgencyScheme=SDMX:AGENCIES(1.0)",
+        name="SDMX Agency Scheme",
+        description=None,
+        version="1.0",
+        valid_from=None,
+        valid_to=None,
+        is_external_reference=False,
+        service_url=None,
+        structure_url=None,
+        agency="SDMX",
+        items=[
+            Agency(
+                id="BIS",
+                name="Bank for International Settlements",
+                description=None,
+            ),
+            Agency(id="ECB", name="European Central Bank", description=None),
+            Agency(
+                id="IMF", name="International Monetary Fund", description=None
+            ),
+            Agency(id="SDMX", name="SDMX", description=None),
+        ],
+        is_partial=False,
+        annotations=(),
+    )
+
+
+@pytest.fixture
+def datastructure():
+    return DataStructureDefinition(
+        id="DS",
+        uri=None,
+        urn="urn:sdmx:org.sdmx.infomodel.datastructure.DataStructure=MD:DS(1.0)",
+        name="DS Test",
+        description=None,
+        version="1.0",
+        valid_from=None,
+        valid_to=None,
+        is_final=False,
+        is_external_reference=False,
+        service_url=None,
+        structure_url=None,
+        agency="MD",
+        annotations=(),
+        components=Components(
+            [
+                Component(
+                    id="FREQ",
+                    required=True,
+                    role=Role.DIMENSION,
+                    concept=ItemReference(
+                        sdmx_type="Concept",
+                        agency="MD",
+                        id="STANDALONE_CONCEPT_SCHEME",
+                        version="1.0",
+                        item_id="FREQ",
+                    ),
+                    local_dtype=DataType.STRING,
+                    local_facets=Facets(min_length="1", max_length="1"),
+                    name=None,
+                    description=None,
+                    local_codes=None,
+                    attachment_level=None,
+                    array_def=None,
+                    urn="urn:sdmx:org.sdmx.infomodel.datastructure.Dimension=MD:DM(1.0).FREQ",
+                ),
+                Component(
+                    id="TIME_PERIOD",
+                    required=True,
+                    role=Role.DIMENSION,
+                    concept=ItemReference(
+                        sdmx_type="Concept",
+                        agency="MD",
+                        id="STANDALONE_CONCEPT_SCHEME",
+                        version="1.0",
+                        item_id="TIME_PERIOD",
+                    ),
+                    local_dtype=DataType.PERIOD,
+                    local_facets=None,
+                    name=None,
+                    description=None,
+                    local_codes=None,
+                    attachment_level=None,
+                    array_def=None,
+                    urn="urn:sdmx:org.sdmx.infomodel.datastructure.TimeDimension=MD:TD(1.0).TIME_PERIOD",
+                ),
+                Component(
+                    id="OBS_VALUE",
+                    required=False,
+                    role=Role.MEASURE,
+                    concept=ItemReference(
+                        sdmx_type="Concept",
+                        agency="MD",
+                        id="STANDALONE_CONCEPT_SCHEME",
+                        version="1.0",
+                        item_id="OBS_VALUE",
+                    ),
+                    local_dtype=DataType.STRING,
+                    local_facets=Facets(min_length="1", max_length="15"),
+                    name=None,
+                    description=None,
+                    local_codes=None,
+                    attachment_level=None,
+                    array_def=None,
+                    urn="urn:sdmx:org.sdmx.infomodel.datastructure.Measure=MD:M1(1.0).OBS_VALUE",
+                ),
+                Component(
+                    id="OBS_VALUE1",
+                    required=False,
+                    role=Role.MEASURE,
+                    concept=ItemReference(
+                        sdmx_type="Concept",
+                        agency="MD",
+                        id="STANDALONE_CONCEPT_SCHEME",
+                        version="1.0",
+                        item_id="OBS_VALUE1",
+                    ),
+                    local_dtype=DataType.STRING,
+                    local_facets=Facets(min_length="1", max_length="15"),
+                    name=None,
+                    description=None,
+                    local_codes=None,
+                    attachment_level=None,
+                    array_def=None,
+                    urn="urn:sdmx:org.sdmx.infomodel.datastructure.Measure=MD:M2(1.0).OBS_VALUE1",
+                ),
+                Component(
+                    id="TIME_FORMAT",
+                    required=False,
+                    role=Role.ATTRIBUTE,
+                    concept=ItemReference(
+                        sdmx_type="Concept",
+                        agency="MD",
+                        id="STANDALONE_CONCEPT_SCHEME",
+                        version="1.0",
+                        item_id="TIME_FORMAT",
+                    ),
+                    local_dtype=DataType.STRING,
+                    local_facets=Facets(min_length="3", max_length="3"),
+                    name=None,
+                    description=None,
+                    local_codes=None,
+                    attachment_level="FREQ",
+                    array_def=None,
+                    urn="urn:sdmx:org.sdmx.infomodel.datastructure.DataAttribute=BIS:ATT1(1.0).TIME_FORMAT",
+                ),
+                Component(
+                    id="OBS_STATUS",
+                    required=True,
+                    role=Role.ATTRIBUTE,
+                    concept=ItemReference(
+                        sdmx_type="Concept",
+                        agency="MD",
+                        id="STANDALONE_CONCEPT_SCHEME",
+                        version="1.0",
+                        item_id="OBS_STATUS",
+                    ),
+                    local_dtype=DataType.STRING,
+                    local_facets=Facets(min_length="1", max_length="1"),
+                    name=None,
+                    description=None,
+                    local_codes=None,
+                    attachment_level="O",
+                    array_def=None,
+                    urn="urn:sdmx:org.sdmx.infomodel.datastructure.DataAttribute=MD:ATT2(1.0).OBS_STATUS",
+                ),
+                Component(
+                    id="DECIMALS",
+                    required=True,
+                    role=Role.ATTRIBUTE,
+                    concept=ItemReference(
+                        sdmx_type="Concept",
+                        agency="MD",
+                        id="STANDALONE_CONCEPT_SCHEME",
+                        version="1.0",
+                        item_id="DECIMALS",
+                    ),
+                    local_dtype=DataType.BIG_INTEGER,
+                    local_facets=Facets(min_length="1", max_length="2"),
+                    name=None,
+                    description=None,
+                    local_codes=None,
+                    attachment_level="D",
+                    array_def=None,
+                    urn="urn:sdmx:org.sdmx.infomodel.datastructure.DataAttribute=MD:ATT3(1.0).DECIMALS",
+                ),
+                Component(
+                    id="UNIT_MULT",
+                    required=True,
+                    role=Role.ATTRIBUTE,
+                    concept=ItemReference(
+                        sdmx_type="Concept",
+                        agency="MD",
+                        id="STANDALONE_CONCEPT_SCHEME",
+                        version="1.0",
+                        item_id="UNIT_MULT",
+                    ),
+                    local_dtype=DataType.STRING,
+                    local_facets=Facets(min_length="1", max_length="2"),
+                    name=None,
+                    description=None,
+                    local_codes=None,
+                    attachment_level="OBS_VALUE,OBS_VALUE1",
+                    array_def=None,
+                    urn="urn:sdmx:org.sdmx.infomodel.datastructure.DataAttribute=MD:ATT4(1.0).UNIT_MULT",
+                ),
+            ]
+        ),
+    )
+
+
+@pytest.fixture
+def transformation_scheme_structure():
+    return TransformationScheme(
+        id="TEST_TS",
+        uri=None,
+        urn="urn:sdmx:org.sdmx.infomodel.transformation.TransformationScheme=MD:TEST_TS(1.0)",
+        name="Testing TS",
+        description=None,
+        version="1.0",
+        valid_from=None,
+        valid_to=None,
+        is_external_reference=False,
+        service_url=None,
+        structure_url=None,
+        agency="MD",
+        items=[
+            Transformation(
+                id="TEST_Tr",
+                uri=None,
+                urn="urn:sdmx:org.sdmx.infomodel.transformation.Transformation=MD:TEST_TS(1.0).TEST_Tr",
+                name="Testing Transformation",
+                description=None,
+                expression="sum(             BIS_LOC_STATS"
+                "              group by REP_COUNTRY,"
+                "COUNT_SECTOR,REF_DATE)",
+                is_persistent=False,
+                result="aggr.agg1",
+                annotations=(),
+            )
+        ],
+        is_partial=False,
+        vtl_version="2.0",
+        vtl_mapping_scheme=VtlMappingScheme(
+            urn="urn:sdmx:org.sdmx.infomodel.transformation.VtlMappingScheme=MD:VMS1(1.0)",
+            id="VMS1",
+            name="Test VTL Mapping Scheme",
+            version="1.0",
+            agency="MD",
+            items=[
+                VtlDataflowMapping(
+                    id="VMDataflow",
+                    uri=None,
+                    urn="urn:sdmx:org.sdmx.infomodel.transformation.VtlDataflowMapping=MD:VMS1(1.0).VMDataflow",
+                    name="Test VTL Mapping",
+                    description=None,
+                    annotations=[],
+                    dataflow=DataflowRef(
+                        agency="BIS", id="WS_CBS_PUB", version="1.0", name=None
+                    ),
+                    dataflow_alias="DS_1",
+                    to_vtl_mapping_method=ToVtlMapping(
+                        to_vtl_sub_space=["FREQ", "L_MEASURE"], method="Basic"
+                    ),
+                    from_vtl_mapping_method=FromVtlMapping(
+                        from_vtl_sub_space=["FREQ", "L_MEASURE", "L_REP_CTY"],
+                        method="Basic",
+                    ),
+                ),
+            ],
+        ),
+        name_personalisation_scheme=None,
+        custom_type_scheme=None,
+        ruleset_schemes=Reference(
+            sdmx_type="RulesetScheme",
+            agency="MD",
+            id="TEST_RULESET_SCHEME",
+            version="1.0",
+        ),
+        user_defined_operator_schemes=Reference(
+            sdmx_type="UserDefinedOperatorScheme",
+            agency="MD",
+            id="TEST_UDO_SCHEME",
+            version="1.0",
+        ),
+        annotations=(),
+    )
+
+
+@pytest.fixture
+def ruleset_scheme_structure():
+    return RulesetScheme(
+        id="TEST_RULESET_SCHEME",
+        uri=None,
+        urn="urn:sdmx:org.sdmx.infomodel.transformation.RulesetScheme=MD:TEST_RULESET_SCHEME(1.0)",
+        name="Testing Ruleset Scheme",
+        description=None,
+        version="1.0",
+        valid_from=None,
+        valid_to=None,
+        is_external_reference=False,
+        service_url=None,
+        structure_url=None,
+        agency="MD",
+        items=[
+            Ruleset(
+                id="TEST_DATAPOINT_RULESET",
+                uri=None,
+                urn="urn:sdmx:org.sdmx.infomodel.transformation.Ruleset=MD:"
+                "TEST_RULESET_SCHEME(1.0).TEST_DATAPOINT_RULESET",
+                name="Testing Datapoint Ruleset",
+                description=None,
+                ruleset_definition="define datapoint ruleset signValidation "
+                "(variable ACCOUNTING_ENTRY as AE, "
+                "INT_ACC_ITEM as IAI,                 "
+                "FUNCTIONAL_CAT as FC, INSTR_ASSET as IA,"
+                " OBS_VALUE as O) is      "
+                'sign1c: when AE = "C" and IAI = "G" then O > 0 '
+                'errorcode "sign1c" errorlevel 1;     '
+                "end datapoint ruleset;",
+                ruleset_scope="variable",
+                ruleset_type="datapoint",
+                annotations=(),
+            )
+        ],
+        is_partial=False,
+        vtl_version="2.0",
+        vtl_mapping_scheme=None,
+        annotations=(),
+    )
+
+
+@pytest.fixture
+def udo_scheme_structure():
+    return UserDefinedOperatorScheme(
+        id="TEST_UDO_SCHEME",
+        uri=None,
+        urn="urn:sdmx:org.sdmx.infomodel.transformation.UserDefinedOperatorScheme=MD:TEST_UDO_SCHEME(1.0)",
+        name="Testing UDO Scheme",
+        description=None,
+        version="1.0",
+        valid_from=None,
+        valid_to=None,
+        is_external_reference=False,
+        service_url=None,
+        structure_url=None,
+        agency="MD",
+        items=[
+            UserDefinedOperator(
+                id="TEST_UDO",
+                uri=None,
+                urn="urn:sdmx:org.sdmx.infomodel.transformation.UserDefinedOperator=MD:TEST_UDO_SCHEME(1.0).TEST_UDO",
+                name="UDO Testing",
+                description=None,
+                operator_definition="define operator filter_ds"
+                " (ds1 dataset, great_cons "
+                'string default "1",'
+                " less_cons number default 4.0)"
+                "   returns dataset is"
+                "     ds1[filter Me_1 > great_cons"
+                " and Me_2 < less_cons]"
+                " end operator;",
+                annotations=(),
+            )
+        ],
+        is_partial=False,
+        vtl_version="2.0",
+        vtl_mapping_scheme=None,
+        ruleset_schemes=[
+            Reference(
+                sdmx_type="RulesetScheme",
+                agency="MD",
+                id="TEST_RULESET_SCHEME",
+                version="1.0",
+            ),
+            Reference(
+                sdmx_type="RulesetScheme",
+                agency="MD",
+                id="TEST_RULESET_SCHEME",
+                version="1.0",
+            ),
+        ],
+        annotations=(),
+    )
+
+
+@pytest.fixture
+def dataflow():
+    return Dataflow(
+        agency="BIS",
+        annotations=(),
+        id="WEBSTATS_DER_DATAFLOW",
+        description="OTC derivatives and FX spot - turnover",
+        is_external_reference=False,
+        name="OTC derivatives turnover",
+        service_url=None,
+        structure="DataStructure=BIS:BIS_DER(1.0)",
+        structure_url=None,
+        uri=None,
+        urn="urn:sdmx:org.sdmx.infomodel.datastructure."
+        "Dataflow=BIS:WEBSTATS_DER_DATAFLOW(1.0)",
+        valid_from=datetime(2021, 1, 1, tzinfo=timezone.utc),
+        valid_to=datetime(2021, 12, 31, tzinfo=timezone.utc),
+        version="1.0",
+    )
+
+
+@pytest.fixture
+def partial_datastructure():
+    return DataStructureDefinition(
+        agency="BIS",
+        id="BIS_DER",
+        components=Components([]),
+        name="BIS derivatives statistics",
+        version="1.0",
+    )
+
+
+@pytest.fixture
+def vtlmapping_scheme():
+    return VtlMappingScheme(
+        id="VTLMS1",
+        uri=None,
+        urn="urn:sdmx:org.sdmx.infomodel.transformation.VtlMappingScheme=FR1:VTLMS1(1.0)",
+        name="VTL Mapping Scheme #1",
+        description=None,
+        version="1.0",
+        valid_from=None,
+        valid_to=None,
+        is_external_reference=False,
+        service_url=None,
+        structure_url=None,
+        agency="FR1",
+        items=[
+            VtlDataflowMapping(
+                id="VTLM1",
+                uri=None,
+                urn="urn:sdmx:org.sdmx.infomodel.transformation.VtlDataflowMapping=FR1:VTLMS1(1.0).VTLM1",
+                name="VTL Mapping #1",
+                description=None,
+                annotations=(),
+                dataflow=DataflowRef(
+                    agency="FR1",
+                    id="BPE_DETAIL",
+                    version="1.0",
+                    name="Dataflow",
+                ),
+                dataflow_alias="BPE_DETAIL_VTL",
+                to_vtl_mapping_method=None,
+                from_vtl_mapping_method=None,
+            ),
+            VtlCodelistMapping(
+                urn="urn:sdmx:org.sdmx.infomodel.transformation.VtlCodelistMapping=MD:VMS1(1.0).VMCodelist",
+                id="VMCodelist",
+                name="Test VTL Mapping Codelist",
+                codelist_alias="CL1",
+                codelist=Reference(
+                    sdmx_type="Codelist",
+                    agency="BIS",
+                    id="CL_FREQ",
+                    version="1.0",
+                ),
+            ),
+            VtlConceptMapping(
+                urn="urn:sdmx:org.sdmx.infomodel.transformation.VtlConceptMapping=MD:VMS1(1.0).VMConcept",
+                id="VMConcept",
+                name="Test VTL Mapping Concept",
+                concept_alias="C1",
+                concept=ItemReference(
+                    sdmx_type="Concept",
+                    agency="BIS",
+                    id="STANDALONE_CONCEPT_SCHEME",
+                    version="1.0",
+                    item_id="FREQ",
+                ),
+            ),
+        ],
+        is_partial=False,
+        annotations=(),
+    )
+
+
+@pytest.fixture
+def name_personalisation_scheme():
+    return NamePersonalisationScheme(
+        urn="urn:sdmx:org.sdmx.infomodel.transformation.NamePersonalisationScheme=MD:NPS1(1.0)",
+        id="NPS1",
+        name="Test Name Personalisation Scheme",
+        version="1.0",
+        agency="MD",
+        vtl_version="2.0",
+        items=[
+            NamePersonalisation(
+                id="NP1",
+                uri=None,
+                urn="urn:sdmx:org.sdmx.infomodel.transformation.NamePersonalisation=MD:NPS1(1.0).NP1",
+                name="Test Name Personalisation",
+                description=None,
+                personalised_name="TEST_PERSONALISED",
+                vtl_artefact="TEST_VTL_ARTEFACT",
+                vtl_default_name="TEST_DEFAULT",
+                annotations=[],
+            )
+        ],
+    )
+
+
+@pytest.fixture
+def custom_type_scheme():
+    return CustomTypeScheme(
+        urn="urn:sdmx:org.sdmx.infomodel.transformation.CustomTypeScheme=MD:CTS1(1.0)",
+        id="CTS1",
+        name="Test Custom Type Scheme",
+        version="1.0",
+        agency="MD",
+        vtl_version="2.0",
+        items=[
+            CustomType(
+                id="CT1",
+                uri=None,
+                urn="urn:sdmx:org.sdmx.infomodel.transformation.CustomType=MD:CTS1(1.0).CT1",
+                name="Test Custom Type",
+                description=None,
+                data_type="Test_data_type",
+                null_value="Test_literal_format",
+                output_format="Test_null_value",
+                vtl_literal_format="Test_output_format",
+                vtl_scalar_type="Test_scalar_type",
+                annotations=[],
+            )
+        ],
+    )
+
+
+@pytest.fixture
+def codelist_sample():
+    base_path = Path(__file__).parent / "samples" / "codelist.xml"
+    with open(base_path, "r") as f:
+        return f.read()
+
+
+@pytest.fixture
+def valuelist_sample():
+    base_path = Path(__file__).parent / "samples" / "valuelist.xml"
+    with open(base_path, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+@pytest.fixture
+def concept_sample():
+    base_path = Path(__file__).parent / "samples" / "concept.xml"
+    with open(base_path, "r") as f:
+        return f.read()
+
+
+@pytest.fixture
+def agency_sample():
+    base_path = Path(__file__).parent / "samples" / "agency.xml"
+    with open(base_path, "r") as f:
+        return f.read()
+
+
+@pytest.fixture
+def datastructure_sample():
+    base_path = Path(__file__).parent / "samples" / "datastructure.xml"
+    with open(base_path, "r") as f:
+        return f.read()
+
+
+@pytest.fixture
+def structures_dataflow_sample():
+    base_path = Path(__file__).parent / "samples" / "structure_dataflow.xml"
+    with open(base_path, "r") as f:
+        return f.read()
+
+
+@pytest.fixture
+def structures_dataflow_stub_sample():
+    base_path = (
+        Path(__file__).parent / "samples" / "structure_dataflow_stub.xml"
+    )
+    with open(base_path, "r") as f:
+        return f.read()
+
+
+@pytest.fixture
+def transformation_scheme_sample():
+    base_path = Path(__file__).parent / "samples" / "transformation_scheme.xml"
+    with open(base_path, "r") as f:
+        return f.read()
+
+
+@pytest.fixture
+def ruleset_scheme_sample():
+    base_path = Path(__file__).parent / "samples" / "ruleset_scheme.xml"
+    with open(base_path, "r") as f:
+        return f.read()
+
+
+@pytest.fixture
+def udo_scheme_sample():
+    base_path = Path(__file__).parent / "samples" / "udo_scheme.xml"
+    with open(base_path, "r") as f:
+        return f.read()
+
+
+@pytest.fixture
+def vtl_mapping_scheme_sample():
+    base_path = Path(__file__).parent / "samples" / "vtlmapping_scheme.xml"
+    with open(base_path, "r") as f:
+        return f.read()
+
+
+@pytest.fixture
+def name_personalisation_scheme_sample():
+    base_path = (
+        Path(__file__).parent / "samples" / "name_personalisation_scheme.xml"
+    )
+    with open(base_path, "r") as f:
+        return f.read()
+
+
+@pytest.fixture
+def custom_type_scheme_sample():
+    base_path = Path(__file__).parent / "samples" / "custom_type_scheme.xml"
+    with open(base_path, "r") as f:
+        return f.read()
+
+
+@pytest.fixture
+def full_datastructure_sample():
+    base_path = (
+        Path(__file__).parent / "samples" / "read_datastructure_sample.xml"
+    )
+    with open(base_path, "r") as f:
+        return f.read()
+
+
+@pytest.fixture
+def write_datastructure_sample():
+    base_path = (
+        Path(__file__).parent / "samples" / "write_datastructure_sample.xml"
+    )
+    with open(base_path, "r") as f:
+        return f.read()
+
+
+@pytest.fixture
+def bis_der_agencies():
+    base_path = Path(__file__).parent / "samples" / "bis_der_agencies.xml"
+    with open(base_path, "r") as f:
+        return f.read()
+
+
+@pytest.fixture
+def datastructure_group_read():
+    base_path = (
+        Path(__file__).parent / "samples" / "read_datastructure_group.xml"
+    )
+    with open(base_path, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+@pytest.fixture
+def datastructure_group_write():
+    base_path = (
+        Path(__file__).parent / "samples" / "write_datastructure_group.xml"
+    )
+    with open(base_path, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+@pytest.fixture
+def prov_agreement():
+    return ProvisionAgreement(
+        id="TEST",
+        agency="MD",
+        version="1.0",
+        name="Test Provision Agreement",
+        description=None,
+        dataflow="Dataflow=MD:TEST(1.0)",
+        provider="DataProvider=MD:DATA_PROVIDERS(1.0).MD",
+    )
+
+
+@pytest.fixture
+def prov_agreement_sample():
+    base_path = Path(__file__).parent / "samples" / "prov_agreement_sample.xml"
+    with open(base_path, "r") as f:
+        return f.read()
+
+
+@pytest.fixture
+def constraint_with_cube():
+    return DataConstraint(
+        id="TEST_CONSTRAINT_CUBE",
+        name="Test Constraint with Cube Region",
+        agency="TEST_AGENCY",
+        version="1.0",
+        description="A test constraint with cube region",
+        constraint_attachment=ConstraintAttachment(
+            data_provider=None,
+            dataflows=[
+                "urn:sdmx:org.sdmx.infomodel.datastructure.Dataflow="
+                "TEST_AGENCY:TEST_DF(1.0)"
+            ],
+            data_structures=None,
+            provision_agreements=None,
+        ),
+        cube_regions=[
+            CubeRegion(
+                key_values=[
+                    CubeKeyValue(
+                        id="FREQ",
+                        values=[
+                            CubeValue(value="M"),
+                            CubeValue(value="Q"),
+                        ],
+                    ),
+                    CubeKeyValue(
+                        id="REF_AREA",
+                        values=[
+                            CubeValue(value="US"),
+                            CubeValue(value="UK"),
+                        ],
+                    ),
+                ],
+                is_included=True,
+            ),
+        ],
+        key_sets=[],
+    )
+
+
+@pytest.fixture
+def constraint_with_keyset():
+    return DataConstraint(
+        id="TEST_CONSTRAINT_KEYSET",
+        name="Test Constraint with Key Set",
+        agency="TEST_AGENCY",
+        version="1.0",
+        description="A test constraint with key set",
+        constraint_attachment=ConstraintAttachment(
+            data_provider=None,
+            dataflows=[
+                "urn:sdmx:org.sdmx.infomodel.datastructure.Dataflow="
+                "TEST_AGENCY:TEST_DF(1.0)"
+            ],
+            data_structures=None,
+            provision_agreements=None,
+        ),
+        cube_regions=[],
+        key_sets=[
+            KeySet(
+                keys=[
+                    DataKey(
+                        keys_values=[
+                            DataKeyValue(id="FREQ", value="M"),
+                            DataKeyValue(id="REF_AREA", value="US"),
+                        ],
+                        valid_from=None,
+                        valid_to=None,
+                    ),
+                    DataKey(
+                        keys_values=[
+                            DataKeyValue(id="FREQ", value="Q"),
+                            DataKeyValue(id="REF_AREA", value="UK"),
+                        ],
+                        valid_from=None,
+                        valid_to=None,
+                    ),
+                    DataKey(
+                        keys_values=[],
+                        valid_from=None,
+                        valid_to=None,
+                    ),
+                ],
+                is_included=True,
+            ),
+        ],
+    )
+
+
+@pytest.fixture
+def constraint_cube_sample():
+    base_path = Path(__file__).parent / "samples" / "constraint_cube.xml"
+    with open(base_path, "r") as f:
+        return f.read()
+
+
+@pytest.fixture
+def constraint_keyset_sample():
+    base_path = Path(__file__).parent / "samples" / "constraint_keyset.xml"
+    with open(base_path, "r") as f:
+        return f.read()
+
+
+@pytest.fixture
+def constraint_with_data_structure():
+    return DataConstraint(
+        id="TEST_CONSTRAINT_DSD",
+        name="Test Constraint with Data Structure",
+        agency="TEST_AGENCY",
+        version="1.0",
+        description="A test constraint attached to a data structure",
+        constraint_attachment=ConstraintAttachment(
+            data_provider=None,
+            dataflows=None,
+            data_structures=[
+                "urn:sdmx:org.sdmx.infomodel.datastructure.DataStructure="
+                "TEST_AGENCY:TEST_DSD(1.0)"
+            ],
+            provision_agreements=None,
+        ),
+        cube_regions=[
+            CubeRegion(
+                key_values=[
+                    CubeKeyValue(
+                        id="FREQ",
+                        values=[CubeValue(value="A")],
+                    ),
+                ],
+                is_included=True,
+            ),
+        ],
+        key_sets=[],
+    )
+
+
+@pytest.fixture
+def constraint_with_provider():
+    return DataConstraint(
+        id="TEST_CONSTRAINT_PROV",
+        name="Test Constraint with Provider",
+        agency="TEST_AGENCY",
+        version="1.0",
+        description="A test constraint attached to a provider",
+        constraint_attachment=ConstraintAttachment(
+            data_provider="urn:sdmx:org.sdmx.infomodel.base.DataProvider="
+            "TEST_AGENCY:DATA_PROVIDERS(1.0).PROVIDER_ID",
+            dataflows=None,
+            data_structures=None,
+            provision_agreements=None,
+        ),
+        cube_regions=[
+            CubeRegion(
+                key_values=[
+                    CubeKeyValue(
+                        id="FREQ",
+                        values=[CubeValue(value="M")],
+                    ),
+                ],
+                is_included=True,
+            ),
+        ],
+        key_sets=[],
+    )
+
+
+@pytest.fixture
+def constraint_datastructure_sample():
+    base_path = (
+        Path(__file__).parent / "samples" / "constraint_datastructure.xml"
+    )
+    with open(base_path, "r") as f:
+        return f.read()
+
+
+@pytest.fixture
+def constraint_provider_sample():
+    base_path = Path(__file__).parent / "samples" / "constraint_provider.xml"
+    with open(base_path, "r") as f:
+        return f.read()
+
+
+@pytest.fixture
+def constraint_with_provision_agreement():
+    return DataConstraint(
+        id="TEST_CONSTRAINT_PA",
+        name="Test Constraint with Provision Agreement",
+        agency="TEST_AGENCY",
+        version="1.0",
+        description="A test constraint attached to a provision agreement",
+        constraint_attachment=ConstraintAttachment(
+            data_provider=None,
+            dataflows=None,
+            data_structures=None,
+            provision_agreements=[
+                "urn:sdmx:org.sdmx.infomodel.registry.ProvisionAgreement="
+                "TEST_AGENCY:TEST_PA(1.0)"
+            ],
+        ),
+        cube_regions=[
+            CubeRegion(
+                key_values=[
+                    CubeKeyValue(
+                        id="FREQ",
+                        values=[CubeValue(value="A")],
+                    ),
+                ],
+                is_included=True,
+            ),
+        ],
+        key_sets=[],
+    )
+
+
+@pytest.fixture
+def constraint_provision_agreement_sample():
+    base_path = (
+        Path(__file__).parent
+        / "samples"
+        / "constraint_provision_agreement.xml"
+    )
+    with open(base_path, "r") as f:
+        return f.read()
+
+
+@pytest.fixture
+def constraint_without_attachment():
+    return DataConstraint(
+        id="TEST_CONSTRAINT_NO_ATTACH",
+        name="Test Constraint without Attachment",
+        agency="TEST_AGENCY",
+        version="1.0",
+        description="A test constraint without constraint attachment",
+        constraint_attachment=None,
+        cube_regions=[
+            CubeRegion(
+                key_values=[
+                    CubeKeyValue(
+                        id="FREQ",
+                        values=[CubeValue(value="Q")],
+                    ),
+                ],
+                is_included=True,
+            ),
+        ],
+        key_sets=[],
+    )
+
+
+@pytest.fixture
+def constraint_no_attachment_sample():
+    base_path = (
+        Path(__file__).parent / "samples" / "constraint_no_attachment.xml"
+    )
+    with open(base_path, "r") as f:
+        return f.read()
+
+
+def test_codelist(complete_header, codelist, codelist_sample):
+    content = [codelist]
+    result = write(
+        content,
+        header=complete_header,
+        prettyprint=True,
+    )
+    assert result == codelist_sample
+
+
+def test_valuelist(complete_header, valuelist, valuelist_sample):
+    content = [valuelist]
+    result = write(
+        content,
+        header=complete_header,
+        prettyprint=True,
+    )
+    assert result == valuelist_sample
+
+
+def test_concept(complete_header, concept, concept_sample):
+    content = [concept]
+    result = write(
+        content,
+        header=complete_header,
+        prettyprint=True,
+    )
+    assert result == concept_sample
+
+
+def test_agency(complete_header, agency, agency_sample):
+    content = [agency]
+    result = write(
+        content,
+        header=complete_header,
+        prettyprint=True,
+    )
+    assert result == agency_sample
+
+
+def test_org_schemes_30_round_trip(complete_header):
+    provider_scheme = DataProviderScheme(
+        agency="MD",
+        items=(
+            DataProvider(
+                id="DP",
+                name="DATA PROVIDER",
+                contacts=(Contact(name="Stats", emails=("dp.test@md.org",)),),
+            ),
+        ),
+    )
+    consumer_scheme = DataConsumerScheme(
+        agency="MD",
+        items=(DataConsumer(id="DC", name="DATA CONSUMER"),),
+    )
+    metadata_scheme = MetadataProviderScheme(
+        agency="MD",
+        items=(MetadataProvider(id="MP", name="METADATA PROVIDER"),),
+    )
+    content = [provider_scheme, consumer_scheme, metadata_scheme]
+    result = write(content, header=complete_header, prettyprint=True)
+    # In SDMX-ML 3.0 each organisation scheme has its own container.
+    assert "<str:DataProviderSchemes>" in result
+    assert "<str:DataConsumerSchemes>" in result
+    assert "<str:MetadataProviderSchemes>" in result
+    re_read = read_sdmx(result, validate=True).structures
+    by_type = {type(s): s for s in re_read}
+    assert by_type[DataProviderScheme] == provider_scheme
+    assert by_type[DataConsumerScheme] == consumer_scheme
+    assert by_type[MetadataProviderScheme] == metadata_scheme
+
+
+def test_provider_scheme_enrichment_30_round_trip(complete_header):
+    provider_scheme = DataProviderScheme(
+        agency="MD",
+        items=(
+            DataProvider(
+                id="MD",
+                name="DATA PROVIDER",
+                dataflows=(
+                    DataflowRef(id="TEST", agency="MD", version="1.0"),
+                ),
+            ),
+        ),
+    )
+    provision_agreement = ProvisionAgreement(
+        id="TEST",
+        name="TEST",
+        agency="MD",
+        version="1.0",
+        dataflow="Dataflow=MD:TEST(1.0)",
+        provider="DataProvider=MD:DATA_PROVIDERS(1.0).MD",
+    )
+    content = [provider_scheme, provision_agreement]
+    result = write(content, header=complete_header, prettyprint=True)
+    re_read = read_sdmx(result, validate=True).structures
+    scheme = next(s for s in re_read if isinstance(s, DataProviderScheme))
+    assert scheme.items[0].dataflows == (
+        DataflowRef(id="TEST", agency="MD", version="1.0"),
+    )
+    assert scheme == provider_scheme
+
+
+def test_datastructure(complete_header, datastructure, datastructure_sample):
+    content = [datastructure]
+    result = write(
+        content,
+        header=complete_header,
+        prettyprint=True,
+    )
+    assert result == datastructure_sample
+
+
+def test_dataflow(complete_header, dataflow, structures_dataflow_sample):
+    content = [dataflow]
+    result = write(
+        content,
+        header=complete_header,
+        prettyprint=True,
+    )
+    assert result == structures_dataflow_sample
+
+
+def test_dataflow_with_dsd_object(
+    complete_header,
+    dataflow,
+    partial_datastructure,
+    structures_dataflow_sample,
+):
+    dataflow_with_dsd = replace(dataflow, structure=partial_datastructure)
+
+    result = write(
+        [dataflow_with_dsd],
+        header=complete_header,
+        prettyprint=True,
+    )
+
+    assert result == structures_dataflow_sample
+
+
+def test_dataflow_without_structure(
+    complete_header, dataflow, structures_dataflow_stub_sample
+):
+    dataflow_stub = replace(dataflow, structure=None)
+
+    result = write(
+        [dataflow_stub],
+        header=complete_header,
+        prettyprint=True,
+    )
+
+    assert result == structures_dataflow_stub_sample
+
+
+def test_dataflow_with_dsd_object_round_trip(
+    complete_header, dataflow, partial_datastructure
+):
+    dataflow_with_dsd = replace(dataflow, structure=partial_datastructure)
+
+    write_result = write(
+        [dataflow_with_dsd],
+        header=complete_header,
+        prettyprint=False,
+    )
+    read_result = read(write_result, validate=True)
+
+    # The DSD object is read back as its short URN reference.
+    assert read_result == [dataflow]
+
+
+def test_dataflow_without_structure_round_trip(complete_header, dataflow):
+    dataflow_stub = replace(dataflow, structure=None)
+
+    write_result = write(
+        [dataflow_stub],
+        header=complete_header,
+        prettyprint=False,
+    )
+    read_result = read(write_result, validate=True)
+
+    assert read_result == [dataflow_stub]
+
+
+def test_transformation_scheme(
+    complete_header,
+    transformation_scheme_structure,
+    transformation_scheme_sample,
+):
+    content = [transformation_scheme_structure]
+    result = write(
+        content,
+        header=complete_header,
+        prettyprint=True,
+    )
+    assert result == transformation_scheme_sample
+
+
+def test_ruleset_scheme(
+    complete_header, ruleset_scheme_structure, ruleset_scheme_sample
+):
+    content = [ruleset_scheme_structure]
+
+    result = write(
+        content,
+        header=complete_header,
+        prettyprint=True,
+    )
+    assert result == ruleset_scheme_sample
+
+
+def test_writer_udo_scheme_structure(
+    complete_header, udo_scheme_structure, udo_scheme_sample
+):
+    content = [udo_scheme_structure]
+
+    result = write(
+        content,
+        header=complete_header,
+        prettyprint=True,
+    )
+    assert result == udo_scheme_sample
+
+
+def test_writer_vtlmapping_scheme(
+    complete_header, vtlmapping_scheme, vtl_mapping_scheme_sample
+):
+    content = [vtlmapping_scheme]
+    result = write(
+        content,
+        header=complete_header,
+        prettyprint=True,
+    )
+    assert result == vtl_mapping_scheme_sample
+
+
+def test_write_name_personalisation_scheme(
+    complete_header,
+    name_personalisation_scheme,
+    name_personalisation_scheme_sample,
+):
+    content = [name_personalisation_scheme]
+    result = write(
+        content,
+        header=complete_header,
+        prettyprint=True,
+    )
+    assert result == name_personalisation_scheme_sample
+
+
+def test_write_custom_type_scheme(
+    complete_header, custom_type_scheme, custom_type_scheme_sample
+):
+    content = [custom_type_scheme]
+    result = write(
+        content,
+        header=complete_header,
+        prettyprint=True,
+    )
+    assert result == custom_type_scheme_sample
+
+
+def test_datastructure_read_write(
+    complete_header, full_datastructure_sample, write_datastructure_sample
+):
+    message = read_sdmx(full_datastructure_sample, validate=True)
+    result = write(
+        structures=message.structures,
+        header=complete_header,
+        prettyprint=True,
+    )
+    assert result == write_datastructure_sample
+
+
+def test_no_header_outpath(concept):
+    output_path = str(Path(__file__).parent / "samples" / "test_output.xml")
+    content = [concept]
+    result = write(
+        content,
+        prettyprint=True,
+        output_path=output_path,
+    )
+    os.remove(output_path)
+    assert result is None
+
+
+def test_read_write_agencies(bis_der_agencies):
+    # Read the SDMX-ML file 2.1
+    message = read_sdmx(bis_der_agencies, validate=True)
+
+    # Write it back to SDMX-ML format 3.0
+    result = write(
+        structures=message.structures,
+        header=message.header,
+        prettyprint=True,
+    )
+    # Validate the result
+    read_sdmx(result, validate=True)
+
+
+def test_read_write_datastructure_group(
+    datastructure_group_read, datastructure_group_write
+):
+    message = read_sdmx(datastructure_group_read, validate=True)
+
+    result = write(
+        structures=message.structures,
+        header=message.header,
+        prettyprint=True,
+    )
+    assert result == datastructure_group_write
+
+
+def test_prov_agreement(
+    prov_agreement_sample, complete_header, prov_agreement
+):
+    content = [prov_agreement]
+    result = write(
+        content,
+        header=complete_header,
+    )
+    read_sdmx(result, validate=True)
+    assert result == prov_agreement_sample
+
+
+def test_constraint_with_cube_region(
+    complete_header, constraint_with_cube, constraint_cube_sample
+):
+    content = [constraint_with_cube]
+    result = write(
+        content,
+        header=complete_header,
+        prettyprint=True,
+    )
+    read(result, validate=True)
+    assert result == constraint_cube_sample
+
+
+def test_constraint_with_keyset(
+    complete_header, constraint_with_keyset, constraint_keyset_sample
+):
+    content = [constraint_with_keyset]
+    result = write(
+        content,
+        header=complete_header,
+        prettyprint=True,
+    )
+    read(result, validate=True)
+    assert result == constraint_keyset_sample
+
+
+def test_constraint_with_data_structure(
+    complete_header,
+    constraint_with_data_structure,
+    constraint_datastructure_sample,
+):
+    content = [constraint_with_data_structure]
+    result = write(
+        content,
+        header=complete_header,
+        prettyprint=True,
+    )
+    read(result, validate=True)
+    assert result == constraint_datastructure_sample
+
+
+def test_constraint_with_provider(
+    complete_header, constraint_with_provider, constraint_provider_sample
+):
+    content = [constraint_with_provider]
+    result = write(
+        content,
+        header=complete_header,
+        prettyprint=True,
+    )
+    read(result, validate=True)
+    assert result == constraint_provider_sample
+
+
+def test_constraint_with_provision_agreement(
+    complete_header,
+    constraint_with_provision_agreement,
+    constraint_provision_agreement_sample,
+):
+    content = [constraint_with_provision_agreement]
+    result = write(
+        content,
+        header=complete_header,
+        prettyprint=True,
+    )
+    read(result, validate=True)
+    assert result == constraint_provision_agreement_sample
+
+
+def test_constraint_without_attachment(
+    complete_header,
+    constraint_without_attachment,
+    constraint_no_attachment_sample,
+):
+    content = [constraint_without_attachment]
+    result = write(
+        content,
+        header=complete_header,
+        prettyprint=True,
+    )
+    read(result, validate=True)
+    assert result == constraint_no_attachment_sample
+
+
+def test_availability_constraint_roundtrip_30(complete_header):
+    urn = (
+        "urn:sdmx:org.sdmx.infomodel.datastructure."
+        "Dataflow=TEST_AGENCY:DF_TEST(1.0)"
+    )
+    ac = AvailabilityConstraint(
+        constraint_attachment=ConstraintAttachment(
+            data_provider=None, dataflows=(urn,)
+        ),
+        cube_region=CubeRegion(
+            key_values=(
+                CubeKeyValue(id="FREQ", values=(CubeValue(value="M"),)),
+            )
+        ),
+        series_count=3,
+        obs_count=42,
+    )
+    out = write([ac], prettyprint=True, header=complete_header)
+    assert 'role="Actual"' in out
+    assert 'id="DF_TEST"' in out
+    assert 'agencyID="TEST_AGENCY"' in out
+    assert "Availability for DF_TEST" in out
+    # The counts have no dedicated element in SDMX-ML 3.0, so they are
+    # carried as FMR-style sdmx_metrics annotations.
+    assert '<com:Annotation id="series_count">' in out
+    assert "<com:AnnotationType>sdmx_metrics</com:AnnotationType>" in out
+    assert "<com:AnnotationTitle>3</com:AnnotationTitle>" in out
+    assert '<com:Annotation id="obs_count">' in out
+    assert "<com:AnnotationTitle>42</com:AnnotationTitle>" in out
+    back = read_sdmx(out, validate=True).structures
+    assert len(back) == 1
+    assert isinstance(back[0], AvailabilityConstraint)
+    assert back[0].constraint_attachment == ac.constraint_attachment
+    kv = back[0].cube_region.key_values[0]
+    assert kv.id == "FREQ"
+    assert [v.value for v in kv.values] == ["M"]
+    # The counts now survive the legacy round trip via the annotations,
+    # which are lifted back and excluded from back[0].annotations.
+    assert back[0].series_count == 3
+    assert back[0].obs_count == 42
+    assert back[0].annotations == ()
+
+
+def test_constraint_role_always_allowed_30():
+    """A plain DataConstraint always writes role="Allowed" in 3.0.
+
+    Availability (role="Actual") can only be produced by writing an
+    AvailabilityConstraint: the legacy DataConstraint.role field is not
+    consulted by the writer.
+    """
+    dc = DataConstraint(id="RT", name="rt", agency="AG", version="1.0")
+    out = write_sdmx(dc, Format.STRUCTURE_SDMX_ML_3_0, prettyprint=True)
+    assert 'role="Allowed"' in out
+
+
+def test_constraint_keyvalue_validity_roundtrip_30():
+    dc = DataConstraint(
+        id="TR",
+        name="tr",
+        agency="AG",
+        version="1.0",
+        cube_regions=[
+            CubeRegion(
+                key_values=[
+                    CubeKeyValue(
+                        id="FREQ",
+                        values=[CubeValue("A")],
+                        valid_from=datetime(2020, 1, 1, tzinfo=timezone.utc),
+                        valid_to=datetime(2024, 1, 1, tzinfo=timezone.utc),
+                    )
+                ]
+            )
+        ],
+    )
+    out = write_sdmx(dc, Format.STRUCTURE_SDMX_ML_3_0, prettyprint=True)
+    assert 'validFrom="2020-01-01T00:00:00Z"' in out
+    assert 'validTo="2024-01-01T00:00:00Z"' in out
+    kv = read_sdmx(out).get_data_constraints()[0].cube_regions[0].key_values[0]
+    assert kv.valid_from == datetime(2020, 1, 1, tzinfo=timezone.utc)
+    assert kv.valid_to == datetime(2024, 1, 1, tzinfo=timezone.utc)
+
+
+def test_write_group_without_urn(datastructure):
+    dsd_with_group = datastructure.__replace__(
+        groups=[Group(id="Sibling", dimensions=["FREQ"])],
+    )
+    result = write_sdmx(
+        [dsd_with_group],
+        sdmx_format=Format.STRUCTURE_SDMX_ML_3_0,
+    )
+    expected_urn = (
+        "urn:sdmx:org.sdmx.infomodel.datastructure"
+        ".GroupDimensionDescriptor"
+        "=MD:DS(1.0).Sibling"
+    )
+    assert expected_urn in result
+    read_sdmx(result, validate=True)
+
+
+CONCEPT_URN_PREFIX = "urn:sdmx:org.sdmx.infomodel.conceptscheme.Concept="
+CL_FREQ_URN = "urn:sdmx:org.sdmx.infomodel.codelist.Codelist=BIS:CL_FREQ(1.0)"
+
+
+@pytest.fixture
+def metadata_structure():
+    return MetadataStructure(
+        id="MSD_TEST",
+        name="Test MSD",
+        agency="BIS",
+        version="1.0",
+        components=(
+            MetadataComponent(
+                id="CONTACT",
+                is_presentational=True,
+                concept=ItemReference(
+                    sdmx_type="Concept",
+                    agency="BIS",
+                    id="CS",
+                    version="1.0",
+                    item_id="CONTACT",
+                ),
+                components=(
+                    MetadataComponent(
+                        id="FREQ",
+                        concept=ItemReference(
+                            sdmx_type="Concept",
+                            agency="BIS",
+                            id="CS",
+                            version="1.0",
+                            item_id="FREQ",
+                        ),
+                        local_enum_ref=CL_FREQ_URN,
+                    ),
+                ),
+            ),
+            MetadataComponent(
+                id="NOTE",
+                concept=ItemReference(
+                    sdmx_type="Concept",
+                    agency="BIS",
+                    id="CS",
+                    version="1.0",
+                    item_id="NOTE",
+                ),
+                local_dtype=DataType.STRING,
+                local_facets=Facets(max_length="500"),
+                array_def=ArrayBoundaries(0, None),
+            ),
+            MetadataComponent(
+                id="KEYWORD",
+                concept=ItemReference(
+                    sdmx_type="Concept",
+                    agency="BIS",
+                    id="CS",
+                    version="1.0",
+                    item_id="KEYWORD",
+                ),
+                # Finite upper bound exercises the maxOccurs="N" path
+                array_def=ArrayBoundaries(1, 5),
+            ),
+        ),
+    )
+
+
+@pytest.fixture
+def category_scheme_nested_30():
+    return CategoryScheme(
+        id="CS1",
+        name="Category Scheme 1",
+        description="A scheme",
+        agency="BIS",
+        version="1.0.0",
+        is_final=True,
+        items=(
+            Category(
+                id="TOP",
+                name="Top",
+                categories=(
+                    Category(
+                        id="MID",
+                        name="Middle",
+                        categories=(Category(id="LEAF", name="Leaf"),),
+                    ),
+                ),
+            ),
+            Category(id="OTHER", name="Other"),
+        ),
+    )
+
+
+@pytest.fixture
+def metadataflow():
+    return Metadataflow(
+        id="MDF_TEST",
+        name="Test Metadataflow",
+        agency="BIS",
+        version="1.0",
+        structure=(
+            "urn:sdmx:org.sdmx.infomodel.metadatastructure."
+            "MetadataStructure=BIS:MSD_TEST(1.0)"
+        ),
+        targets=("urn:sdmx:org.sdmx.infomodel.datastructure.Dataflow=*:*(*)",),
+    )
+
+
+@pytest.fixture
+def metadata_provision_agreement():
+    return MetadataProvisionAgreement(
+        id="MPA_TEST",
+        name="Test MPA",
+        agency="BIS",
+        version="1.0",
+        metadataflow=(
+            "urn:sdmx:org.sdmx.infomodel.metadatastructure."
+            "Metadataflow=BIS:MDF_TEST(1.0)"
+        ),
+        metadata_provider=(
+            "urn:sdmx:org.sdmx.infomodel.base."
+            "MetadataProvider=BIS:METADATA_PROVIDERS(1.0).PROV1"
+        ),
+    )
+
+
+@pytest.mark.xml
+def test_metadata_structure_30(complete_header, metadata_structure):
+    result = write(
+        [metadata_structure], header=complete_header, prettyprint=True
+    )
+    assert "<str:MetadataStructures>" in result
+    assert "<str:MetadataAttributeList" in result
+    assert 'isPresentational="true"' in result
+    assert 'maxOccurs="unbounded"' in result
+    assert 'maxOccurs="5"' in result
+    assert "<str:Enumeration>" in result
+    assert "<str:TextFormat" in result
+    re_read = read_sdmx(result, validate=True).structures[0]
+    assert re_read == metadata_structure
+
+
+@pytest.mark.xml
+def test_metadataflow_30(complete_header, metadataflow):
+    result = write([metadataflow], header=complete_header, prettyprint=True)
+    assert "<str:Metadataflows>" in result
+    assert (
+        "<str:Structure>urn:sdmx:org.sdmx.infomodel.metadatastructure."
+        "MetadataStructure=BIS:MSD_TEST(1.0)</str:Structure>"
+    ) in result
+    assert "<str:Target>" in result
+    re_read = read_sdmx(result, validate=True).structures[0]
+    # Without an MSD in the document, the structure stays a full URN string
+    assert re_read == metadataflow
+
+
+@pytest.mark.xml
+def test_metadataflow_30_no_structure(complete_header):
+    flow = Metadataflow(
+        id="MDF_NO_STRUCTURE",
+        name="No structure",
+        agency="BIS",
+        version="1.0",
+        structure=None,
+        targets=("urn:sdmx:org.sdmx.infomodel.datastructure.Dataflow=*:*(*)",),
+    )
+    result = write([flow], header=complete_header, prettyprint=True)
+    assert "<str:Structure>" not in result
+    assert "<str:Target>" in result
+    re_read = read_sdmx(result, validate=True).structures[0]
+    assert re_read == flow
+
+
+@pytest.mark.xml
+def test_metadataflow_30_resolved_structure(
+    complete_header, metadataflow, metadata_structure
+):
+    flow = metadataflow.__replace__(structure=metadata_structure)
+    result = write(
+        [metadata_structure, flow], header=complete_header, prettyprint=True
+    )
+    re_read = read_sdmx(result, validate=True)
+    flows = re_read.get_metadataflows()
+    assert len(flows) == 1
+    # The structure is resolved back to the MSD object present in the message
+    assert isinstance(flows[0].structure, MetadataStructure)
+    assert flows[0].structure == metadata_structure
+
+
+@pytest.mark.xml
+def test_metadata_provision_agreement_30(
+    complete_header, metadata_provision_agreement
+):
+    result = write(
+        [metadata_provision_agreement],
+        header=complete_header,
+        prettyprint=True,
+    )
+    assert "<str:MetadataProvisionAgreements>" in result
+    assert "<str:Metadataflow>" in result
+    assert "<str:MetadataProvider>" in result
+    re_read = read_sdmx(result, validate=True).structures[0]
+    assert re_read == metadata_provision_agreement
+
+
+def test_category_scheme_30_round_trip(
+    complete_header, category_scheme_nested_30
+):
+    result = write(
+        [category_scheme_nested_30], header=complete_header, prettyprint=True
+    )
+    assert "<str:CategorySchemes>" in result
+    assert "<str:CategoryScheme " in result
+    re_read = read_sdmx(result, validate=True).structures[0]
+    assert re_read == category_scheme_nested_30
+
+
+def test_category_scheme_30_name_with_apostrophe(complete_header):
+    cs = CategoryScheme(
+        id="CS2",
+        name="Schemes",
+        agency="BIS",
+        version="1.0.0",
+        is_final=True,
+        items=(Category(id="C", name="Côte d'Ivoire"),),
+    )
+    result = write([cs], header=complete_header, prettyprint=True)
+    re_read = read_sdmx(result, validate=True).structures[0]
+    assert re_read == cs
+    assert re_read.items[0].name == "Côte d'Ivoire"
+
+
+def test_categorisation_30_round_trip(complete_header):
+    categorisation = Categorisation(
+        id="CAT1",
+        name="Categorisation 1",
+        agency="BIS",
+        source=(
+            "urn:sdmx:org.sdmx.infomodel.datastructure.Dataflow=BIS:DF1(1.0.0)"
+        ),
+        target=(
+            "urn:sdmx:org.sdmx.infomodel.categoryscheme."
+            "Category=BIS:CS1(1.0.0).TOP.MID.LEAF"
+        ),
+    )
+    result = write([categorisation], header=complete_header, prettyprint=True)
+    assert "<str:Categorisations>" in result
+    assert "<str:Source>" in result
+    assert "<str:Target>" in result
+    re_read = read_sdmx(result, validate=True).structures[0]
+    # Full URNs round-trip unchanged.
+    assert re_read == categorisation
+
+
+def test_categorisation_30_codelist_source_round_trip(complete_header):
+    # A non-Dataflow (Codelist) source must round-trip via the 3.0
+    # reference-as-URN form.
+    categorisation = Categorisation(
+        id="CAT2",
+        name="Categorisation 2",
+        agency="BIS",
+        source=(
+            "urn:sdmx:org.sdmx.infomodel.codelist.Codelist=BIS:CL_FREQ(1.0.0)"
+        ),
+        target=(
+            "urn:sdmx:org.sdmx.infomodel.categoryscheme."
+            "Category=BIS:CS1(1.0.0).OTHER"
+        ),
+    )
+    result = write([categorisation], header=complete_header, prettyprint=True)
+    assert "codelist.Codelist=BIS:CL_FREQ(1.0.0)" in result
+    re_read = read_sdmx(result, validate=True).structures[0]
+    assert re_read == categorisation
+
+
+def test_category_scheme_30_enrichment_round_trip(complete_header):
+    cs = CategoryScheme(
+        id="CS1",
+        name="Category Scheme 1",
+        agency="BIS",
+        version="1.0.0",
+        is_final=True,
+        items=(Category(id="TOP", name="Top"),),
+    )
+    dataflow = Dataflow(
+        id="DF1",
+        name="Dataflow 1",
+        agency="BIS",
+        version="1.0.0",
+        structure="DataStructure=BIS:DSD1(1.0.0)",
+    )
+    categorisation = Categorisation(
+        id="CAT1",
+        name="Categorisation 1",
+        agency="BIS",
+        source=(
+            "urn:sdmx:org.sdmx.infomodel.datastructure.Dataflow=BIS:DF1(1.0.0)"
+        ),
+        target=(
+            "urn:sdmx:org.sdmx.infomodel.categoryscheme."
+            "Category=BIS:CS1(1.0.0).TOP"
+        ),
+    )
+    result = write(
+        [cs, dataflow, categorisation],
+        header=complete_header,
+        prettyprint=True,
+    )
+    re_read = read_sdmx(result, validate=True).structures
+    re_cs = next(s for s in re_read if isinstance(s, CategoryScheme))
+    top = re_cs["TOP"]
+    assert len(top.dataflows) == 1
+    assert isinstance(top.dataflows[0], DataflowRef)
+    assert top.dataflows[0].agency == "BIS"
+    assert top.dataflows[0].id == "DF1"
+    assert top.dataflows[0].version == "1.0.0"
+    assert top.dataflows[0].name == "Dataflow 1"
+
+
+def test_annotations_30_apostrophes_preserved(complete_header):
+    # Every annotation must keep its apostrophes, not just the last one
+    # on each artefact (issue #678).
+    codelist = Codelist(
+        id="CL_ANN",
+        name="Côte d'Ivoire codes",
+        agency="BIS",
+        version="1.0.0",
+        items=[
+            Code(
+                id="CI",
+                name="Côte d'Ivoire",
+                annotations=(
+                    Annotation(id="c1", title="Item's first"),
+                    Annotation(id="c2", title="Item's last"),
+                ),
+            ),
+        ],
+        annotations=(
+            Annotation(
+                id="a1",
+                title="It's the first title",
+                type="It's the first type",
+                url="https://example.com/it's",
+                text="It's the first text",
+            ),
+            Annotation(id="a2", title="It's the middle title"),
+            Annotation(
+                id="a3",
+                title="It's the last title",
+                text="It's the last text",
+            ),
+        ),
+    )
+
+    result = write([codelist], header=complete_header, prettyprint=True)
+
+    assert '"s the first title' not in result
+    assert '"s the middle title' not in result
+    assert '"s the first text' not in result
+    assert '"s the first type' not in result
+    assert 'example.com/it"s' not in result
+    assert 'Item"s first' not in result
+
+    re_read = read(result, validate=True)[0]
+    assert re_read.annotations == codelist.annotations
+    assert re_read.items[0].annotations == codelist.items[0].annotations
+
+
+def test_annotations_30_element_order(complete_header):
+    # The schema sequence is Title, Type, URL, Text; writing Text before
+    # URL produced a schema-invalid document.
+    codelist = Codelist(
+        id="CL_ORD",
+        name="Codes",
+        agency="BIS",
+        version="1.0.0",
+        items=[Code(id="A", name="a")],
+        annotations=(
+            Annotation(
+                id="a1",
+                title="Title",
+                type="Type",
+                url="https://example.com/note",
+                text="Some text",
+            ),
+        ),
+    )
+
+    result = write([codelist], header=complete_header, prettyprint=True)
+
+    assert result.index("<com:AnnotationTitle>") < result.index(
+        "<com:AnnotationType>"
+    )
+    assert result.index("<com:AnnotationType>") < result.index(
+        "<com:AnnotationURL>"
+    )
+    assert result.index("<com:AnnotationURL>") < result.index(
+        "<com:AnnotationText"
+    )
+
+    re_read = read(result, validate=True)[0]
+    assert re_read.annotations == codelist.annotations
+
+
+def test_vtl_item_30_apostrophes_preserved(complete_header):
+    scheme = TransformationScheme(
+        id="TS_APOS",
+        name="Scheme's name",
+        description="Scheme's description",
+        agency="BIS",
+        version="1.0.0",
+        vtl_version="2.0",
+        items=[
+            Transformation(
+                id="T1",
+                name="Item's name",
+                description="Item's description",
+                expression="ds",
+                is_persistent=False,
+                result="r",
+                annotations=(
+                    Annotation(id="a1", title="Ann's first"),
+                    Annotation(id="a2", title="Ann's last"),
+                ),
+            )
+        ],
+    )
+
+    result = write([scheme], header=complete_header, prettyprint=True)
+
+    assert 'Scheme"s' not in result
+    assert 'Item"s' not in result
+    assert 'Ann"s' not in result
+
+    re_read = read(result, validate=True)[0]
+    assert re_read.name == "Scheme's name"
+    assert re_read.description == "Scheme's description"
+    assert re_read.items[0].name == "Item's name"
+    assert re_read.items[0].description == "Item's description"
+    assert re_read.items[0].annotations == scheme.items[0].annotations

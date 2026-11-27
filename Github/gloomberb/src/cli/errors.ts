@@ -1,0 +1,217 @@
+import type { AppPersistence } from "../data/app-persistence";
+import { ApiRequestError, wasAskedTwice } from "../api-client/errors";
+import { DEFAULT_CLI_OPTIONS, type CliGlobalOptions } from "./options";
+import { serializeCliError, type CliErrorObject } from "./result";
+import { unreachableHint } from "./unreachable";
+import { cliStyles, cliTerminalWidth, wrapText } from "../utils/cli-output";
+import { withSearchHints, type FredSeriesCheck } from "./not-a-ticker";
+import { isProviderBusy, isSourceFailure, SEARCH_BUSY_CODE, SEARCH_BUSY_MESSAGE, serviceDidNotAnswerMessage } from "../sources/provider-errors";
+import { DATA_SERVICE_UNREACHABLE_MESSAGE, isNetworkFailure } from "../utils/network-failure";
+import { isReasonCode, readableError } from "../utils/reason-codes";
+
+const USAGE_PREFIX = "Usage: ";
+/** The code of every error a command fails with: bad input, nothing found, an option it does not take. */
+export const CLI_ERROR_CODE = "cli_error";
+/** The code of a command that ran, and the data service has nothing for what it asked. */
+export const NO_DATA_CODE = "no_data";
+/** The code of a command whose requests never reached the data service. */
+const SERVICE_UNREACHABLE_CODE = "service_unreachable";
+/** The code of a command whose data no source could serve just now, one having failed rather than had none. */
+const SOURCE_UNAVAILABLE_CODE = "source_unavailable";
+
+
+
+/**
+ * An answer of the data service that a source it reads failed and nothing it
+ * kept could stand in (the 13F source down): the service was reached, and
+ * asked again later it may answer.
+ */
+export function isSourceUnavailableAnswer(error: unknown): error is ApiRequestError {
+  return error instanceof ApiRequestError && error.code === SOURCE_UNAVAILABLE_CODE;
+}
+
+export interface CliErrorContext {
+  /** The command that failed, used to point at its help. */
+  command?: string;
+  /** What the user typed after the command, so a hint can repeat their own spelling of a symbol. */
+  args?: readonly string[];
+  /** Which symbols are FRED series the catalog charts, so their hint is `gloom fred`. */
+  isFredSeries?: FredSeriesCheck;
+}
+
+class CliFailure extends Error {
+  readonly code: string;
+  readonly details?: unknown;
+  readonly retryable?: boolean;
+  /** What a structured format carries beside the message; text prints the message alone. */
+  readonly fields?: Record<string, unknown>;
+
+  constructor(message: string, details?: unknown, code = CLI_ERROR_CODE, retryable?: boolean, fields?: Record<string, unknown>) {
+    super(message);
+    this.name = "CliFailure";
+    this.code = code;
+    this.details = details;
+    this.retryable = retryable;
+    this.fields = fields;
+  }
+}
+
+export function fail(message: string, details?: unknown, code?: string): never {
+  throw new CliFailure(message, details, code);
+}
+
+/**
+ * Fails with its own code and the fields `--json` reads beside the message:
+ * `{ ok: false, error: { code, message, ...fields } }`. Text prints the
+ * message alone, and the exit status is any failure's.
+ */
+export function failWithFields(message: string, code: string, fields: Record<string, unknown>): never {
+  throw new CliFailure(message, undefined, code, undefined, fields);
+}
+
+/** Fails as `error` says: its code, message, details and whether to retry, and any field it carries beside them. */
+export function failWithError(error: CliErrorObject): never {
+  const { code, message, details, retryable, ...fields } = error;
+  throw new CliFailure(message, details, code, retryable, Object.keys(fields).length > 0 ? fields : undefined);
+}
+
+/** Fails with what asking again shortly may get past (a busy service): `--json` marks it `retryable`. */
+export function failRetryable(message: string, code: string): never {
+  throw new CliFailure(message, undefined, code, true);
+}
+
+/**
+ * What a command says when its requests never reached the data service:
+ * `message` names what it could not get (by default only that), and the
+ * details what to check. `--json` marks it retryable.
+ */
+export function unreachableError(message = DATA_SERVICE_UNREACHABLE_MESSAGE): CliErrorObject {
+  return { code: SERVICE_UNREACHABLE_CODE, message, details: unreachableHint(), retryable: true };
+}
+
+/** Fails as a command whose requests never reached the data service (`unreachableError`). */
+export function failUnreachable(message?: string): never {
+  const error = unreachableError(message);
+  throw new CliFailure(error.message, error.details, error.code, error.retryable);
+}
+
+export function closeAndFail(persistence: AppPersistence, message: string, details?: string): never {
+  persistence.close();
+  fail(message, details);
+}
+
+export function isCliFailure(error: unknown): error is CliFailure {
+  return error instanceof CliFailure;
+}
+
+/** A global option that does not parse is a usage error like any other, not an unexpected one. */
+export function asUsageError(error: unknown): Error {
+  return isCliFailure(error) ? error : new CliFailure(error instanceof Error ? error.message : String(error));
+}
+
+function cliErrorObject(error: unknown): CliErrorObject {
+  if (isCliFailure(error)) {
+    return {
+      code: error.code,
+      message: error.message,
+      details: error.details,
+      retryable: error.retryable,
+      ...error.fields,
+    };
+  }
+  // A symbol or name search was too busy to look up: not a miss, and asking again may find it.
+  if (isProviderBusy(error)) {
+    return { code: SEARCH_BUSY_CODE, message: SEARCH_BUSY_MESSAGE, retryable: true };
+  }
+  // No answer came back at all: in Gloom's words, whichever fetch failed (Bun's "Unable to connect", a refused proxy).
+  if (isNetworkFailure(error)) {
+    return unreachableError();
+  }
+  // A source failed (a timeout, a rate limit) where none had the data to answer: asked again it may.
+  if (isSourceFailure(error) || isSourceUnavailableAnswer(error)) {
+    const message = error instanceof Error ? error.message : String(error);
+    // It failed, it is not missing: says to ask again unless the message already says when.
+    return { code: SOURCE_UNAVAILABLE_CODE, message, ...(/\btry again\b/i.test(message) ? {} : { details: "Try again in a moment." }), retryable: true };
+  }
+  // A listing read the data service failed to answer twice: said in Gloom's words. Any other 5xx keeps the server's.
+  if (wasAskedTwice(error)) {
+    return { code: SOURCE_UNAVAILABLE_CODE, message: serviceDidNotAnswerMessage(undefined, error), retryable: true };
+  }
+  // Gloom Cloud refused what was asked (an unknown series, a bad date): the input was wrong, not the program.
+  if (error instanceof ApiRequestError && error.status === 400) {
+    return { code: CLI_ERROR_CODE, message: error.message };
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  // A read that ended in the data service's bare reason code: it had nothing, or its source failed and may answer later.
+  if (isReasonCode(message)) {
+    return NOTHING_CODES.has(message.trim())
+      ? { code: NO_DATA_CODE, message }
+      : { code: SOURCE_UNAVAILABLE_CODE, message, retryable: true };
+  }
+  return { code: "unexpected_error", message };
+}
+
+/** The reason codes that say the data service has nothing, as opposed to a source that failed. */
+const NOTHING_CODES = new Set(["NO_DATA", "NOT_FOUND", "BAD_MAPPING"]);
+
+/** What a failure says in words: a reason code (UPSTREAM_ERROR) in its message or details reads as what happened. */
+function readableCliError(error: CliErrorObject): CliErrorObject {
+  return {
+    ...error,
+    message: readableError(error.message),
+    ...(typeof error.details === "string" ? { details: readableError(error.details) } : {}),
+  };
+}
+
+export function inferCliErrorOptions(rawArgs: string[]): CliGlobalOptions {
+  const options: CliGlobalOptions = { ...DEFAULT_CLI_OPTIONS };
+  for (const arg of rawArgs) {
+    if (arg === "--") break;
+    if (arg === "--json") options.format = "json";
+    if (arg === "--csv") options.format = "csv";
+    if (arg === "--ndjson") options.format = "ndjson";
+    if (arg === "--quiet" || arg === "-q") options.quiet = true;
+    if (arg === "--no-color") options.color = false;
+    if (arg === "--color") options.color = true;
+    if (arg === "--plain") options.plain = true;
+    if (arg === "--no-plain") options.plain = false;
+  }
+  return options;
+}
+
+function formatCliErrorText(error: CliErrorObject, context: CliErrorContext): string {
+  const width = cliTerminalWidth();
+  const details = error.details == null
+    ? []
+    : width == null ? String(error.details).split("\n") : wrapText(String(error.details), width);
+  if (error.message.startsWith(USAGE_PREFIX)) {
+    const lines = [
+      `${cliStyles.heading("Usage:")} ${error.message.slice(USAGE_PREFIX.length)}`,
+      ...details.map((line) => cliStyles.muted(line)),
+    ];
+    if (context.command) {
+      lines.push(cliStyles.muted(`Run gloom help ${context.command} for details.`));
+    }
+    return lines.join("\n");
+  }
+  return [
+    `${cliStyles.danger(cliStyles.bold("error:"))} ${error.message}`,
+    ...details.map((line) => cliStyles.muted(line)),
+  ].join("\n");
+}
+
+function hintedError(error: CliErrorObject, args: readonly string[], isFredSeries?: FredSeriesCheck): CliErrorObject {
+  return {
+    ...error,
+    message: withSearchHints(error.message, args, isFredSeries),
+    ...(typeof error.details === "string" ? { details: withSearchHints(error.details, args, isFredSeries) } : {}),
+  };
+}
+
+export function printCliError(error: unknown, options: CliGlobalOptions, context: CliErrorContext = {}): void {
+  if (options.quiet && options.format === "text") return;
+  const errorObject = readableCliError(cliErrorObject(error));
+  console.error(options.format === "text"
+    ? formatCliErrorText(hintedError(errorObject, context.args ?? [], context.isFredSeries), context)
+    : serializeCliError(errorObject, options));
+}

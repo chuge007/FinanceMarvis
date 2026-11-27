@@ -1,0 +1,439 @@
+import { resolveAssetDisplayKind } from "../market-data/market/format";
+import { hasValidQuoteObservationTime } from "../market-data/quotes/freshness";
+import { getActiveQuoteDisplay, getRegularSessionDisplay } from "../market-data/market/status";
+import type { HistorySession } from "../types/price-history";
+import { appendLiveQuotePoint, hasUnknownBondHistoryBasis } from "./chart-data";
+import type { LiveBarAccumulator } from "./live-bars";
+import { CHART_RESOLUTION_STEP_MS, type ChartBarSize, type ManualChartResolution } from "./resolution";
+import type { Quote, QuoteMetadata, TickerFinancials } from "../types/financials";
+import type { FredSeriesLoadResult } from "../sources/gloomberb-cloud/fred-series";
+import { fredSeriesAttribution } from "../sources/gloomberb-cloud/fred-attribution";
+import { extractFredSeries } from "./economic";
+import { isIceSpreadSeries } from "./ice-credit";
+import { BASIS_POINT_UNIT, BP_PER_PERCENT } from "./studies/units";
+import { getTimeSeriesField, isMarketFieldId } from "./field-catalog";
+import {
+  unreportedStatementPeriod,
+  valuationNotMeaningful,
+  dailyValuationFallbackPeriod,
+  valuationCurrencyWarning,
+  valuationPriceIssues,
+} from "./fundamentals";
+import { extractSecuritySeries } from "./market";
+import type { ValuationCurrencyContext } from "./valuation-currency";
+import { activeStudyInputSeriesIds } from "./studies/resolve";
+import { reportingCurrencySeries } from "./reporting-currency";
+import { compareChartQuoteRecency } from "./live-quotes";
+import { marketSeriesFrequency } from "./market";
+import { canonicalExchange, resolveExchangeTimeZone } from "../utils/exchanges";
+import { futuresGenericCaption, futuresGenericListing, futuresListingPriceBasis } from "../utils/futures-generic";
+import { contractPriceUnit, currencyPairPriceUnit } from "./price-units";
+import { INDEX_POINTS_UNIT, INDEX_MEMBERS_VOLUME_LABEL, isIndexLevel } from "../market-data/market/index-level";
+import { classifyInstrumentType, kindFromListingSyntax } from "../tickers/instrument-kind";
+import { isYieldIndexSymbol } from "../tickers/index-roots";
+import { toBasisPoints } from "../utils/basis-points";
+import { isOhlcSeriesStyle } from "./spec";
+import { SERIES_COLORS } from "../theme/series-colors";
+import type {
+  ChartSeriesSpec,
+  ChartSpec,
+  ResolvedSeries,
+  TimeSeriesPoint,
+} from "./types";
+import { instrumentLabel } from "./resolve-context";
+import { finiteDate } from "./chart-bounds";
+
+// A series that fails to load keeps its place with no observations. Dropping it
+// made a series the user had added disappear from the legend while it still sat
+// in the series editor, with nothing on screen to explain the difference.
+export function unloadableSeries(spec: ChartSeriesSpec, index: number, warning: string, listing?: TickerFinancials,
+  contractUnit?: string | null): ResolvedSeries {
+  const field = spec.source.kind === "security" ? getTimeSeriesField(spec.source.fieldId) : undefined;
+  const label = spec.source.kind === "security"
+    ? `${instrumentLabel(spec.source)} ${field?.seriesLabel ?? field?.shortLabel ?? spec.source.fieldId.split(".").at(-1) ?? "Series"}`
+    : spec.source.kind === "economic"
+      ? `FRED ${spec.source.seriesId}`
+      : spec.source.seriesId;
+  // The unit the series would have had, from its quote or, without one, its symbol (^VIX is points): never the
+  // field's bare "currency" template, which named no unit at all.
+  const shaped = spec.source.kind === "security" && field?.unit.startsWith("currency")
+    ? baseSecuritySeries(spec, { ...(listing ?? emptyFinancials()), priceHistory: [] }, index, null, listing?.quoteMetadata, contractUnit) : null;
+  const unit = shaped ? /currency|^unknown$/.test(shaped.unit) ? "" : shaped.unit : field?.unit ?? "";
+  return {
+    id: spec.id,
+    label: spec.label?.trim() || label,
+    legendContext: spec.label?.trim() ? undefined : field?.seriesLabel ?? field?.shortLabel,
+    color: spec.color ?? SERIES_COLORS[index % SERIES_COLORS.length]!,
+    unit,
+    unitGroup: shaped?.unitGroup ?? field?.unitGroup ?? "unknown",
+    nativeFrequency: field?.nativeFrequency ?? "daily",
+    dataShape: field?.dataShape ?? "scalar",
+    style: spec.style,
+    transform: spec.transform,
+    axis: spec.axis === "right" ? "right" : "left",
+    panelId: spec.panelId,
+    interpolation: spec.interpolation,
+    warning,
+    points: [],
+  };
+}
+
+export function emptyFinancials(priceHistory: TickerFinancials["priceHistory"] = []): TickerFinancials {
+  return { annualStatements: [], quarterlyStatements: [], priceHistory };
+}
+
+export function chartCalculationSeriesIds(spec: ChartSpec): Set<string> {
+  const ids = activeStudyInputSeriesIds(spec.studies);
+  spec.series.filter(entry => entry.visible !== false).forEach(entry => ids.add(entry.id));
+  // Hidden primary market data still owns the shared session anchor.
+  const primary = spec.series.find(entry => entry.source.kind === "security" && isMarketFieldId(entry.source.fieldId));
+  if (primary) ids.add(primary.id);
+  return ids;
+}
+
+export function latestQuote(snapshot: Quote | undefined, override: Quote | undefined): Quote | undefined {
+  if (!snapshot) return override;
+  if (!override) return snapshot;
+  return compareChartQuoteRecency(override, snapshot) >= 0 ? override : snapshot;
+}
+
+export function mergeHistory(
+  financials: TickerFinancials | null,
+  history: TickerFinancials["priceHistory"],
+  quoteOverride: Quote | undefined,
+  now: number,
+  liveBarResolution?: ManualChartResolution,
+  exchange?: string,
+  appendQuote = true,
+  assetCategory?: string,
+  live?: { bars: LiveBarAccumulator; since?: number; session?: HistorySession; extendedHours?: boolean },
+): TickerFinancials {
+  const base = financials ?? emptyFinancials();
+  const quote = latestQuote(base.quote, quoteOverride);
+  const unknownHistoryBasis = hasUnknownBondHistoryBasis(quote, assetCategory, base.quoteMetadata?.instrumentType);
+  if (!appendQuote || unknownHistoryBasis) return { ...base, quote, priceHistory: history };
+  // Market bars fold every observed quote into the forming bar; other series
+  // price their latest point from the current quote alone.
+  const priceHistory = live && liveBarResolution
+    ? live.bars.apply(history, quote, { now, resolution: liveBarResolution, exchange, liveSince: live.since, session: live.session,
+      extendedHours: live.extendedHours })
+    : appendLiveQuotePoint(history, quote, liveBarResolution
+      ? { now, mode: "ohlc", resolution: liveBarResolution, exchange }
+      : { now });
+  return { ...base, quote, priceHistory };
+}
+
+/**
+ * The listing a security series' label names: an index charted on the venue
+ * its own quote gave it, which is the name of its publisher (^NDX on NASDAQ
+ * GIDS, ^VIX on CBOE INDICES), is its symbol alone, as `quote ^NDX` names it.
+ */
+function quotedInstrumentLabel(
+  source: Extract<ChartSeriesSpec["source"], { kind: "security" }>,
+  quote: Pick<Quote, "instrumentType" | "listingExchangeName" | "exchangeName"> | undefined,
+  quoteMetadata: Pick<QuoteMetadata, "instrumentType" | "listingExchangeName"> | null | undefined,
+): string {
+  const exchange = source.instrument.exchange?.trim().toUpperCase();
+  const index = isIndexLevel(quote?.instrumentType || quoteMetadata?.instrumentType);
+  const quoted = [quote?.listingExchangeName, quote?.exchangeName, quoteMetadata?.listingExchangeName]
+    .some((venue) => !!exchange && venue?.trim().toUpperCase() === exchange);
+  return index && quoted && !source.instrument.instrument ? source.instrument.symbol.trim() : instrumentLabel(source);
+}
+
+/** A bar's move from `reference`, in percent; undefined when either is not a price. */
+function barMovePercent(bar: TimeSeriesPoint | undefined, reference: number): number | undefined {
+  const close = bar?.close ?? bar?.value;
+  return reference > 0 && typeof close === "number" && Number.isFinite(close) ? (close / reference - 1) * 100 : undefined;
+}
+
+function barMoveBasisPoints(bar: TimeSeriesPoint | undefined, reference: number): number | undefined {
+  const close = bar?.close ?? bar?.value;
+  return typeof close === "number" && Number.isFinite(close) && Number.isFinite(reference)
+    ? toBasisPoints(close - reference, 1) : undefined;
+}
+
+/**
+ * A bar's move from the close a quote's change is measured from (its price less
+ * its change), in percent; the quote's own percent when the quote states no
+ * change or the bar no close.
+ */
+function barChangePercent(bar: TimeSeriesPoint | undefined, display: { price: number; change?: number; changePercent?: number }): number | undefined {
+  const reference = typeof display.change === "number" && Number.isFinite(display.change) ? display.price - display.change : Number.NaN;
+  return barMovePercent(bar, reference) ?? display.changePercent;
+}
+
+/**
+ * A one-day chart's price series with the prior close it draws as its
+ * reference line. The legend's move is then the last bar's from that line,
+ * the price and the move read off the chart itself, as a reader checks them
+ * (`$654.41 -0.39%` beside a 656.95 line); a series with no move to show (no
+ * quote stated one) keeps none.
+ */
+export function withPriorClose(series: ResolvedSeries, priorClose: number): ResolvedSeries {
+  const move = series.latestChangePercent === undefined ? undefined : barMovePercent(series.points.at(-1), priorClose);
+  const basisPoints = series.latestChangeBasisPoints === undefined ? undefined : barMoveBasisPoints(series.points.at(-1), priorClose);
+  return { ...series, priorClose, ...move !== undefined ? { latestChangePercent: move } : {},
+    ...basisPoints !== undefined ? { latestChangeBasisPoints: basisPoints } : {} };
+}
+
+export function baseSecuritySeries(
+  spec: ChartSeriesSpec,
+  financials: TickerFinancials,
+  index: number,
+  marketResolution?: ManualChartResolution | null,
+  quoteMetadata: QuoteMetadata | null | undefined = financials.quoteMetadata,
+  /** What a futures contract's price counts ("USD / gallon"), from its terms. */
+  contractUnit?: string | null,
+  /** The bars run into pre-market and after-hours trading. */
+  { extendedHours = false, currencies, barSize }: { extendedHours?: boolean; currencies?: ValuationCurrencyContext; barSize?: ChartBarSize } = {},
+): ResolvedSeries | null {
+  if (spec.source.kind !== "security") return null;
+  const field = getTimeSeriesField(spec.source.fieldId);
+  if (!field) return null;
+  const points = extractSecuritySeries(financials, spec.source, currencies, barSize ?? marketResolution);
+  const valuationFallback = dailyValuationFallbackPeriod(financials, spec.source);
+  const unreportedPeriod = points.length === 0 ? unreportedStatementPeriod(financials, spec.source) : null;
+  const notMeaningful = valuationNotMeaningful(financials, spec.source);
+  const symbol = quotedInstrumentLabel(spec.source, financials.quote, quoteMetadata);
+  const statementCurrency = field.id.startsWith("fundamental.") && field.unit.startsWith("currency")
+    ? reportingCurrencySeries(points, financials.financialCurrency) : null;
+  // A broker contract names its currency even before (or without) a quote.
+  const currency = statementCurrency ? statementCurrency.currency : financials.quote?.currency || quoteMetadata?.currency || spec.source.instrument.instrument?.currency;
+  const assetKind = resolveAssetDisplayKind({ assetCategory: financials.quote?.instrumentType || quoteMetadata?.instrumentType });
+  const unknownBondBasis = hasUnknownBondHistoryBasis(financials.quote,
+    spec.source.instrument.instrument?.secType, quoteMetadata?.instrumentType);
+  // The table behind `assetKind` leaves out types a provider or broker also
+  // sends (a REIT, a closed-end fund, a continuous future), and a listing
+  // before its quote arrives has none: the instrument's own kind fills those.
+  const instrumentKind = [financials.quote?.instrumentType, quoteMetadata?.instrumentType, spec.source.instrument.instrument?.secType]
+    .map((type) => classifyInstrumentType(type)).find((kind) => kind !== null)
+    ?? kindFromListingSyntax(spec.source.instrument.symbol, spec.source.instrument.exchange);
+  const volumeUnit = unknownBondBasis ? undefined
+    : assetKind === "equity" || instrumentKind === "equity" || instrumentKind === "fund" ? "shares" as const
+    : assetKind === "contract" || instrumentKind === "future" || instrumentKind === "option" ? "contracts" as const
+    // A coin's volume from Gloom Cloud, whose bars say what it counts (`aggregate`, `1 spot venue`), is the value
+    // traded in its quote currency, never a count of coins; another source's states no unit.
+    : (assetKind === "crypto" || instrumentKind === "crypto") && currency
+      && (financials.priceHistory ?? []).some((point) => point.volumeBasis != null) ? currency
+    : undefined;
+  // An index has no volume of its own: sources sum its members' volume.
+  const volumeBasis = !volumeUnit && !unknownBondBasis && instrumentKind === "index" ? "index-members" as const : undefined;
+  // A price quote establishes its currency, but only instrument metadata can
+  // establish a per-share or per-crypto-unit basis. This does not establish the
+  // provider's volume denomination or a derivative's contract multiplier.
+  const unitTemplate = field.unitGroup === "price" && isMarketFieldId(field.id)
+    ? unknownBondBasis ? "unknown" : `currency${assetKind === "equity" ? "/share" : assetKind === "crypto" ? "/unit" : ""}`
+    : field.unit;
+  const generic = field.unitGroup === "price"
+    ? futuresGenericListing(spec.source.instrument.symbol, spec.source.instrument.exchange) : null;
+  // Index and Treasury futures read in points or 32nds across generics,
+  // continuous symbols and listed contracts, as their quotes do.
+  const genericBasis = field.unitGroup === "price" && isMarketFieldId(field.id)
+    ? futuresListingPriceBasis(spec.source.instrument.symbol, spec.source.instrument.exchange) : null;
+  // An index's level is points too, never the currency its members trade in.
+  const indexLevel = field.unitGroup === "price" && isMarketFieldId(field.id)
+    && (isIndexLevel(financials.quote?.instrumentType || quoteMetadata?.instrumentType)
+      // Before its quote says so, an index's symbol does (^VIX).
+      || !(financials.quote?.instrumentType || quoteMetadata?.instrumentType) && instrumentKind === "index");
+  const yieldIndex = field.unitGroup === "price" && isMarketFieldId(field.id) && isYieldIndexSymbol(spec.source.instrument.symbol);
+  const genericUnit = yieldIndex ? "%" : genericBasis === "points" || indexLevel ? INDEX_POINTS_UNIT : genericBasis === "thirty-seconds" ? "32nds" : null;
+  // A future's price in a currency counts what its contract terms say: heating
+  // oil is USD / gallon and crude USD / barrel, which a bare USD does not tell apart.
+  const statedUnit = !genericUnit && unitTemplate === "currency" ? contractPriceUnit(contractUnit, currency) : null;
+  // A currency pair's rate is the quote currency one unit of the base buys:
+  // EURUSD=X is USD / EUR, so Brent over it reads EUR / barrel.
+  const pairUnit = !genericUnit && unitTemplate === "currency" && field.unitGroup === "price" && isMarketFieldId(field.id)
+    ? currencyPairPriceUnit(spec.source.instrument.symbol, spec.source.instrument.exchange, currency) : null;
+  const unit = field.id === "market.volume" ? volumeUnit ?? ""
+    : statedUnit ?? genericUnit ?? pairUnit
+      ?? (instrumentKind === "future" && unitTemplate === "currency" ? "unknown" : null)
+      ?? (unitTemplate.startsWith("currency") && currency ? unitTemplate.replace("currency", currency) : unitTemplate);
+  const currencyUnitGroup = genericUnit ? `${field.unitGroup}:${genericUnit}`
+    : unknownBondBasis && field.unitGroup === "price" ? "price:unknown"
+    : field.unit.startsWith("currency") && currency
+    ? `${field.unitGroup}:${currency}`
+    : field.unitGroup;
+  const marketExchange = spec.source.instrument.exchange
+    || financials.quote?.listingExchangeName
+    || financials.quote?.exchangeName;
+  const marketField = isMarketFieldId(spec.source.fieldId);
+  // A routing code such as a broker's SMART names no venue. The quote's
+  // listing then supplies the session clock, so closed hours stay off the axis.
+  const sessionExchange = [marketExchange, financials.quote?.listingExchangeName, quoteMetadata?.listingExchangeName, financials.quote?.exchangeName]
+    .find((value) => resolveExchangeTimeZone(value));
+  // A dollar listing saved with IBKR's SMART route and no other venue trades on
+  // the US session, and so does a dollar option, which names no venue at all.
+  const dollars = !currency || currency === "USD";
+  const usOption = dollars && (spec.source.instrument.instrument?.secType?.toUpperCase() === "OPT"
+    || /^OPTION$/i.test(financials.quote?.instrumentType ?? quoteMetadata?.instrumentType ?? ""));
+  const routedUsListing = !sessionExchange && ((canonicalExchange(marketExchange) === "SMART" && dollars) || usOption);
+  const marketTimeZone = marketField
+    && canonicalExchange(marketExchange) !== "CCC"
+    ? resolveExchangeTimeZone(sessionExchange) ?? (routedUsListing ? "America/New_York" : null)
+    : null;
+  // A route has no hours of its own: its sessions, which the day view and
+  // VWAP follow, are the venue's, and NYSE's for an unnamed dollar listing.
+  const listingExchange = canonicalExchange(marketExchange) === "SMART" || usOption
+    ? canonicalExchange(sessionExchange) || (routedUsListing ? "NYSE" : marketExchange)
+    : marketExchange;
+  // The move of the price the chart ends on, from the close the quote measures
+  // it from: the regular session's (its close once it is over, as `quote`
+  // heads Last), or the latest print's, an after-hours one included, where the
+  // bars run into extended hours. The legend prints it beside the last bar, so
+  // it is that bar's close against the quote's reference, one observation: a
+  // quote read a moment apart from the bars would print another price's move.
+  const display = marketField && field.unit.startsWith("currency")
+    && !unknownBondBasis
+    && financials.quote && hasValidQuoteObservationTime(financials.quote)
+    ? (extendedHours && !yieldIndex ? getActiveQuoteDisplay(financials.quote) : getRegularSessionDisplay(financials.quote))
+    : null;
+  const latestChangePercent = display && !yieldIndex ? barChangePercent(points.at(-1), display) : undefined;
+  const latestChangeBasisPoints = yieldIndex && spec.transform === "raw" && display?.change != null && Number.isFinite(display.change)
+    ? barMoveBasisPoints(points.at(-1), display.price - display.change) ?? toBasisPoints(display.change, 1) : undefined;
+  const fieldLabel = field.id === "market.volume" && volumeBasis ? INDEX_MEMBERS_VOLUME_LABEL
+    : yieldIndex ? field.id === "market.ohlcv" ? "Yield" : `${field.shortLabel} Yield` : field.seriesLabel ?? field.shortLabel;
+  const priceIssues = valuationPriceIssues(financials, spec.source, currencies);
+  // A source with closes only, such as a generic future, has flat bars (open,
+  // high and low filled from the close): nothing to draw as candles.
+  const closesOnly = marketField && points.length > 1
+    && points.every((point) => [point.open, point.high, point.low].every((value) => value == null || value === point.close));
+  return {
+    id: spec.id,
+    label: spec.label?.trim() || (generic ? futuresGenericCaption(generic)
+      : `${symbol} ${fieldLabel}`),
+    legendContext: spec.label?.trim() || generic ? undefined : fieldLabel,
+    color: spec.color ?? SERIES_COLORS[index % SERIES_COLORS.length]!,
+    unit,
+    unitGroup: currencyUnitGroup,
+    ...(statedUnit ? { statedUnit } : {}),
+    priceAssetCategory: marketField && field.unitGroup === "price" && !unknownBondBasis
+      ? financials.quote?.instrumentType || quoteMetadata?.instrumentType : undefined,
+    volumeUnit,
+    ...(volumeBasis ? { volumeBasis } : {}),
+    ...(priceIssues.length ? { valuationPriceIssues: priceIssues } : {}),
+    warning: [valuationFallback ? "Release dates unavailable; showing reported periods." : undefined,
+      notMeaningful ? `N/M: ${notMeaningful.reason} (period to ${notMeaningful.asOf}).` : undefined,
+      field.id === "market.volume" && !volumeUnit && !volumeBasis && points.some((point) => Number.isFinite(point.value) && point.value !== 0)
+        ? "Volume unit unknown." : statementCurrency?.warning ?? valuationCurrencyWarning(financials, spec.source, currencies)].filter(Boolean).join(" ") || undefined,
+    nativeFrequency: marketField ? marketSeriesFrequency(spec.source, marketResolution)
+      : valuationFallback ?? (spec.source.period && spec.source.period !== "auto" ? spec.source.period : field.nativeFrequency),
+    ...(unreportedPeriod ? { unreportedPeriod } : {}),
+    ...(notMeaningful ? { notMeaningful } : {}),
+    ...(marketField ? { historyResolution: marketResolution } : {}),
+    timestampMode: spec.source.timestampMode,
+    dataShape: field.dataShape,
+    style: closesOnly && isOhlcSeriesStyle(spec.style ?? field.defaultStyle) ? "line" : spec.style,
+    transform: spec.transform,
+    axis: spec.axis === "right" ? "right" : "left",
+    panelId: spec.panelId,
+    interpolation: spec.interpolation,
+    observationKind: marketField ? "market" : undefined,
+    ...(marketField ? { listing: { symbol: spec.source.instrument.symbol, exchange: listingExchange ?? "" } } : {}),
+    timeBasis: marketTimeZone
+      ? {
+          kind: "market",
+          timeZone: marketTimeZone,
+          exchange: canonicalExchange(sessionExchange) || undefined,
+          cadenceMs: marketResolution
+            ? CHART_RESOLUTION_STEP_MS[marketResolution]
+            : undefined,
+        }
+      : undefined,
+    latestChangePercent: typeof latestChangePercent === "number" && Number.isFinite(latestChangePercent)
+      ? latestChangePercent
+      : undefined,
+    ...(latestChangeBasisPoints !== undefined ? { latestChangeBasisPoints } : {}),
+    points,
+  };
+}
+
+const FRED_CATALOG_UNITS: Readonly<Record<string, string>> = {
+  "percent": "%",
+  "millions of u.s. dollars": "million USD",
+  "millions of dollars": "million USD",
+  "billions of dollars": "billion USD",
+  "billions of u.s. dollars": "billion USD",
+  "billions of us dollars": "billion USD",
+  "dollars per barrel": "USD/barrel",
+  "thousands of persons": "thousand people",
+};
+
+function fredCatalogUnit(units: string): string {
+  return FRED_CATALOG_UNITS[units.toLowerCase()] ?? units;
+}
+
+export function baseEconomicSeries(
+  spec: ChartSeriesSpec,
+  loaded: FredSeriesLoadResult,
+  index: number,
+): ResolvedSeries | null {
+  if (spec.source.kind !== "economic") return null;
+  const { data } = loaded;
+  const units = data.info?.units?.trim() || "value";
+  const catalogUnit = fredCatalogUnit(units);
+  // "Percent Change from Year Ago" and "Percent per Annum" are percent too.
+  const isPercent = units.toLowerCase().includes("percent");
+  // An ICE option-adjusted spread reads in bp, as CRD and `fred` print it and CDX quotes, not FRED's percentage points.
+  const basisPoints = isPercent && /^percent$/i.test(units) && isIceSpreadSeries(spec.source.seriesId);
+  const points = extractFredSeries(data.observations, { providerId: "fred", timestampMode: "period-end" });
+  return {
+    id: spec.id,
+    label: spec.label?.trim() || data.info?.title?.trim() || spec.source.seriesId,
+    expression: `FRED:${spec.source.seriesId}`,
+    color: spec.color ?? SERIES_COLORS[index % SERIES_COLORS.length]!,
+    ...(basisPoints ? BASIS_POINT_UNIT : {
+      unit: isPercent ? "%" : catalogUnit,
+      unitGroup: isPercent ? "percent" : `economic:${catalogUnit.toLowerCase()}`,
+    }),
+    nativeFrequency: "auto",
+    timestampMode: "period-end",
+    dataShape: "scalar",
+    style: spec.style,
+    transform: spec.transform,
+    axis: spec.axis === "right" ? "right" : "left",
+    panelId: spec.panelId,
+    interpolation: spec.interpolation,
+    // Rounded off the float's last digits: 0.93 × 100 is 93, not 93.00000000000001.
+    points: basisPoints
+      ? points.map((point) => typeof point.value === "number" ? { ...point, value: Number((point.value * BP_PER_PERCENT).toPrecision(12)) } : point)
+      : points,
+    warning: "FRED vintage dates are unavailable; observations use period dates.",
+    // Its own publisher and publish date, as `fred` cites them (TurkStat via the CBRT), never Gloom Cloud's name.
+    attribution: fredSeriesAttribution(spec.source.seriesId, data),
+  };
+}
+
+export function baseCapabilitySeries(
+  spec: ChartSeriesSpec,
+  loaded: ResolvedSeries,
+  index: number,
+): ResolvedSeries {
+  const points = loaded.points.flatMap((point) => {
+    const date = finiteDate(point.date as unknown as string | Date | undefined);
+    const observedAt = finiteDate(point.observedAt as unknown as string | Date | undefined) ?? date;
+    const availableAt = finiteDate(point.availableAt as unknown as string | Date | undefined) ?? undefined;
+    const barStart = finiteDate(point.barStart) ?? undefined;
+    return date && observedAt ? [{ ...point, date, observedAt, availableAt, barStart }] : [];
+  });
+  return {
+    ...loaded,
+    id: spec.id,
+    label: spec.label?.trim() || loaded.label || (spec.source.kind === "capability" ? spec.source.seriesId : spec.id),
+    // A geographic series writes as GEO:, which only the chart composer spells; it keeps its label.
+    ...(spec.source.kind === "capability" && spec.source.capabilityId !== "geo-series"
+      ? { expression: `CAP:${spec.source.capabilityId}:${spec.source.seriesId}` } : {}),
+    color: spec.color ?? loaded.color ?? SERIES_COLORS[index % SERIES_COLORS.length]!,
+    style: spec.style,
+    transform: spec.transform,
+    axis: spec.axis === "right" ? "right" : spec.axis === "left" ? "left" : loaded.axis,
+    panelId: spec.panelId,
+    interpolation: spec.interpolation,
+    observationKind: loaded.observationKind ?? "dataset",
+    points,
+  };
+}
+
+export function staleFredWarning(loaded: FredSeriesLoadResult): string | null {
+  if (!loaded.stale) return null;
+  return `FRED refresh failed${loaded.refreshError ? ` (${loaded.refreshError})` : ""}; showing cached data fetched ${new Date(loaded.fetchedAt).toISOString().slice(0, 10)}.`;
+}

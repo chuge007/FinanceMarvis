@@ -1,0 +1,165 @@
+import { useCallback, useMemo, useRef } from "react";
+import {
+  ChartTableHeader,
+  DataTableView,
+  PaneStatusBody,
+  formatPercentAxis,
+  useChartTableSelection,
+  usePaneStatusFooter,
+  type ChartTableChart,
+} from "../../../components";
+import { ageFooterSegment } from "../../../components/layout/pane/footer";
+import { staticSeries } from "../../../components/chart/static/series";
+import { usePaneRefreshKey } from "../../../components/data-table/table-pane";
+import { useAsyncResource, useAutoRefresh, usePluginPaneState, useUpdatedAgo } from "../../../public/react";
+import { useUtcDay } from "../../../react/auto-refresh";
+import { reportFooterSegment } from "../shared/source-footer";
+import { earningsCalendarHeadless } from "./headless";
+import { colors } from "../../../theme/colors";
+import { useLiveStreamingSetting } from "../../../state/hooks/live-streaming";
+import { useAssetData } from "../../runtime";
+import { isBoardRowLoading, useQuoteBoard } from "../shared/use-quote-board";
+import { historyListing, newYorkToday, reportMove } from "./board-model";
+import { usePlanAccess } from "../../../api-client/plan-access";
+import { useResearchCloudSession } from "../shared/research-cloud-session";
+import { cachedEarningsHistory, loadEarningsHistory, noHistoryAbroad } from "./client";
+import { loadEarningsCalendar } from "./data/cache";
+import { chartAxis, chartPoints, chartRows, historyFigures, historyRows, type HistoryRow } from "./history-model";
+import { historyColumns, renderHistoryCell, type HistoryColumn, type LiveMove } from "./history-table";
+import { loadNoEarningsText } from "./no-earnings";
+
+const barDate = (row: HistoryRow) => (row.implied != null || row.move != null ? new Date(`${row.date}T00:00:00Z`) : null);
+
+/**
+ * One company's reports: the upcoming one, then up to twelve quarters with
+ * estimates against actuals, the move priced before and the move after. The
+ * pane for `ERN <ticker>` and the detail a board row opens.
+ */
+export function EarningsHistoryView({ symbol, width, height, focused, registrationId }: {
+  symbol: string;
+  width: number;
+  height: number;
+  focused: boolean;
+  registrationId: string;
+}) {
+  const dataProvider = useAssetData();
+  // Past reports are a US listing's and a Hong Kong, Singapore or China A listing's own (its exchange's results
+  // calendar and announcements, in their currency), read by its key however it was typed (0700.HK is 0700:HKEX): any
+  // other listing abroad shows its next report alone.
+  const { listing, abroad, ownAbroad } = historyListing(symbol);
+  // A Hong Kong listing's announcement figures come with Pro, as KPIS has them: what Gloom Cloud answers differs by
+  // plan, so it is kept per session and plan.
+  const access = usePlanAccess();
+  const session = useResearchCloudSession();
+  const accessKey = ownAbroad ? `${session.requestKey}:${access.hasProAccess ? "pro" : "free"}` : undefined;
+  const loader = useCallback(
+    (force: boolean) => (abroad ? Promise.resolve(null)
+      : ownAbroad ? loadEarningsHistory(listing, force, undefined, accessKey).catch(noHistoryAbroad)
+      : loadEarningsHistory(listing, force)),
+    [abroad, accessKey, listing, ownAbroad],
+  );
+  const resource = useAsyncResource(loader, { initialData: () => (abroad ? null : cachedEarningsHistory(listing, accessKey)) });
+  // Past the stored calendar's horizon, and for listings it does not carry, the per-ticker calendar has the next date.
+  const upcomingLoader = useCallback(
+    (force: boolean) => loadEarningsCalendar(dataProvider, [symbol], { force }).then((result) => result.events[0] ?? null),
+    [dataProvider, symbol],
+  );
+  const upcoming = useAsyncResource(upcomingLoader);
+  const payload = resource.data?.payload ?? null;
+  const today = newYorkToday();
+  const rows = useMemo(() => historyRows(payload, today, upcoming.data ?? null, { abroad: ownAbroad }), [ownAbroad, payload, today, upcoming.data]);
+  const columns = useMemo(() => historyColumns(width, rows, { abroad: ownAbroad }), [ownAbroad, rows, width]);
+  // A report out today shows its move so far, from the quotes EVTS reads, until its first close after settles it.
+  const outToday = rows.some((row) => row.date === today && row.dateStatus === "reported" && row.move == null);
+  const quoteSymbols = useMemo(() => (outToday ? [symbol] : []), [outToday, symbol]);
+  const liveStreaming = useLiveStreamingSetting();
+  const { quotes } = useQuoteBoard(quoteSymbols, { liveStreaming });
+  const quoteState = quotes.get(symbol);
+  const quoteRef = useRef(quoteState);
+  quoteRef.current = quoteState;
+  const renderCell = useCallback((row: HistoryRow, column: HistoryColumn) => {
+    const liveMove: LiveMove = (report) => {
+      const move = reportMove(report, quoteRef.current?.quote, today);
+      return move == null && report.date === today && report.dateStatus === "reported" && isBoardRowLoading(quoteRef.current) ? "loading" : move;
+    };
+    return renderHistoryCell(row, column, liveMove);
+  }, [today]);
+  const rowVersion = useCallback(
+    (row: HistoryRow) => (row.date === today && quoteState ? `${row.key}:${quoteState.quote?.lastUpdated ?? ""}:${quoteState.loading}` : row.key),
+    [quoteState, today],
+  );
+  const [selectedId, setSelectedId] = usePluginPaneState<string | null>(`history:${symbol}:selected`, null);
+  const selected = rows.find((row) => row.key === selectedId) ?? rows[0] ?? null;
+  const bars = useMemo(() => chartRows(rows), [rows]);
+  // Named as the table names them; the bars are sizes, the MOVE column keeps the direction.
+  const series = useMemo(() => bars.length < 2 ? [] : [
+    staticSeries(chartPoints(bars, (row) => row.implied), { id: "implied", label: "Implied", color: colors.borderFocused, style: "columns" }),
+    staticSeries(chartPoints(bars, (row) => (row.move == null ? null : Math.abs(row.move))), { id: "move", label: "Move", color: colors.warning, style: "columns" }),
+  ], [bars]);
+  const axis = useMemo(() => chartAxis(bars), [bars]);
+  const link = useChartTableSelection({
+    rows, getId: (row) => row.key, getDate: barDate, selectedId: selected?.key ?? null, onSelect: setSelectedId, focused,
+  });
+  const figures = useMemo(() => historyFigures(rows, today, selected), [rows, today, selected]);
+  // The upcoming report has no bar until it is priced; the legend then reads the latest report's.
+  const latestBar = bars.at(-1);
+  const cursorDate = link.cursorDate ?? (latestBar ? barDate(latestBar) : null);
+  const chart = useMemo<ChartTableChart | null>(() => series.length ? {
+    series, xAxis: axis, formatValue: (value) => `${value.toFixed(1)}%`, formatAxisValue: formatPercentAxis,
+    remoteKind: "earnings-moves", ...link, cursorDate,
+  } : null, [axis, cursorDate, link, series]);
+  // A symbol with no reports on record may be one that never has any (an ETF, an index, a coin): its type says so.
+  const bare = !resource.loading && rows.length === 0;
+  const noEarningsLoader = useCallback(() => (dataProvider ? loadNoEarningsText(dataProvider, symbol, "pane") : Promise.resolve(null)), [dataProvider, symbol]);
+  const noEarnings = useAsyncResource(bare && !abroad ? noEarningsLoader : null);
+  const emptyTitle = noEarnings.data ?? "No earnings reports on record.";
+  // A coin's history fails (it is no US ticker), which says nothing once its type has answered.
+  const historyError = noEarnings.loading || noEarnings.data ? null : resource.error;
+  const updatedAgo = useUpdatedAgo(resource.updatedAt);
+  const utcDay = useUtcDay();
+  // Its source and when the history was read, as `fn ERN` ends; how long ago it loaded goes first on a narrow row.
+  const footerInfo = useMemo(() => abroad
+    ? [{ id: "us-listings", parts: [{ text: "past reports: US, Hong Kong, Singapore and China A listings only", tone: "muted" as const }] }]
+    : payload ? [
+      reportFooterSegment(earningsCalendarHeadless, { rows: [], metadata: { asOf: payload.asOf } }),
+      ...(updatedAgo ? [ageFooterSegment(updatedAgo)] : []),
+    ] : [], [abroad, payload, updatedAgo, utcDay]);
+  useAutoRefresh(resource.updatedAt, resource.load);
+  usePaneRefreshKey(() => { resource.reload(); upcoming.reload(); }, { focused });
+  usePaneStatusFooter({
+    registrationId,
+    loading: resource.loading,
+    error: historyError,
+    stale: !!resource.data?.stale,
+    info: footerInfo,
+  });
+
+  return (
+    <PaneStatusBody
+      loading={(resource.loading && !payload && rows.length === 0) || noEarnings.loading}
+      error={!payload && rows.length === 0 ? historyError : null}
+      empty={bare}
+      emptyTitle={emptyTitle}
+      subject="earnings history"
+    >
+      <DataTableView<HistoryRow, HistoryColumn>
+        focused={focused}
+        rootWidth={width}
+        rootHeight={height}
+        columns={columns}
+        items={rows}
+        getItemKey={(row) => row.key}
+        renderCell={renderCell}
+        getRowVersion={rowVersion}
+        selectedTextOverridesCellColor
+        sortColumnId={null}
+        sortDirection="desc"
+        resetScrollKey={symbol}
+        selection={{ kind: "index", selectedIndex: selected ? rows.indexOf(selected) : -1, onChange: (index) => setSelectedId(rows[index]?.key ?? null) }}
+        onActivate={(row) => setSelectedId(row.key)}
+        emptyStateTitle={emptyTitle}
+        rootBefore={<ChartTableHeader width={width} height={height} tableRows={rows.length} tableColumns={columns} figures={figures} chart={chart} />}
+      />
+    </PaneStatusBody>
+  );
+}

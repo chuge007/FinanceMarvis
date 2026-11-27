@@ -1,0 +1,443 @@
+import { memo, useMemo, type RefObject } from "react";
+import { t } from "../../../i18n";
+import { useRemoteUiNode } from "../../../remote/semantic-tree";
+import { commandBarBadgeText, type CommandBarBadgeTone } from "../../../theme/colors";
+import { useThemeColors } from "../../../theme/theme-context";
+import type { CommandBarResultLineSegment } from "../../../types/plugin";
+import {
+  Box,
+  ScrollBox,
+  Span,
+  Text,
+  TextAttributes,
+  type ScrollBoxRenderable,
+} from "../../../ui";
+import { displayWidth, truncateTextSegments, truncateToDisplayWidth } from "../../../utils/format";
+import { Spinner } from "../../ui";
+import { NATIVE_CLIP_STYLE } from "../../ui/clip-style";
+import { ClippedText } from "../../ui/display";
+import { useCommandBarPalette } from "../panel/palette";
+import { getRowPresentation } from "../view-model";
+import {
+  BADGE_COLUMN_WIDTH,
+  BADGE_GAP,
+  badgeConsumesRight,
+  resolveRowBadge,
+} from "./badge";
+import {
+  getListRowsHeight,
+  getResultItemLines,
+  type CommandBarListRow,
+  type ListScreenState,
+  type ResultItem,
+} from "./model";
+
+export type CommandBarListScrollEvent = {
+  stopPropagation: () => void;
+  preventDefault: () => void;
+  scroll?: { direction?: string; delta?: number };
+};
+
+/** Columns every row gives up to the badge column, badge or not. */
+const BADGE_INDENT = BADGE_COLUMN_WIDTH + BADGE_GAP;
+const NAME_GAP = 2;
+/** Below this a name is a few letters and an ellipsis, which tells nobody apart. */
+const MIN_NAME_WIDTH = 6;
+/** The widest symbol a section's names line up after; a longer one pushes its own name along. */
+const MAX_SYMBOL_COLUMN = 10;
+/** The desktop's label gives way only once the name beside it has. */
+const LABEL_STYLE = { ...NATIVE_CLIP_STYLE, flex: "0 1 auto" } as const;
+/**
+ * The desktop's name: shown while the gap and a few of its characters fit beside the label (its basis),
+ * up to its whole width, and cut by CSS between.
+ */
+const NAME_STYLE = { ...NATIVE_CLIP_STYLE, flex: "1 1 0", minWidth: `${NAME_GAP + MIN_NAME_WIDTH}ch`, maxWidth: "max-content" } as const;
+const LINE_STYLE = { ...NATIVE_CLIP_STYLE, flex: "0 1 auto" } as const;
+const INLINE_STYLE = { display: "inline" } as const;
+
+/**
+ * The terminal's instrument rows put their names in one column after the
+ * symbols of their section ("AAPL     Apple Inc." under "BTC-USD  Bitcoin
+ * USD"), as a table would: the width of the section's widest symbol, up to
+ * MAX_SYMBOL_COLUMN. Keyed by the row's index in the list.
+ */
+function symbolColumns(rows: readonly CommandBarListRow[]): Map<number, number> {
+  const columns = new Map<number, number>();
+  let section: number[] = [];
+  let widest = 0;
+  const close = () => {
+    for (const index of section) columns.set(index, Math.min(widest, MAX_SYMBOL_COLUMN));
+    section = [];
+    widest = 0;
+  };
+  for (const row of rows) {
+    if (row.kind !== "item") {
+      if (row.kind === "heading") close();
+      continue;
+    }
+    if (!row.item.name || (row.item.kind !== "ticker" && row.item.kind !== "search")) continue;
+    section.push(row.globalIdx);
+    widest = Math.max(widest, displayWidth(row.item.label));
+  }
+  close();
+  return columns;
+}
+
+interface CommandBarListItemRowProps {
+  item: ResultItem;
+  globalIdx: number;
+  isSelected: boolean;
+  isHovered: boolean;
+  listKind: ListScreenState["kind"];
+  listTitle: string;
+  listQuery: string;
+  contentPadding: number;
+  labelWidth: number;
+  /** Where the row's name starts, past the symbols of its section (symbolColumns); none when it follows the label. */
+  symbolColumn?: number;
+  trailingWidth: number;
+  nativePaneChrome: boolean;
+  onHoverIndex: (index: number | null) => void;
+  onListScroll: (event: CommandBarListScrollEvent) => void;
+  onRowMouseDown: (event: any, item: ResultItem, globalIdx: number) => void;
+}
+
+const CommandBarListItemRow = memo(function CommandBarListItemRow({
+  item,
+  globalIdx,
+  isSelected,
+  isHovered,
+  listKind,
+  listTitle,
+  listQuery,
+  contentPadding,
+  labelWidth,
+  symbolColumn,
+  trailingWidth,
+  nativePaneChrome,
+  onHoverIndex,
+  onListScroll,
+  onRowMouseDown,
+}: CommandBarListItemRowProps) {
+  const palette = useCommandBarPalette(nativePaneChrome);
+  const presentation = getRowPresentation(item, isSelected, trailingWidth > 0);
+  const badge = resolveRowBadge(item);
+  // The badge column and its gap come out of the label, so the right column
+  // stays where it is for rows with and without a badge alike.
+  const labelColumnWidth = Math.max(1, labelWidth - BADGE_INDENT);
+  // A long title stops one cell short of the right column, so its ellipsis
+  // never runs into the date or shortcut sitting there.
+  const labelSpace = Math.max(1, labelColumnWidth - (trailingWidth > 0 ? 1 : 0));
+  // The desktop and the web cut the label, the name and the right column by CSS where their boxes end.
+  const label = nativePaneChrome ? presentation.label : truncateToDisplayWidth(presentation.label, labelSpace);
+  // The name gives way before the symbol: it shrinks to its ellipsis and drops
+  // out once fewer than a few characters of it would show.
+  const symbolWidth = Math.max(displayWidth(label), symbolColumn ?? 0);
+  const nameSpace = labelSpace - symbolWidth - NAME_GAP;
+  const name = nativePaneChrome ? item.name ?? "" : item.name && nameSpace >= MIN_NAME_WIDTH ? truncateToDisplayWidth(item.name, nameSpace) : "";
+  // "current" outranks the shortcut on the right; otherwise a badge lifted from
+  // `right` must not be repeated there.
+  const trailing = badgeConsumesRight(item) && !item.current ? "" : presentation.trailing;
+  const lineWidth = labelColumnWidth + trailingWidth;
+  const lines = useMemo(
+    () => getResultItemLines(item).map((line) => nativePaneChrome ? line.segments : truncateTextSegments(
+      line.segments,
+      lineWidth,
+      (ellipsis) => ({ text: ellipsis, emphasis: "muted" as const }),
+    )),
+    [item, lineWidth, nativePaneChrome],
+  );
+  const activate = () => onRowMouseDown({
+    preventDefault() {},
+    stopPropagation() {},
+  }, item, globalIdx);
+  useRemoteUiNode({
+    role: "command-bar-result",
+    label: item.label,
+    disabled: item.disabled === true,
+    actions: {
+      activate,
+      press: activate,
+      secondary: item.secondaryAction ? () => item.secondaryAction?.() : undefined,
+    },
+    metadata: {
+      index: globalIdx,
+      selected: isSelected,
+      hovered: isHovered,
+      listKind,
+      listTitle,
+      listQuery,
+      item: {
+        id: item.id,
+        label: item.label,
+        detail: item.detail,
+        category: item.category,
+        kind: item.kind,
+        right: item.right,
+        shortcutQuery: item.shortcutQuery,
+        searchText: item.searchText,
+        checked: item.checked,
+        current: item.current,
+        disabled: item.disabled === true,
+      },
+    },
+  });
+
+  return (
+    <Box
+      key={item.id}
+      flexDirection="column"
+      height={1 + lines.length}
+      paddingX={contentPadding}
+      backgroundColor={isSelected
+        ? palette.selectedBg
+        : isHovered
+          ? palette.hoverBg
+          : (nativePaneChrome ? palette.panelBg : palette.bg)}
+      onMouseOver={() => onHoverIndex(globalIdx)}
+      onMouseOut={() => onHoverIndex(null)}
+      {...(!nativePaneChrome ? { onMouseScroll: onListScroll } : {})}
+      onMouseDown={(event: any) => onRowMouseDown(event, item, globalIdx)}
+      data-command-bar-row-selected={nativePaneChrome && isSelected ? "true" : undefined}
+      style={nativePaneChrome ? { borderRadius: "var(--gloom-radius-md)" } : undefined}
+    >
+      <Box flexDirection="row" height={1}>
+        <Box width={BADGE_INDENT} flexDirection="row">
+          {badge && <CommandBarRowBadge text={badge.text} tone={badge.tone} width={BADGE_COLUMN_WIDTH} nativePaneChrome={nativePaneChrome} />}
+        </Box>
+        {nativePaneChrome ? (
+          // One line: the name wraps onto the hidden second line once less than a few characters of it
+          // would show beside the label, and gives way to its ellipsis before the label does.
+          <Box width={labelColumnWidth} height={1} flexDirection="row" flexWrap="wrap" overflow="hidden" paddingRight={trailingWidth > 0 ? 1 : 0}>
+            <Text fg={isSelected ? palette.selectedText : presentation.primaryMuted ? palette.subtle : palette.text} style={LABEL_STYLE}>
+              {label}
+            </Text>
+            {name && (
+              <Text fg={isSelected ? palette.selectedText : palette.subtle} style={NAME_STYLE}>
+                {" ".repeat(NAME_GAP) + name}
+              </Text>
+            )}
+          </Box>
+        ) : (
+          <Box width={labelColumnWidth} flexDirection="row">
+            <Text fg={isSelected ? palette.selectedText : presentation.primaryMuted ? palette.subtle : palette.text}>
+              {label}
+            </Text>
+            {name && (
+              <Text fg={isSelected ? palette.selectedText : palette.subtle}>
+                {" ".repeat(symbolWidth - displayWidth(label) + NAME_GAP) + name}
+              </Text>
+            )}
+          </Box>
+        )}
+        <Box width={trailingWidth}>
+          <ClippedText
+            fg={isSelected
+              ? palette.selectedText
+              : presentation.trailingAccent
+                ? palette.accent
+                : palette.subtle}
+            text={trailing}
+            width={trailingWidth}
+          />
+        </Box>
+      </Box>
+      {lines.map((segments, index) => (
+        <Box
+          key={`line:${index}`}
+          flexDirection="row"
+          height={1}
+          width={lineWidth}
+          marginLeft={BADGE_INDENT}
+          overflow="hidden"
+        >
+          {nativePaneChrome ? (
+            // One run of text, so CSS ends it in one ellipsis, in the colour the terminal's takes.
+            <Text fg={isSelected ? palette.selectedText : palette.heading} style={LINE_STYLE}>
+              {segments.map((segment, segmentIndex) => (
+                <Span
+                  key={segmentIndex}
+                  fg={resolveLineSegmentColor(segment, palette, isSelected)}
+                  attributes={segment.emphasis === "match" ? TextAttributes.BOLD : TextAttributes.NONE}
+                  style={INLINE_STYLE}
+                >
+                  {segment.text}
+                </Span>
+              ))}
+            </Text>
+          ) : segments.map((segment, segmentIndex) => (
+            <Text
+              key={segmentIndex}
+              fg={resolveLineSegmentColor(segment, palette, isSelected)}
+              attributes={segment.emphasis === "match" ? TextAttributes.BOLD : TextAttributes.NONE}
+            >
+              {segment.text}
+            </Text>
+          ))}
+        </Box>
+      ))}
+    </Box>
+  );
+});
+
+/**
+ * A tag set flush against the label edge in a column padded to the widest tag
+ * in the list, so the labels line up and the tags share one right edge. Text
+ * only: a filled box would outweigh the label it introduces.
+ */
+function CommandBarRowBadge({ text, tone, width, nativePaneChrome }: { text: string; tone: CommandBarBadgeTone; width: number; nativePaneChrome: boolean }) {
+  const themeColors = useThemeColors();
+  return (
+    <Box width={width} height={1}>
+      {nativePaneChrome ? (
+        // Right-aligned in as many characters as the terminal's cells, cut by CSS past them.
+        <Text fg={commandBarBadgeText(tone, themeColors)} style={{ ...NATIVE_CLIP_STYLE, width: `${width}ch`, textAlign: "right" }}>
+          {text}
+        </Text>
+      ) : (
+        <Text fg={commandBarBadgeText(tone, themeColors)}>
+          {truncateToDisplayWidth(text, width).padStart(width, " ")}
+        </Text>
+      )}
+    </Box>
+  );
+}
+
+/**
+ * Matched runs keep their highlight on the selected row: the selection colour is
+ * what tells you where you are, the match colour is what you were looking for.
+ * A muted run (a source lead-in, an ellipsis) steps down one more level than
+ * the snippet so it reads as metadata, except on the selected row where the
+ * whole line takes the selection text so nothing there goes dim.
+ */
+function resolveLineSegmentColor(
+  segment: CommandBarResultLineSegment,
+  palette: ReturnType<typeof useCommandBarPalette>,
+  isSelected: boolean,
+): string {
+  if (segment.emphasis === "match") return palette.match;
+  if (isSelected) return palette.selectedText;
+  return segment.emphasis === "muted" ? palette.heading : palette.subtle;
+}
+
+interface CommandBarListBodyProps {
+  visibleListState: ListScreenState;
+  nativeListRows: CommandBarListRow[];
+  listBodyHeight: number;
+  contentPadding: number;
+  labelWidth: number;
+  nativePaneChrome: boolean;
+  nativeListScrollRef: RefObject<ScrollBoxRenderable | null>;
+  queryDisplayWidth: number;
+  trailingWidth: number;
+  onHoverIndex: (index: number | null) => void;
+  onListScroll: (event: CommandBarListScrollEvent) => void;
+  onRowMouseDown: (event: any, item: ResultItem, globalIdx: number) => void;
+}
+
+export const CommandBarListBody = memo(function CommandBarListBody({
+  visibleListState,
+  nativeListRows,
+  listBodyHeight,
+  contentPadding,
+  labelWidth,
+  nativePaneChrome,
+  nativeListScrollRef,
+  queryDisplayWidth,
+  trailingWidth,
+  onHoverIndex,
+  onListScroll,
+  onRowMouseDown,
+}: CommandBarListBodyProps) {
+  const palette = useCommandBarPalette(nativePaneChrome);
+  // Headings, messages and the spinner sit on the label edge: the badge column
+  // is a gutter for the rows, not an indent for everything else.
+  const labelEdgePadding = contentPadding + BADGE_INDENT;
+  const labelEdgeWidth = Math.max(1, queryDisplayWidth - BADGE_INDENT);
+  const visibleRows = useMemo(() => {
+    const rows = nativeListRows;
+    if (nativePaneChrome) return rows;
+    const paddedRows = [...rows];
+    // Padded in lines, not rows: a multi-line result already fills several.
+    let filledLines = getListRowsHeight(rows);
+    while (filledLines < listBodyHeight) {
+      paddedRows.push({ kind: "filler", id: `filler:${paddedRows.length}` });
+      filledLines += 1;
+    }
+    return paddedRows;
+  }, [
+    listBodyHeight,
+    nativeListRows,
+    nativePaneChrome,
+  ]);
+  // The desktop and the web set the names in their own type, after the symbol.
+  const nameColumns = useMemo(() => (nativePaneChrome ? null : symbolColumns(nativeListRows)), [nativeListRows, nativePaneChrome]);
+
+  const renderedRows = (
+    <>
+      {visibleRows.map((row) => {
+        if (row.kind === "filler" || row.kind === "spacer") {
+          return <Box key={row.id} height={1} />;
+        }
+        if (row.kind === "spinner") {
+          return (
+            <Box key={row.id} height={1} paddingLeft={labelEdgePadding} paddingRight={contentPadding} {...(!nativePaneChrome ? { onMouseScroll: onListScroll } : {})}>
+              <Spinner label={t(row.label)} />
+            </Box>
+          );
+        }
+        if (row.kind === "message") {
+          return (
+            <Box key={row.id} height={1} paddingLeft={labelEdgePadding} paddingRight={contentPadding} {...(!nativePaneChrome ? { onMouseScroll: onListScroll } : {})}>
+              <ClippedText fg={palette.text} text={t(row.label)} width={labelEdgeWidth} />
+            </Box>
+          );
+        }
+        if (row.kind === "heading") {
+          return (
+            <Box key={row.id} height={1} paddingLeft={labelEdgePadding} paddingRight={contentPadding} {...(!nativePaneChrome ? { onMouseScroll: onListScroll } : {})}>
+              <ClippedText attributes={TextAttributes.BOLD} fg={row.accent ? palette.accent : palette.heading} text={t(row.label)} width={labelEdgeWidth} />
+            </Box>
+          );
+        }
+
+        const isSelected = row.globalIdx === visibleListState.selectedIdx;
+        const isHovered = row.globalIdx === visibleListState.hoveredIdx && !isSelected;
+        const itemRowKey = `item:${row.globalIdx}:${row.item.id}:${row.item.category}:${row.item.label}:${row.item.right || ""}`;
+        return (
+          <CommandBarListItemRow
+            key={itemRowKey}
+            item={row.item}
+            globalIdx={row.globalIdx}
+            isSelected={isSelected}
+            isHovered={isHovered}
+            listKind={visibleListState.kind}
+            listTitle={visibleListState.title}
+            listQuery={visibleListState.query}
+            contentPadding={contentPadding}
+            labelWidth={labelWidth}
+            symbolColumn={nameColumns?.get(row.globalIdx)}
+            trailingWidth={trailingWidth}
+            nativePaneChrome={nativePaneChrome}
+            onHoverIndex={onHoverIndex}
+            onListScroll={onListScroll}
+            onRowMouseDown={onRowMouseDown}
+          />
+        );
+      })}
+    </>
+  );
+
+  return (
+    <ScrollBox
+      ref={nativeListScrollRef}
+      flexDirection="column"
+      height={listBodyHeight}
+      scrollY
+      focusable={false}
+      {...(!nativePaneChrome ? { onMouseScroll: onListScroll } : {})}
+    >
+      {renderedRows}
+    </ScrollBox>
+  );
+});

@@ -1,0 +1,181 @@
+,,,2020,2021,2022,2023
+AAPL,Gross Margin,Lag 1,,0.0927,0.0366,0.019
+AAPL,Gross Margin,Lag 2,,,0.1328,0.0563
+AAPL,Gross Margin,Lag 3,,,,0.1543
+AAPL,Operating Margin,Lag 1,,0.2334,0.017,-0.0154
+AAPL,Operating Margin,Lag 2,,,0.2543,0.0013
+AAPL,Operating Margin,Lag 3,,,,0.235
+AAPL,Net Profit Margin,Lag 1,,0.2376,-0.0221,-0.0001
+AAPL,Net Profit Margin,Lag 2,,,0.2102,-0.0222
+AAPL,Net Profit Margin,Lag 3,,,,0.21
+AAPL,Continuing Operations Profit Margin,Lag 1,,0.2376,-0.0221,-0.0001
+AAPL,Continuing Operations Profit Margin,Lag 2,,,0.2102,-0.0222
+AAPL,Continuing Operations Profit Margin,Lag 3,,,,0.21
+AAPL,EBITDA Margin,Lag 1,,0.1665,0.0072,-0.0084
+AAPL,EBITDA Margin,Lag 2,,,0.175,-0.0012
+AAPL,EBITDA Margin,Lag 3,,,,0.1651
+AAPL,Free Cash Flow Margin,Lag 1,,-0.0492,0.1122,-0.0807
+AAPL,Free Cash Flow Margin,Lag 2,,,0.0575,0.0225
+AAPL,Free Cash Flow Margin,Lag 3,,,,-0.0278
+AAPL,Interest Coverage Ratio,Lag 1,,0.7852,-0.0107,-0.2868
+AAPL,Interest Coverage Ratio,Lag 2,,,0.7661,-0.2944
+AAPL,Interest Coverage Ratio,Lag 3,,,,0.2596
+AAPL,Income Before Tax Profit Margin,Lag 1,,0.2215,0.0118,-0.0175
+AAPL,Income Before Tax Profit Margin,Lag 2,,,0.2359,-0.006
+AAPL,Income Before Tax Profit Margin,Lag 3,,,,0.2142
+AAPL,Effective Tax Rate,Lag 1,,-0.078,0.2182,-0.0917
+AAPL,Effective Tax Rate,Lag 2,,,0.1231,0.1065
+AAPL,Effective Tax Rate,Lag 3,,,,0.0202
+AAPL,Return on Assets,Lag 1,,,0.0109,-0.0303
+AAPL,Return on Assets,Lag 2,,,,-0.0198
+AAPL,Return on Assets,Lag 3,,,,
+AAPL,Operating Return on Assets,Lag 1,,,0.0513,-0.0451
+AAPL,Operating Return on Assets,Lag 2,,,,0.0038
+AAPL,Operating Return on Assets,Lag 3,,,,
+AAPL,Cash Return on Assets,Lag 1,,,0.1259,-0.0971
+AAPL,Cash Return on Assets,Lag 2,,,,0.0167
+AAPL,Cash Return on Assets,Lag 3,,,,
+AAPL,Return on Equity,Lag 1,,,0.19,-0.02
+AAPL,Return on Equity,Lag 2,,,,0.1662
+AAPL,Return on Equity,Lag 3,,,,
+AAPL,Return on Invested Capital,Lag 1,,,0.0719,0.046
+AAPL,Return on Invested Capital,Lag 2,,,,0.1213
+AAPL,Return on Invested Capital,Lag 3,,,,
+AAPL,Return on Net Operating Assets,Lag 1,,,-0.777,-0.1062
+AAPL,Return on Net Operating Assets,Lag 2,,,,-0.8006
+AAPL,Return on Net Operating Assets,Lag 3,,,,
+AAPL,Net Borrowing Cost,Lag 1,,,-1.7054,-0.8168
+AAPL,Net Borrowing Cost,Lag 2,,,,-2.2816
+AAPL,Net Borrowing Cost,Lag 3,,,,
+AAPL,Financial Leverage,Lag 1,,,0.1719,0.0248
+AAPL,Financial Leverage,Lag 2,,,,0.1925
+AAPL,Financial Leverage,Lag 3,,,,
+AAPL,Return on Capital Employed,Lag 1,,0.5924,0.2438,-0.0823
+AAPL,Return on Capital Employed,Lag 2,,,0.9806,0.1415
+AAPL,Return on Capital Employed,Lag 3,,,,0.8177
+AAPL,Return on Tangible Assets,Lag 1,,,0.0109,-0.0303
+AAPL,Return on Tangible Assets,Lag 2,,,,-0.0198
+AAPL,Return on Tangible Assets,Lag 3,,,,
+AAPL,Income Quality Ratio,Lag 1,,-0.218,0.1138,-0.0688
+AAPL,Income Quality Ratio,Lag 2,,,-0.129,0.0372
+AAPL,Income Quality Ratio,Lag 3,,,,-0.189
+AAPL,Free Cash Flow to Operating Cash Flow Ratio,Lag 1,,-0.0175,0.0211,-0.0126
+AAPL,Free Cash Flow to Operating Cash Flow Ratio,Lag 2,,,0.0032,0.0083
+AAPL,Free Cash Flow to Operating Cash Flow Ratio,Lag 3,,,,-0.0094
+AAPL,Cash Tax Rate,Lag 1,,0.6414,-0.293,-0.0006
+AAPL,Cash Tax Rate,Lag 2,,,0.1605,-0.2935
+AAPL,Cash Tax Rate,Lag 3,,,,0.1597
+AAPL,Tax Rate Divergence,Lag 1,,38.2658,-0.9769,6.4339
+AAPL,Tax Rate Divergence,Lag 2,,,1.8591,-0.8286
+AAPL,Tax Rate Divergence,Lag 3,,,,7.3866
+AAPL,Gross Profitability,Lag 1,,0.3437,0.1119,-0.0091
+AAPL,Gross Profitability,Lag 2,,,0.494,0.1018
+AAPL,Gross Profitability,Lag 3,,,,0.4804
+AAPL,Operating Profitability,Lag 1,,0.7361,0.3646,-0.2276
+AAPL,Operating Profitability,Lag 2,,,1.369,0.054
+AAPL,Operating Profitability,Lag 3,,,,0.8298
+AAPL,Cash-Based Operating Profitability,Lag 1,,,0.066,-0.0463
+AAPL,Cash-Based Operating Profitability,Lag 2,,,,0.0167
+AAPL,Cash-Based Operating Profitability,Lag 3,,,,
+AAPL,Cash Return on Invested Capital,Lag 1,,,0.2129,-0.0403
+AAPL,Cash Return on Invested Capital,Lag 2,,,,0.1641
+AAPL,Cash Return on Invested Capital,Lag 3,,,,
+AAPL,Free Cash Flow Conversion,Lag 1,,-0.2317,0.1374,-0.0805
+AAPL,Free Cash Flow Conversion,Lag 2,,,-0.1262,0.0458
+AAPL,Free Cash Flow Conversion,Lag 3,,,,-0.1966
+AAPL,Free Cash Flow to EBITDA,Lag 1,,-0.185,0.1042,-0.0729
+AAPL,Free Cash Flow to EBITDA,Lag 2,,,-0.1,0.0238
+AAPL,Free Cash Flow to EBITDA,Lag 3,,,,-0.1656
+AAPL,Percent Accruals,Lag 1,,0.7561,-1.2655,0.3762
+AAPL,Percent Accruals,Lag 2,,,0.4474,-0.4132
+AAPL,Percent Accruals,Lag 3,,,,0.6553
+MSFT,Gross Margin,Lag 1,,0.0169,-0.0076,0.0076
+MSFT,Gross Margin,Lag 2,,,0.0092,-0.0001
+MSFT,Gross Margin,Lag 3,,,,0.0168
+MSFT,Operating Margin,Lag 1,,0.1233,0.0111,-0.0067
+MSFT,Operating Margin,Lag 2,,,0.1357,0.0043
+MSFT,Operating Margin,Lag 3,,,,0.1281
+MSFT,Net Profit Margin,Lag 1,,0.1773,0.0064,-0.0692
+MSFT,Net Profit Margin,Lag 2,,,0.1849,-0.0632
+MSFT,Net Profit Margin,Lag 3,,,,0.1028
+MSFT,Continuing Operations Profit Margin,Lag 1,,0.1773,0.0064,-0.0692
+MSFT,Continuing Operations Profit Margin,Lag 2,,,0.1849,-0.0632
+MSFT,Continuing Operations Profit Margin,Lag 3,,,,0.1028
+MSFT,EBITDA Margin,Lag 1,,0.0559,0.0165,-0.021
+MSFT,EBITDA Margin,Lag 2,,,0.0733,-0.0048
+MSFT,EBITDA Margin,Lag 3,,,,0.0508
+MSFT,Free Cash Flow Margin,Lag 1,,0.0556,-0.0158,-0.1459
+MSFT,Free Cash Flow Margin,Lag 2,,,0.0389,-0.1594
+MSFT,Free Cash Flow Margin,Lag 3,,,,-0.1127
+MSFT,Interest Coverage Ratio,Lag 1,,0.4581,0.3562,0.1129
+MSFT,Interest Coverage Ratio,Lag 2,,,0.9775,0.5093
+MSFT,Interest Coverage Ratio,Lag 3,,,,1.2007
+MSFT,Income Before Tax Profit Margin,Lag 1,,0.1407,-0.0018,-0.0019
+MSFT,Income Before Tax Profit Margin,Lag 2,,,0.1386,-0.0037
+MSFT,Income Before Tax Profit Margin,Lag 3,,,,0.1365
+MSFT,Effective Tax Rate,Lag 1,,-0.1624,-0.0516,0.4473
+MSFT,Effective Tax Rate,Lag 2,,,-0.2056,0.3726
+MSFT,Effective Tax Rate,Lag 3,,,,0.1497
+MSFT,Return on Assets,Lag 1,,,0.0792,-0.1053
+MSFT,Return on Assets,Lag 2,,,,-0.0345
+MSFT,Return on Assets,Lag 3,,,,
+MSFT,Operating Return on Assets,Lag 1,,,0.0842,-0.0452
+MSFT,Operating Return on Assets,Lag 2,,,,0.0351
+MSFT,Operating Return on Assets,Lag 3,,,,
+MSFT,Cash Return on Assets,Lag 1,,,0.0547,-0.1153
+MSFT,Cash Return on Assets,Lag 2,,,,-0.0669
+MSFT,Cash Return on Assets,Lag 3,,,,
+MSFT,Return on Equity,Lag 1,,,0.0015,-0.1766
+MSFT,Return on Equity,Lag 2,,,,-0.1753
+MSFT,Return on Equity,Lag 3,,,,
+MSFT,Return on Invested Capital,Lag 1,,,0.0967,-0.1231
+MSFT,Return on Invested Capital,Lag 2,,,,-0.0383
+MSFT,Return on Invested Capital,Lag 3,,,,
+MSFT,Return on Net Operating Assets,Lag 1,,,-0.2308,-0.2856
+MSFT,Return on Net Operating Assets,Lag 2,,,,-0.4505
+MSFT,Return on Net Operating Assets,Lag 3,,,,
+MSFT,Net Borrowing Cost,Lag 1,,,1.1676,31.8811
+MSFT,Net Borrowing Cost,Lag 2,,,,6.5093
+MSFT,Net Borrowing Cost,Lag 3,,,,
+MSFT,Financial Leverage,Lag 1,,,0.268,0.2231
+MSFT,Financial Leverage,Lag 2,,,,0.4313
+MSFT,Financial Leverage,Lag 3,,,,
+MSFT,Return on Capital Employed,Lag 1,,0.2334,0.0837,-0.0697
+MSFT,Return on Capital Employed,Lag 2,,,0.3366,0.0082
+MSFT,Return on Capital Employed,Lag 3,,,,0.2435
+MSFT,Return on Tangible Assets,Lag 1,,,0.1131,-0.0989
+MSFT,Return on Tangible Assets,Lag 2,,,,0.003
+MSFT,Return on Tangible Assets,Lag 3,,,,
+MSFT,Income Quality Ratio,Lag 1,,-0.0859,-0.0227,-0.0112
+MSFT,Income Quality Ratio,Lag 2,,,-0.1067,-0.0336
+MSFT,Income Quality Ratio,Lag 3,,,,-0.1167
+MSFT,Free Cash Flow to Operating Cash Flow Ratio,Lag 1,,-0.0191,0.0006,-0.0719
+MSFT,Free Cash Flow to Operating Cash Flow Ratio,Lag 2,,,-0.0185,-0.0714
+MSFT,Free Cash Flow to Operating Cash Flow Ratio,Lag 3,,,,-0.0891
+MSFT,Cash Tax Rate,Lag 1,,,,
+MSFT,Cash Tax Rate,Lag 2,,,,
+MSFT,Cash Tax Rate,Lag 3,,,,
+MSFT,Tax Rate Divergence,Lag 1,,0.1624,0.0516,-0.4473
+MSFT,Tax Rate Divergence,Lag 2,,,0.2056,-0.3726
+MSFT,Tax Rate Divergence,Lag 3,,,,-0.1497
+MSFT,Gross Profitability,Lag 1,,0.0789,0.0709,-0.0463
+MSFT,Gross Profitability,Lag 2,,,0.1554,0.0214
+MSFT,Gross Profitability,Lag 3,,,,0.1019
+MSFT,Operating Profitability,Lag 1,,0.1181,0.0261,-0.141
+MSFT,Operating Profitability,Lag 2,,,0.1473,-0.1187
+MSFT,Operating Profitability,Lag 3,,,,-0.0145
+MSFT,Cash-Based Operating Profitability,Lag 1,,,0.0727,-0.0148
+MSFT,Cash-Based Operating Profitability,Lag 2,,,,0.0569
+MSFT,Cash-Based Operating Profitability,Lag 3,,,,
+MSFT,Cash Return on Invested Capital,Lag 1,,,0.0588,-0.1914
+MSFT,Cash Return on Invested Capital,Lag 2,,,,-0.1439
+MSFT,Cash Return on Invested Capital,Lag 3,,,,
+MSFT,Free Cash Flow Conversion,Lag 1,,-0.1034,-0.0221,-0.0823
+MSFT,Free Cash Flow Conversion,Lag 2,,,-0.1232,-0.1026
+MSFT,Free Cash Flow Conversion,Lag 3,,,,-0.1954
+MSFT,Free Cash Flow to EBITDA,Lag 1,,-0.0003,-0.0318,-0.1276
+MSFT,Free Cash Flow to EBITDA,Lag 2,,,-0.0321,-0.1553
+MSFT,Free Cash Flow to EBITDA,Lag 3,,,,-0.1556
+MSFT,Percent Accruals,Lag 1,,0.3181,0.1126,0.0612
+MSFT,Percent Accruals,Lag 2,,,0.3948,0.1668
+MSFT,Percent Accruals,Lag 3,,,,0.4318

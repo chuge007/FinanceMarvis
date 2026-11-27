@@ -1,0 +1,103 @@
+import type { PaneTemplateContext, PaneTemplateDef } from "../../../types/plugin";
+import type { PluginModule } from "../plugin-module";
+import { createTickerSurfacePaneTemplate, type TickerSurfacePaneTemplateOptions } from "../shared/ticker-surface";
+import { gammaCache, openInterestCache } from "./client";
+import { optionsPositioningHeadless } from "./headless";
+import { isPositioningTab, type PositioningTab } from "./model";
+
+/** The underlying OPX opens on when no ticker is active. */
+const DEFAULT_UNDERLYING = "SPY";
+
+const withDefault = (context: PaneTemplateContext): PaneTemplateContext =>
+  context.activeTicker ? context : { ...context, activeTicker: DEFAULT_UNDERLYING };
+
+function positioningTemplate(
+  options: Pick<TickerSurfacePaneTemplateOptions, "id" | "label" | "description" | "keywords" | "shortcut" | "shortcutAliases">,
+  initialTab: PositioningTab,
+  /** What the report returns, when the description reads like an action. */
+  returns?: string,
+): PaneTemplateDef {
+  const template = createTickerSurfacePaneTemplate({
+    ...options,
+    paneId: "options-positioning",
+    publicShare: true,
+    // GEX keeps a pane of its own beside OPX, as QR does beside TAS.
+    ...(initialTab === "strikes" ? {} : { viewKey: options.shortcut }),
+    settings: (_symbol, _context, createOptions) => {
+      const tab = createOptions?.values?.tab;
+      const expiry = createOptions?.values?.expiry ?? "";
+      return {
+        ...(isPositioningTab(tab) ? { tab } : initialTab === "strikes" ? {} : { tab: initialTab }),
+        ...(/^\d{4}-\d{2}-\d{2}$/.test(expiry) ? { expiry } : {}),
+      };
+    },
+  });
+  return {
+    ...template,
+    canCreate: (context, createOptions) => template.canCreate?.(withDefault(context), createOptions) ?? true,
+    createInstance: (context, createOptions) => template.createInstance?.(withDefault(context), createOptions) ?? null,
+    headless: { ...optionsPositioningHeadless(initialTab), ...(returns ? { description: returns } : {}) },
+  };
+}
+
+export const optionsPositioningModule: PluginModule = {
+  // The last answers are kept on the device, for when the service cannot be reached.
+  setup(ctx) {
+    openInterestCache.attach(ctx.persistence);
+    gammaCache.attach(ctx.persistence);
+  },
+  dispose() {
+    openInterestCache.reset();
+    gammaCache.reset();
+  },
+  panes: [{
+    id: "options-positioning",
+    name: "Options Positioning",
+    icon: "O",
+    get component(): typeof import("./pane").OptionsPositioningPane { const { OptionsPositioningPane } = require("./pane"); return OptionsPositioningPane; },
+    defaultPosition: "right",
+    shareItem: { ticker: true },
+    tickerFollower: true,
+    defaultMode: "floating",
+    defaultFloatingSize: { width: 104, height: 34 },
+    tableExport: true,
+  }],
+  paneTemplates: [
+    positioningTemplate({
+      id: "options-positioning-pane",
+      label: "Options Positioning",
+      description: "Open interest by strike and expiry, max pain, walls and dealer gamma (GEX); BTC-USD and ETH-USD options as listed on Deribit.",
+      keywords: ["opx", "open interest", "max pain", "put call", "expiry", "options", "deribit", "bitcoin options", "ether options", "crypto options"],
+      shortcut: "OPX",
+      shortcutAliases: ["MAXPAIN"],
+    }, "strikes", "Options open interest by strike and expiry, max pain, and dealer gamma (GEX) for a US underlying, or Deribit's BTC-USD and ETH-USD options."),
+    positioningTemplate({
+      id: "options-positioning-gex",
+      label: "Dealer Gamma",
+      description: "Net dealer gamma by strike, its total, flip level, call and put walls and the range for the dealer assumption.",
+      keywords: ["gex", "gamma", "dealer gamma", "gamma exposure", "gamma flip", "zero gamma", "gamma level", "call wall", "put wall", "0dte"],
+      shortcut: "GEX",
+    }, "gex"),
+    (() => {
+      const cbbcTemplate = createTickerSurfacePaneTemplate({
+        id: "options-positioning-cbbc",
+        paneId: "options-positioning",
+        viewKey: "CBBC",
+        publicShare: true,
+        label: "Hong Kong CBBC Map",
+        description: "HKEX Callable Bull/Bear Contract (CBBC) knock-out call-level street map, bull/bear ratios, equivalent HSI futures delta and heavy kill zones.",
+        keywords: ["cbbc", "bull bear", "knockout", "kill zone", "hsi", "hstech", "hkex", "street inventory"],
+        shortcut: "CBBC",
+        shortcutAliases: ["BULLBEAR"],
+        settings: () => ({ tab: "cbbc" }),
+      });
+      const withHsi = (context: PaneTemplateContext): PaneTemplateContext =>
+        context.activeTicker ? context : { ...context, activeTicker: "HSI" };
+      return {
+        ...cbbcTemplate,
+        canCreate: (context, createOptions) => cbbcTemplate.canCreate?.(withHsi(context), createOptions) ?? true,
+        createInstance: (context, createOptions) => cbbcTemplate.createInstance?.(withHsi(context), createOptions) ?? null,
+      };
+    })(),
+  ],
+};

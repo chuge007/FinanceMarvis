@@ -1,0 +1,220 @@
+import type { PricePoint, TickerFinancials } from "../types/financials";
+import {
+  pricePointIntegrity, pricePointOpenWithheld, pricePointValues, pricePointWicks, priceHistoryIntegrityNotice, priceOnlyPoint,
+  mergePriceHistoryIntegrity, type PriceHistoryIntegrity,
+} from "../utils/price-history-integrity";
+import { canonicalTimeSeriesFieldId, isFundamentalFieldId, isMarketFieldId } from "./field-catalog";
+import { extractFundamentalSeries } from "./fundamentals";
+import type { ValuationCurrencyContext } from "./valuation-currency";
+import type { ChartSeriesPriceHistoryIntegrity, ResolvedSeries, SecuritySeriesSource, SeriesPeriod, TimeSeriesPoint } from "./types";
+import { chartBarSizeParts, chartBarSizeStepMs, type ChartBarSize, type ManualChartResolution } from "./resolution";
+import { isFiniteNumber } from "../utils/guards";
+import type { HistorySession } from "../types/price-history";
+import { regularSessionCloseOn } from "../market-data/market/freshness";
+import { zonedDateKey } from "../utils/zoned-date-time";
+
+/** Field catalogue frequency is a default, not evidence for acquired bars. */
+export function marketSeriesFrequency(source: SecuritySeriesSource, historyResolution: ManualChartResolution | null | undefined): SeriesPeriod {
+  if (historyResolution === null) return "auto";
+  if (source.period && source.period !== "auto") return source.period;
+  if (historyResolution === undefined || historyResolution === "1d") return "daily";
+  if (historyResolution === "1wk") return "weekly";
+  if (historyResolution === "1mo") return "monthly";
+  return "auto";
+}
+
+function pricePointDate(value: unknown): Date | null {
+  const date = value instanceof Date ? new Date(value) : new Date(value as string | number);
+  return Number.isFinite(date.getTime()) ? date : null;
+}
+
+function utcDay(date: Date): string {
+  return date.toISOString().slice(0, 10);
+}
+
+function periodKey(date: Date, period: SeriesPeriod): string {
+  const year = date.getUTCFullYear();
+  const month = date.getUTCMonth();
+  if (period === "annual") return String(year);
+  if (period === "quarterly") return `${year}-Q${Math.floor(month / 3) + 1}`;
+  if (period === "monthly") return `${year}-${String(month + 1).padStart(2, "0")}`;
+  if (period === "weekly") {
+    const monday = new Date(Date.UTC(year, month, date.getUTCDate()));
+    const weekday = monday.getUTCDay();
+    monday.setUTCDate(monday.getUTCDate() - (weekday === 0 ? 6 : weekday - 1));
+    return utcDay(monday);
+  }
+  return utcDay(date);
+}
+
+interface AggregatedPricePoint {
+  date: Date;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume?: number;
+  integrity?: PriceHistoryIntegrity;
+}
+
+/** Aggregates OHLCV correctly: first open, max high, min low, last close, summed volume. */
+function aggregatePriceHistory(
+  points: readonly PricePoint[],
+  period: SeriesPeriod,
+): Array<PricePoint & { integrity?: PriceHistoryIntegrity }> {
+  const sorted = points
+    .flatMap((point) => {
+      const date = pricePointDate(point.date);
+      // A bar built from shorter ones carries the integrity of any of them that contradict themselves.
+      const integrity = (point as { integrity?: PriceHistoryIntegrity }).integrity ?? pricePointIntegrity(point);
+      return date ? [{ ...point, date, integrity }] : [];
+    })
+    .sort((left, right) => left.date.getTime() - right.date.getTime());
+  if (period === "auto") return sorted.map((point) => ({ ...point, date: new Date(point.date) }));
+  // Already-daily bars need no aggregation. Keep missing O/H/L fields missing
+  // so range-based studies cannot mistake a close-only feed for real OHLC.
+  if (period === "daily" && new Set(sorted.map((point) => utcDay(point.date))).size === sorted.length) return sorted;
+  if (period === "ttm") return [];
+
+  const buckets = new Map<string, AggregatedPricePoint>();
+  for (const point of sorted) {
+    const key = periodKey(point.date, period);
+    // An open withheld as outside its bar's range (pricePointOpenWithheld) opens no week or month either.
+    const open = isFiniteNumber(point.open) && !pricePointOpenWithheld(point) ? point.open : point.close;
+    // A wick too far from its bar's body to have traded does not set the week's or month's range.
+    const wicks = pricePointWicks(point);
+    const high = isFiniteNumber(wicks.high) ? wicks.high : isFiniteNumber(point.high) ? Math.max(open, point.close) : point.close;
+    const low = isFiniteNumber(wicks.low) ? wicks.low : isFiniteNumber(point.low) ? Math.min(open, point.close) : point.close;
+    const current = buckets.get(key);
+    if (!current) {
+      buckets.set(key, {
+        date: new Date(point.date),
+        open,
+        high,
+        low,
+        close: point.close,
+        volume: isFiniteNumber(point.volume) ? point.volume : undefined,
+        integrity: point.integrity,
+      });
+      continue;
+    }
+    current.date = new Date(point.date);
+    current.high = Math.max(current.high, high);
+    current.low = Math.min(current.low, low);
+    current.close = point.close;
+    if (point.integrity) current.integrity = current.integrity
+      ? mergePriceHistoryIntegrity(current.integrity, point.integrity) : point.integrity;
+    if (isFiniteNumber(point.volume)) current.volume = (current.volume ?? 0) + point.volume;
+  }
+  return [...buckets.values()];
+}
+
+export function extractPriceSeries(
+  priceHistory: readonly PricePoint[],
+  source: SecuritySeriesSource,
+  barSize?: ChartBarSize | null,
+  session?: HistorySession,
+): TimeSeriesPoint[] {
+  const fieldId = canonicalTimeSeriesFieldId(source.fieldId);
+  if (!isMarketFieldId(fieldId)) return [];
+  const aggregated = aggregatePriceHistory(priceHistory, source.period ?? "auto");
+  // A price on its own at the end of intraday bars (a closing auction's price) has no volume of its own, never 0.
+  const priceOnly = priceOnlyPoint(aggregated)?.index;
+  const size = chartBarSizeParts(barSize);
+  const step = barSize && (size?.unit === "m" || size?.unit === "h") && (!source.period || source.period === "auto")
+    ? chartBarSizeStepMs(barSize) : 0;
+  let sessionDay: string | undefined;
+  let sessionClose: number | null = null;
+  return aggregated.map((point, index) => {
+    // A roll is the contract changing from the bar before, which a window's first bar knows from the bars before it.
+    const before = index > 0 ? aggregated[index - 1]!.contract : undefined;
+    const { integrity, ...read } = pricePointValues(point, point.integrity);
+    const values = index === priceOnly && read.volume === 0 ? { ...read, volume: null } : read;
+    const value = fieldId === "market.open"
+      ? values.open
+      : fieldId === "market.high"
+        ? values.high
+        : fieldId === "market.low"
+          ? values.low
+          : fieldId === "market.volume"
+            ? values.volume
+            : values.close;
+    const date = new Date(point.date);
+    const start = date.getTime();
+    let end = start;
+    if (step && !point.partial && !point.quoteOnly && !point.sessionClose && index !== priceOnly) {
+      end += step;
+      if (session) {
+        const day = zonedDateKey(start, session.timeZone);
+        if (day !== sessionDay) {
+          sessionDay = day;
+          sessionClose = regularSessionCloseOn(session.exchange, day);
+        }
+        if (sessionClose != null && sessionClose > start) end = Math.min(end, sessionClose);
+      }
+    }
+    return {
+      date,
+      observedAt: new Date(point.date),
+      availableAt: new Date(end),
+      ...(end !== start ? { barStart: date } : {}),
+      value,
+      ...values,
+      // A continuous future's bar names its contract, and the source marks a bar still forming.
+      ...(point.contract ? { contract: point.contract } : {}),
+      ...(point.contract && before && point.contract !== before ? { roll: true } : {}),
+      ...(point.partial ? { partial: true } : {}),
+      provenance: { quality: "reported" as const, ...(integrity ? { priceHistoryIntegrity: integrity } : {}) },
+    };
+  });
+}
+
+export function priceHistoryIntegrityNotices(series: readonly Pick<ResolvedSeries, "label" | "points">[]): string[] {
+  return series.flatMap((entry) => {
+    const dates = new Set(entry.points.flatMap((point) => point.provenance?.priceHistoryIntegrity?.sourcePoints.map((source) => source.date) ?? []));
+    const notice = priceHistoryIntegrityNotice(dates.size);
+    return notice ? [`${entry.label}: ${notice}`] : [];
+  });
+}
+
+export function collectPriceHistoryIntegrity(
+  series: readonly Pick<ResolvedSeries, "id" | "label" | "points">[],
+  scope: ChartSeriesPriceHistoryIntegrity["scope"],
+  includeSource?: (seriesId: string, sourceTime: number) => boolean,
+): ChartSeriesPriceHistoryIntegrity[] {
+  return series.flatMap((entry) => {
+    const sources = new Map<string, PriceHistoryIntegrity["sourcePoints"][number]>();
+    for (const point of entry.points) {
+      for (const source of point.provenance?.priceHistoryIntegrity?.sourcePoints ?? []) {
+        if (!includeSource || includeSource(entry.id, Date.parse(source.date))) sources.set(JSON.stringify(source), source);
+      }
+    }
+    return sources.size ? [{
+      seriesId: entry.id, label: entry.label, scope,
+      integrity: mergePriceHistoryIntegrity({ reason: "inconsistent-ohlc", sourcePoints: [...sources.values()] }),
+    }] : [];
+  });
+}
+
+export function chartPriceHistoryIntegrityNotices(entries: readonly ChartSeriesPriceHistoryIntegrity[]): string[] {
+  const bySeries = new Map<string, { label: string; dates: Set<string> }>();
+  for (const entry of entries) {
+    const group = bySeries.get(entry.seriesId) ?? { label: entry.label, dates: new Set<string>() };
+    entry.integrity.sourcePoints.forEach((source) => group.dates.add(source.date));
+    bySeries.set(entry.seriesId, group);
+  }
+  return [...bySeries.values()].map(({ label, dates }) => `${label}: ${priceHistoryIntegrityNotice(dates.size)}`);
+}
+
+/** Pure security-source coordinator used by runtime hooks after data loading. */
+export function extractSecuritySeries(
+  financials: TickerFinancials | null,
+  source: SecuritySeriesSource,
+  currencies?: ValuationCurrencyContext,
+  barSize?: ChartBarSize | null,
+): TimeSeriesPoint[] {
+  if (!financials) return [];
+  if (isMarketFieldId(source.fieldId)) return extractPriceSeries(financials.priceHistory, source, barSize, financials.priceHistorySession);
+  if (isFundamentalFieldId(source.fieldId)) return extractFundamentalSeries(financials, source, currencies);
+  return [];
+}

@@ -1,0 +1,224 @@
+import type { ReactNode } from "react";
+import type { BrokerAdapter } from "../../types/broker";
+import type {
+  CommandBarSearchProvider,
+  CommandDef,
+  ContextMenuProviderDef,
+  CustomColumnDef,
+  KeyboardShortcut,
+  PaneDef,
+  PaneTemplateDef,
+  TickerAction,
+  TickerResearchTabDef,
+} from "../../types/plugin";
+import { withFunctionShortcutArgument } from "../shortcut-argument";
+
+export interface ContextMenuProviderEntry {
+  pluginId: string;
+  provider: ContextMenuProviderDef;
+}
+
+export interface PluginItems {
+  eventDisposers: Array<() => void>;
+  capabilityDisposers: Array<() => void>;
+  newsQueryWatchDisposers: Array<() => void>;
+}
+
+interface RegistryContributionsOptions {
+  wrapComponent: <P>(pluginId: string, component: (props: P) => ReactNode) => (props: P) => ReactNode;
+  wrapBrokerAdapter?: (broker: BrokerAdapter, pluginId: string) => BrokerAdapter;
+}
+
+/**
+ * A copy of a pane or tab whose `component` is wrapped when first read, not
+ * when registered. Built-in panes declare `get component()` so their module
+ * loads on first use; spreading the definition here would run every getter at
+ * startup and load all of them. The wrapped component is kept, so a pane keeps
+ * one component identity across renders. A plugin that passes a plain
+ * `component` takes the same path.
+ *
+ * A module that fails to load used to fail the registration. The read now
+ * happens while a pane is drawn, outside its error card, so the failure is
+ * handed back as a component that throws: the card shows it, and Reload tries
+ * the load again.
+ */
+function withLazyComponent<T extends { component: (props: never) => ReactNode }>(
+  definition: T,
+  wrap: (component: T["component"]) => T["component"],
+): T {
+  const { component: _component, ...descriptors } = Object.getOwnPropertyDescriptors(definition);
+  let wrapped: T["component"] | undefined;
+  return Object.create(Object.getPrototypeOf(definition), {
+    ...descriptors,
+    component: {
+      enumerable: true,
+      configurable: true,
+      get: () => {
+        if (wrapped) return wrapped;
+        let component: T["component"];
+        try {
+          component = definition.component;
+        } catch (error) {
+          return (() => { throw error; }) as T["component"];
+        }
+        return wrapped = wrap(component);
+      },
+    },
+  }) as T;
+}
+
+/**
+ * The id a contribution is stored under, or an error a plugin author can act on.
+ * A contribution without one would be filed under the key `undefined`, and every
+ * list that reads ids as strings would then fail for as long as the plugin loaded.
+ */
+export function requireContributionId(pluginId: string, kind: string, definition: unknown): string {
+  const fields = (definition ?? {}) as { id?: unknown; label?: unknown; name?: unknown };
+  if (typeof fields.id === "string" && fields.id !== "") return fields.id;
+  const title = [fields.label, fields.name].find((value): value is string => typeof value === "string" && value !== "");
+  const problem = fields.id === undefined || fields.id === null ? "has no id"
+    : fields.id === "" ? "has an empty id"
+      : `has an id that is not a string (${typeof fields.id})`;
+  throw new Error(
+    `Plugin "${pluginId}" registered a ${kind}${title ? ` ("${title}")` : ""} that ${problem}. `
+    + `Give every ${kind} a non-empty string \`id\`.`,
+  );
+}
+
+/** Registration and ownership change together, including explicit withdrawal. */
+class OwnedContributions<T> extends Map<string, T> {
+  readonly owners = new Map<string, string>();
+
+  register(pluginId: string, id: string, value: T, replace = false): () => void {
+    if (!replace && this.has(id)) throw new Error(`Duplicate plugin contribution id: ${id}`);
+    this.set(id, value);
+    this.owners.set(id, pluginId);
+    return () => {
+      if (this.get(id) !== value || this.owners.get(id) !== pluginId) return;
+      this.delete(id);
+      this.owners.delete(id);
+    };
+  }
+
+  ids(pluginId: string): string[] {
+    return [...this.owners].filter(([, owner]) => owner === pluginId).map(([id]) => id);
+  }
+
+  unregister(pluginId: string): void {
+    for (const id of this.ids(pluginId)) {
+      this.delete(id);
+      this.owners.delete(id);
+    }
+  }
+}
+
+export class RegistryContributions {
+  readonly pluginItems = new Map<string, PluginItems>();
+  readonly capabilityOwners = new Map<string, string>();
+
+  readonly panesMap = new OwnedContributions<PaneDef>();
+  readonly paneTemplatesMap = new OwnedContributions<PaneTemplateDef>();
+  readonly commandsMap = new OwnedContributions<CommandDef>();
+  readonly commandBarSearchProvidersMap = new OwnedContributions<CommandBarSearchProvider>();
+  readonly columnsMap = new OwnedContributions<CustomColumnDef>();
+  readonly brokersMap = new OwnedContributions<BrokerAdapter>();
+  readonly tickerResearchTabsMap = new OwnedContributions<TickerResearchTabDef>();
+  readonly shortcutsMap = new OwnedContributions<KeyboardShortcut>();
+  readonly tickerActionsMap = new OwnedContributions<TickerAction>();
+  readonly contextMenuProvidersMap = new OwnedContributions<ContextMenuProviderEntry>();
+
+  constructor(private readonly options: RegistryContributionsOptions) { }
+
+  getOrCreatePluginItems(pluginId: string): PluginItems {
+    const existing = this.pluginItems.get(pluginId);
+    if (existing) return existing;
+
+    const items: PluginItems = { eventDisposers: [], capabilityDisposers: [], newsQueryWatchDisposers: [] };
+    this.pluginItems.set(pluginId, items);
+    return items;
+  }
+
+  registerPane(pluginId: string, pane: PaneDef): void {
+    const id = requireContributionId(pluginId, "pane", pane);
+    this.panesMap.register(pluginId, id, withLazyComponent(
+      pane,
+      (component) => this.options.wrapComponent(pluginId, component),
+    ));
+  }
+
+  registerPaneTemplate(pluginId: string, template: PaneTemplateDef, replace = false): () => void {
+    const id = requireContributionId(pluginId, "pane template", template);
+    const registered = withFunctionShortcutArgument(template, this.panesMap.get(template.paneId));
+    return this.paneTemplatesMap.register(pluginId, id, registered, replace);
+  }
+
+  registerCommand(pluginId: string, command: CommandDef): void {
+    this.commandsMap.register(pluginId, requireContributionId(pluginId, "command", command), command);
+  }
+
+  registerCommandBarSearchProvider(pluginId: string, provider: CommandBarSearchProvider): () => void {
+    return this.commandBarSearchProvidersMap.register(
+      pluginId,
+      requireContributionId(pluginId, "command bar search provider", provider),
+      provider,
+    );
+  }
+
+  registerColumn(pluginId: string, column: CustomColumnDef): void {
+    this.columnsMap.register(pluginId, requireContributionId(pluginId, "column", column), column);
+  }
+
+  registerBroker(pluginId: string, broker: BrokerAdapter): void {
+    const id = requireContributionId(pluginId, "broker", broker);
+    this.brokersMap.register(pluginId, id, this.options.wrapBrokerAdapter?.(broker, pluginId) ?? broker);
+  }
+
+  registerCapability(pluginId: string, capabilityId: string): void {
+    this.capabilityOwners.set(capabilityId, pluginId);
+  }
+
+  registerTickerResearchTab(pluginId: string, tab: TickerResearchTabDef): void {
+    const id = requireContributionId(pluginId, "ticker research tab", tab);
+    this.tickerResearchTabsMap.register(pluginId, id, withLazyComponent(
+      tab,
+      (component) => this.options.wrapComponent(pluginId, component),
+    ));
+  }
+
+  registerShortcut(pluginId: string, shortcut: KeyboardShortcut): void {
+    this.shortcutsMap.register(pluginId, requireContributionId(pluginId, "shortcut", shortcut), shortcut);
+  }
+
+  registerTickerAction(pluginId: string, action: TickerAction): void {
+    this.tickerActionsMap.register(pluginId, requireContributionId(pluginId, "ticker action", action), action);
+  }
+
+  registerContextMenuProvider(pluginId: string, provider: ContextMenuProviderDef): void {
+    const id = requireContributionId(pluginId, "context menu provider", provider);
+    this.contextMenuProvidersMap.register(pluginId, `${pluginId}:${id}`, { pluginId, provider }, true);
+  }
+
+  unregister(pluginId: string): void {
+    const items = this.pluginItems.get(pluginId);
+    if (!items) return;
+
+    for (const collection of [
+      this.panesMap, this.paneTemplatesMap, this.commandsMap, this.commandBarSearchProvidersMap,
+      this.columnsMap, this.brokersMap, this.tickerResearchTabsMap, this.shortcutsMap,
+      this.tickerActionsMap, this.contextMenuProvidersMap,
+    ]) collection.unregister(pluginId);
+    for (const [id, owner] of this.capabilityOwners) {
+      if (owner === pluginId) this.capabilityOwners.delete(id);
+    }
+    let disposeError: unknown;
+    for (const dispose of [...items.eventDisposers, ...items.capabilityDisposers, ...items.newsQueryWatchDisposers]) {
+      try {
+        dispose();
+      } catch (error) {
+        disposeError ??= error;
+      }
+    }
+    this.pluginItems.delete(pluginId);
+    if (disposeError) throw disposeError;
+  }
+}

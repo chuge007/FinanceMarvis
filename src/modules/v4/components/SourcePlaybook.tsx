@@ -5,12 +5,15 @@ import {
   CADENCE_LABEL,
   CHAIN_LABEL,
   KIND_LABEL,
+  STATUS_LABEL,
   SOURCE_ENTRIES,
+  PROJECT_REGISTRY,
+  ROLE_LABEL,
   type SourceCadence,
   type SourceStatus,
 } from '../../../core/data/sourceCatalog';
 
-const CADENCES: SourceCadence[] = ['daily', 'weekly', 'monthly', 'quarterly', 'event'];
+const CADENCES: SourceCadence[] = ['intraday', 'daily', 'weekly', 'monthly', 'quarterly', 'event'];
 
 export const SourcePlaybook = memo(function SourcePlaybook() {
   const [cadence, setCadence] = useState<SourceCadence | 'all'>('all');
@@ -79,7 +82,7 @@ export const SourcePlaybook = memo(function SourcePlaybook() {
           </button>
         ))}
         <span className="mx-1 h-3 w-px bg-[#1f2430]" />
-        {(['all', 'integrated', 'external'] as const).map((item) => (
+        {(['all', 'integrated', 'external', 'planned', 'deprecated'] as const).map((item) => (
           <button
             key={item}
             onClick={() => setStatus(item)}
@@ -87,7 +90,7 @@ export const SourcePlaybook = memo(function SourcePlaybook() {
               status === item ? 'bg-[rgba(64,120,255,0.18)] text-[#d8dce6]' : 'text-[#8a8f9d] hover:bg-[rgba(255,255,255,0.04)]'
             }`}
           >
-            {item === 'all' ? '全部状态' : item === 'integrated' ? '已接入' : '外部查看'}
+            {item === 'all' ? '全部状态' : STATUS_LABEL[item]}
           </button>
         ))}
         <span className="ml-auto text-[0.75rem] text-[#4d5364]">{rows.length} 条</span>
@@ -132,7 +135,7 @@ export const SourcePlaybook = memo(function SourcePlaybook() {
                         : 'bg-[rgba(255,255,255,0.04)] text-[#8a8f9d]'
                     }`}
                   >
-                    {entry.status === 'integrated' ? '已接入' : '外部'}
+                    {STATUS_LABEL[entry.status]}
                   </span>
                 </td>
                 <td className="py-1.5 pr-2 whitespace-nowrap">
@@ -150,6 +153,52 @@ export const SourcePlaybook = memo(function SourcePlaybook() {
       <div className="mt-2 text-[0.75rem] leading-relaxed text-[#4d5364]">
         ETF 净流入与 CFTC 持仓没有免密、稳定的机器接口，本应用只给外部入口，不用成交量或价格估算冒充净流入。
         事件类（FOMC、期权到期）按需插入，不计入四档节奏。
+      </div>
+
+      {/* 全部开源项目登记：每个库都有唯一去向，重复数据按类别合并并写明原因 */}
+      <div className="mt-4 border-t border-[#1a1d26] pt-4">
+        <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+          <h4 className="text-[0.875rem] font-bold text-[#d8dce6]">全部开源项目登记 · 22 项去向</h4>
+          <span className="text-[0.75rem] text-[#4d5364]">
+            库 ≠ 数据源；同一类数据只留一个主源 + 备源，其余说明合并原因
+          </span>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[58rem] border-collapse text-[0.75rem]">
+            <thead>
+              <tr className="border-b border-[#1a1d26] text-left text-[0.6875rem] text-[#4d5364]">
+                <th className="py-1.5 pr-2 font-normal">项目</th>
+                <th className="py-1.5 pr-2 font-normal">类别</th>
+                <th className="py-1.5 pr-2 font-normal">角色</th>
+                <th className="py-1.5 pr-2 font-normal">去向</th>
+                <th className="py-1.5 font-normal">原因</th>
+              </tr>
+            </thead>
+            <tbody>
+              {PROJECT_REGISTRY.map((p) => (
+                <tr key={p.name} className="border-b border-[#131620] align-top hover:bg-[rgba(255,255,255,0.015)]">
+                  <td className="py-1.5 pr-2 whitespace-nowrap text-[#cfd6e4]">{p.name}</td>
+                  <td className="py-1.5 pr-2 whitespace-nowrap text-[#8a8f9d]">{p.category}</td>
+                  <td className="py-1.5 pr-2 whitespace-nowrap">
+                    <span
+                      className={`rounded px-1.5 py-0.5 text-[0.75rem] ${
+                        p.role === 'primary'
+                          ? 'bg-[rgba(12,166,120,0.12)] text-[#0ca678]'
+                          : p.role === 'tool' || p.role === 'external-only'
+                            ? 'bg-[rgba(255,255,255,0.04)] text-[#8a8f9d]'
+                            : 'bg-[rgba(245,158,75,0.12)] text-[#f59e4b]'
+                      }`}
+                    >
+                      {ROLE_LABEL[p.role]}
+                    </span>
+                  </td>
+                  <td className="py-1.5 pr-2 text-[#b0b5c0]">{p.destination}</td>
+                  <td className="py-1.5 leading-relaxed text-[#636878]">{p.reason}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   );

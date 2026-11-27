@@ -1,0 +1,57 @@
+# Run black formatting check + the mocked unit test suite on pull requests and
+# pushes to master. Deliberately does NOT run the `live`/`ultimate` markers --
+# those need a real FMP_API_KEY and spend real API quota, so they stay a
+# manual/local step, not CI. (This replaced the old black.yml, which was
+# mislabeled "--check mode" but actually ran `isort . && black .` with no
+# --check flag -- it silently reformatted in the ephemeral runner and never
+# failed the build. This workflow's black step is a real gate.)
+name: CI
+on: [push, pull_request]
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.12"]
+    steps:
+    - uses: actions/checkout@v3
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v3
+      with:
+        python-version: ${{ matrix.python-version }}
+    - name: Install dependencies
+      run: |
+        set -xe
+        python -VV
+        python -m pip install --upgrade pip
+        pip install .
+        pip install black pytest requests-mock python-dotenv pytest-recording
+    - name: Check formatting
+      run: black --check fmpsdk/
+    - name: Run unit tests
+      run: pytest -m unit
+
+  # The GitHub-only MCP server (mcp/) and the generated artifacts it shares with
+  # tools/. Separate job: needs Python 3.10+ (fastmcp) and its own deps.
+  mcp:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - name: Set up Python
+      uses: actions/setup-python@v3
+      with:
+        python-version: "3.12"
+    - name: Install dependencies
+      run: |
+        set -xe
+        python -m pip install --upgrade pip
+        pip install . ./mcp
+        pip install black pytest
+    - name: Check formatting
+      run: black --check mcp/ tools/
+    - name: Generated artifacts are in sync with the source
+      run: |
+        python tools/gen_tiers.py --check
+        python tools/gen_openapi.py --check
+    - name: Run mcp test suite
+      run: pytest mcp/tests

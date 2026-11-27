@@ -1,0 +1,1218 @@
+import type { TickerRecord } from "../../types/ticker";
+import { logFailure } from "../../utils/log-failure";
+import { shellWord } from "../../utils/shell-word";
+import { commands as builtInCommands, getCommandPrefixes } from "../../components/command-bar/commands/registry";
+import type { HeadlessPaneDefinition, PaneDef, PaneTemplateCreateOptions, PaneTemplateDef } from "../../types/plugin";
+import type { MarketContext } from "../types";
+import {
+  buildCreateOptions,
+  normalizeLookupToken,
+  type ParsedPaneCatalogArgs,
+} from "./options";
+import {
+  getHeadlessPaneDefinition,
+  getPaneFunctionCapability,
+  MAX_INLINE_CHOICES,
+  optionChoices,
+  optionFlag,
+  optionFlags,
+  paneFunctionArgument,
+  type PaneFunctionCapability,
+  type PaneFunctionOptionDef,
+  type PaneFunctionReadiness,
+} from "./capabilities";
+import {
+  cliStyles,
+  cliTerminalWidth,
+  renderDefinitions,
+  renderSection,
+  renderStats,
+  renderTable,
+  wrapCommandLine,
+  wrapText,
+  type CliStatEntry,
+} from "../../utils/cli-output";
+import { glossaryFunctionsNamed, glossaryNamesFunction, renderGlossaryEntries, type GlossaryLookup } from "../glossary";
+import { renderSeriesMatches, type SeriesMatch } from "../series-search";
+import { typoDistance } from "../../utils/typo-distance";
+import { FUNCTION_HELP } from "./function-help";
+import { functionQueryTerms as queryTerms, matchesFunctionPhrase as containsPhrase } from "../../utils/function-search";
+import { ratesQuestionFunctions } from "./rates-question";
+import { tickerQuestion, type TickerQuestion } from "./ticker-question";
+import { quotedSearchCommand } from "../commands/news-search";
+
+/**
+ * The `news` search for words no function matches (`catalog hurricane`):
+ * one word quoted so `news` searches the stories rather than a ticker, several
+ * as typed in one pair of quotes.
+ */
+function catalogNewsCommand(query: string): string {
+  const words = query.trim().replace(/\s+/g, " ").replace(/["']/g, "");
+  return /\s/.test(words) ? `gloom news "${words}"` : quotedSearchCommand(words.toLowerCase());
+}
+
+export interface PaneFunctionCatalog {
+  panes: ReadonlyMap<string, PaneDef>;
+  paneTemplates: ReadonlyMap<string, PaneTemplateDef>;
+  destroy(): void;
+}
+
+export interface PaneCatalogEntry {
+  token: string;
+  label: string;
+  description: string;
+  paneId: string;
+  paneName: string;
+  templateId?: string;
+  shortcut?: string;
+  /** Other mnemonics that open the same function (IMAP for BI). */
+  aliases: string[];
+  argKind?: string;
+  argPlaceholder?: string;
+  /** Arguments the examples show it with, past the placeholder (`GAS`, `EUA` for EPWR). */
+  argExamples?: readonly string[];
+  /** What `shot` takes when the pane shows one ticker but the report ranks several (DVD). */
+  shotArgument?: string;
+  keywords: string[];
+  defaultSettings: Record<string, unknown>;
+  capability: PaneFunctionCapability;
+}
+
+export function buildTemplateContext(context: MarketContext, symbol: string | null) {
+  return {
+    config: context.config,
+    layout: context.config.layout,
+    focusedPaneId: null,
+    activeTicker: symbol,
+    activeCollectionId: null,
+  };
+}
+
+/**
+ * The command-bar mnemonic and aliases of a pane that has no template but is
+ * opened by the built-in command of the same id (HELP, LAY).
+ */
+function builtInPanePrefixes(paneId: string): string[] {
+  const command = builtInCommands.find((candidate) => candidate.id === paneId);
+  return command ? getCommandPrefixes(command) : [];
+}
+
+/** A template with no code, by its name as one word (`x-feed` for X Feed), which `fn` reads as its name. */
+function templateNameToken(template: PaneTemplateDef): string {
+  return template.label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || template.id;
+}
+
+/**
+ * What a user types for a function, as the catalog lists it and every error names it: a template's
+ * shortcut or, with none, its name (`story`, not its id `news-story-pane`) unless that name opens
+ * another function first, a pane opened by a built-in command (LAY) by that command's mnemonic,
+ * else the pane's id.
+ */
+export function paneFunctionCode(template: PaneTemplateDef | undefined, pane: PaneDef, registry: PaneFunctionCatalog): string {
+  if (template) {
+    if (template.shortcut?.prefix) return template.shortcut.prefix;
+    // A name another function answers to first opens that one: the template's id, which only it answers to, is its code then.
+    const name = templateNameToken(template);
+    return buildPaneFunctionLookup(registry).get(normalizeLookupToken(name)) === template ? name : template.id;
+  }
+  return builtInPanePrefixes(pane.id)[0] ?? pane.id;
+}
+
+/**
+ * Panes that a template with no code opens in the app and the command line has
+ * nothing to show for: the app's own debug log, and a team's page and its
+ * unread chat, which a capture does not read. `catalog` leaves them out; `fn`
+ * and `shot` still open them by name and say why they are empty.
+ */
+const APP_ONLY_PANE_IDS = new Set(["debug", "team", "unread-inbox"]);
+
+/**
+ * Whether `catalog` lists a template with no code: not when its pane is one
+ * the command line has nothing to show for, nor when another template lists
+ * the pane under a code (New Portfolio Pane creates a list PF shows).
+ */
+function listsUncodedTemplate(template: PaneTemplateDef, codedPaneIds: ReadonlySet<string>): boolean {
+  return !APP_ONLY_PANE_IDS.has(template.paneId) && !codedPaneIds.has(template.paneId);
+}
+
+function registerResolverToken(
+  lookup: Map<string, PaneTemplateDef | PaneDef>,
+  token: string | undefined,
+  value: PaneTemplateDef | PaneDef,
+) {
+  if (!token) return;
+  const normalized = normalizeLookupToken(token);
+  if (!normalized || lookup.has(normalized)) return;
+  lookup.set(normalized, value);
+}
+
+export function buildPaneFunctionLookup(registry: PaneFunctionCatalog): Map<string, PaneTemplateDef | PaneDef> {
+  const lookup = new Map<string, PaneTemplateDef | PaneDef>();
+  // Shortcut prefixes first: "AI" must open the pane that owns the shortcut, not
+  // one that happens to list "ai" as a keyword.
+  for (const template of registry.paneTemplates.values()) {
+    registerResolverToken(lookup, template.shortcut?.prefix, template);
+  }
+  for (const template of registry.paneTemplates.values()) {
+    for (const alias of template.shortcut?.aliases ?? []) registerResolverToken(lookup, alias, template);
+  }
+  for (const pane of registry.panes.values()) {
+    for (const prefix of builtInPanePrefixes(pane.id)) registerResolverToken(lookup, prefix, pane);
+  }
+  for (const template of registry.paneTemplates.values()) {
+    registerResolverToken(lookup, template.id, template);
+    registerResolverToken(lookup, template.label, template);
+    for (const keyword of template.keywords ?? []) registerResolverToken(lookup, keyword, template);
+  }
+
+  for (const pane of registry.panes.values()) {
+    registerResolverToken(lookup, pane.id, pane);
+    registerResolverToken(lookup, pane.name, pane);
+  }
+
+  for (const template of registry.paneTemplates.values()) {
+    const pane = registry.panes.get(template.paneId);
+    if (!pane) continue;
+    const discovery = getHeadlessPaneDefinition(template, pane)?.discovery;
+    registerResolverToken(lookup, discovery?.id, template);
+    for (const alias of discovery?.aliases ?? []) registerResolverToken(lookup, alias, template);
+  }
+
+  return lookup;
+}
+
+/** What a function takes after its code, as the catalog writes it: `<ticker>`, `<fund, ticker, or CIK>`, or nothing. */
+function argumentHint({ argKind, argPlaceholder }: Pick<PaneCatalogEntry, "argKind" | "argPlaceholder">): string {
+  if (argPlaceholder) return `<${argPlaceholder}>`;
+  return argKind && argKind !== "none" ? `<${argKind}>` : "";
+}
+
+/** A command-line token that is the code or an alias of a function, with what the function takes. */
+export interface FunctionCode {
+  argument: string;
+}
+
+/**
+ * Whether `token` is the code or an alias of a function (`OVDV`, `EEO`), in any
+ * case: the function `fn` opens for it, not one it merely matches by a keyword
+ * or a label.
+ */
+export function findFunctionCode(registry: PaneFunctionCatalog, token: string): FunctionCode | null {
+  const wanted = normalizeLookupToken(token);
+  const found = wanted ? buildPaneFunctionLookup(registry).get(wanted) : undefined;
+  if (!found || !("paneId" in found && "description" in found)) return null;
+  const pane = registry.panes.get(found.paneId);
+  const headless = pane ? getHeadlessPaneDefinition(found, pane) : undefined;
+  const codes = [
+    found.shortcut?.prefix,
+    ...(found.shortcut?.aliases ?? []),
+    headless?.discovery?.id,
+    ...(headless?.discovery?.aliases ?? []),
+  ];
+  if (!codes.some((code) => code && normalizeLookupToken(code) === wanted)) return null;
+  const argument = pane ? paneFunctionArgument(found, pane) : { kind: found.shortcut?.argKind, placeholder: found.shortcut?.argPlaceholder };
+  return { argument: argumentHint({ argKind: argument.kind, argPlaceholder: argument.placeholder }) };
+}
+
+/** A function code a typed one is a slip away from: what to type, and the function's name. */
+export interface NearFunctionCode {
+  code: string;
+  label: string;
+}
+
+/** Typed names shorter than this are too short for one slip to leave them recognisable (`HQ` is a slip from a dozen codes). */
+const MIN_CODE_TYPO_LENGTH = 3;
+/**
+ * A word typed as a command is as likely a ticker as a slip from a code
+ * (`PLTR`, `META`, `QQQ`): it is read as a slip only from this length and
+ * when its first letter is the code's.
+ */
+const MIN_COMMAND_WORD_TYPO_LENGTH = 4;
+/** Near codes an unknown one is answered with; more than this many is no suggestion. */
+const NEAR_CODE_LIMIT = 3;
+
+/**
+ * The function codes one slip of the keys from a name that opens no function
+ * (a letter swapped, missing, extra or wrong: `RCDF` for RDCF, `HPP` for HP),
+ * among the mnemonics the command bar takes, each named by the code it is
+ * near (`DES` for Ticker Research, whose code is T). Empty when none is that
+ * close, the name is too short to tell, or so many are that none stands out.
+ * A word typed as a command (`commandWord`, `gloom RCDF PLTR`) is held to
+ * MIN_COMMAND_WORD_TYPO_LENGTH and the code's first letter, so a ticker typed
+ * there is not taken for a code.
+ */
+export function nearFunctionCodes(
+  registry: PaneFunctionCatalog,
+  name: string,
+  { commandWord = false }: { commandWord?: boolean } = {},
+): NearFunctionCode[] {
+  const wanted = normalizeLookupToken(name);
+  if (wanted.length < (commandWord ? MIN_COMMAND_WORD_TYPO_LENGTH : MIN_CODE_TYPO_LENGTH)) return [];
+  const near = new Map<PaneTemplateDef, string>();
+  for (const template of registry.paneTemplates.values()) {
+    const prefix = template.shortcut?.prefix;
+    // An unlisted function is never offered for a typo.
+    if (!prefix || template.listed === false) continue;
+    const code = [prefix, ...template.shortcut?.aliases ?? []].find((candidate) => {
+      const known = normalizeLookupToken(candidate);
+      return (!commandWord || known[0] === wanted[0]) && typoDistance(wanted, known) === 1;
+    });
+    if (code) near.set(template, code.toUpperCase());
+  }
+  if (near.size > NEAR_CODE_LIMIT) return [];
+  return [...near].map(([template, code]) => ({ code, label: template.label }))
+    .sort((left, right) => left.code.localeCompare(right.code));
+}
+
+/**
+ * The functions a word that is no code asks for (`IVOL`, `IV`: HIVG and
+ * OVDV), as their `discovery.suggestFor` lists it, or the glossary term it
+ * names is shown by (`VAR`, `drawdown`: MARS and PORT), each by its code.
+ */
+export function suggestedFunctionCodes(registry: PaneFunctionCatalog, name: string): NearFunctionCode[] {
+  const wanted = normalizeLookupToken(name);
+  if (!wanted) return [];
+  // A term many functions show (a percentile) names none of them in particular: the catalog search lists those.
+  const named = glossaryFunctionsNamed(name);
+  const showing = new Set(named.length <= NEAR_CODE_LIMIT ? named : []);
+  return [...registry.paneTemplates.values()].flatMap((template) => {
+    if (template.listed === false) return [];
+    const pane = registry.panes.get(template.paneId);
+    const words = pane ? getHeadlessPaneDefinition(template, pane)?.discovery?.suggestFor ?? [] : [];
+    const code = template.shortcut?.prefix;
+    const shows = [code, ...template.shortcut?.aliases ?? []].some((candidate) => !!candidate && showing.has(candidate.toUpperCase()));
+    return code && (shows || words.some((word) => normalizeLookupToken(word) === wanted))
+      ? [{ code: code.toUpperCase(), label: template.label }] : [];
+  }).sort((left, right) => left.code.localeCompare(right.code));
+}
+
+function sampleArgForTemplate(template: PaneTemplateDef): string {
+  switch (template.shortcut?.argKind) {
+    case "ticker":
+      return "AAPL";
+    case "ticker-list":
+      return "AAPL,MSFT";
+    case "text":
+      return "sample";
+    default:
+      return "";
+  }
+}
+
+/**
+ * A template's catalog entry. Without a market context (a search from the app,
+ * `functionsForQuestion`) no instance is made to read its default settings
+ * from, and no example is given: only what the template itself says.
+ */
+async function buildTemplateCatalogEntry(
+  template: PaneTemplateDef,
+  pane: PaneDef,
+  context: MarketContext | null,
+  token: string,
+  listName?: string | null,
+): Promise<PaneCatalogEntry> {
+  const sampleArg = sampleArgForTemplate(template);
+  const createOptions: PaneTemplateCreateOptions | undefined = buildCreateOptions(template, sampleArg);
+  const primarySymbol = createOptions?.symbol ?? createOptions?.symbols?.[0] ?? null;
+  let defaultSettings: Record<string, unknown> = template.catalogSettings ?? {};
+
+  if (context && template.catalogSettings === undefined && template.createInstance) {
+    try {
+      const spec = await template.createInstance(buildTemplateContext(context, primarySymbol), createOptions);
+      defaultSettings = spec?.settings ?? {};
+    } catch (error) {
+      logFailure("cli-catalog", "Read template default settings failed")(error);
+      defaultSettings = {};
+    }
+  }
+
+  const headless = getHeadlessPaneDefinition(template, pane);
+  const argument = paneFunctionArgument(template, pane);
+  return {
+    token,
+    label: template.label,
+    description: template.description,
+    paneId: pane.id,
+    paneName: pane.name,
+    templateId: template.id,
+    shortcut: template.shortcut?.prefix,
+    aliases: [...(template.shortcut?.aliases ?? [])],
+    argKind: argument.kind,
+    argPlaceholder: argument.placeholder,
+    ...context ? argExamples(headless, context, pane, listName) : null,
+    ...(headless?.argument.kind === "tickers" && template.shortcut?.argKind === "ticker"
+      ? { shotArgument: argumentHint({ argKind: "ticker", argPlaceholder: template.shortcut.argPlaceholder }) } : {}),
+    keywords: template.keywords ?? [],
+    defaultSettings,
+    capability: getPaneFunctionCapability(template, pane),
+  };
+}
+
+/**
+ * The arguments a function's examples show past its placeholder: its own, and
+ * for a list of more than two symbols, a list's name, which stands for its
+ * symbols: the reader's first watchlist or portfolio that holds any
+ * (`listName`), so the example runs as printed.
+ */
+function argExamples(
+  headless: HeadlessPaneDefinition | undefined,
+  context: MarketContext,
+  pane?: PaneDef,
+  listName: string | null = context.config.watchlists[0]?.name ?? "Watchlist",
+): { argExamples: readonly string[] } | null {
+  // A rendered view's own examples (VIEW's spec) stand where a headless model would give them.
+  const own = headless?.argument.examples ?? pane?.reportArgument?.examples ?? [];
+  const argument = headless?.argument;
+  const list = (argument?.kind === "symbol-list" || argument?.kind === "tickers") && (argument.maximum == null || argument.maximum > 2);
+  const examples = list && listName ? [...own, shellWord(listName)] : own;
+  return examples.length > 0 ? { argExamples: examples } : null;
+}
+
+/** The first watchlist, else portfolio, that holds a symbol: the list a function's example names. Null when none does. */
+export async function exampleListName(context: Pick<MarketContext, "config" | "store">): Promise<string | null> {
+  const tickers = await Promise.resolve().then(() => context.store.loadAllTickers())
+    .catch(logFailure("cli-catalog", "Read the lists for an example failed", [] as TickerRecord[]));
+  const watchlist = context.config.watchlists.find((list) => tickers.some((ticker) => ticker.metadata.watchlists.includes(list.id)));
+  const portfolio = watchlist ? null : context.config.portfolios.find((list) => tickers.some((ticker) => ticker.metadata.portfolios.includes(list.id)
+    || ticker.metadata.positions.some((position) => position.portfolio === list.id && position.shares !== 0)));
+  return (watchlist ?? portfolio)?.name ?? null;
+}
+
+/**
+ * The functions `gloom catalog` and search list. An unlisted one (`listed:
+ * false`) is left out, and its pane is not listed in its place; `unlisted`
+ * keeps it, for its own help (`fn ATTN --help`). `appPanes` keeps the
+ * templates with no code `listsUncodedTemplate` leaves out, for the UI audits
+ * that picture every pane the app opens.
+ */
+export async function buildPaneCatalogEntries(
+  registry: PaneFunctionCatalog,
+  context: MarketContext | null,
+  { unlisted = false, appPanes = false }: { unlisted?: boolean; appPanes?: boolean } = {},
+): Promise<PaneCatalogEntry[]> {
+  const entries: PaneCatalogEntry[] = [];
+  // Read once, when an example first needs it.
+  let listName: Promise<string | null> | undefined;
+  const templatedPaneIds = new Set<string>();
+  const codedPaneIds = new Set([...registry.paneTemplates.values()]
+    .filter((template) => template.shortcut?.prefix && template.listed !== false)
+    .map((template) => template.paneId));
+
+  for (const template of registry.paneTemplates.values()) {
+    const pane = registry.panes.get(template.paneId);
+    if (!pane) continue;
+    templatedPaneIds.add(pane.id);
+    if (template.listed === false && !unlisted) continue;
+    const forUsers = !!template.shortcut?.prefix || listsUncodedTemplate(template, codedPaneIds);
+    if (!forUsers && !unlisted && !appPanes) continue;
+    // A template only the UI audits list keeps the id an older catalog listed it by, so a base and a head picture it under one name.
+    const token = forUsers || unlisted ? paneFunctionCode(template, pane, registry) : template.id;
+    listName ??= context ? exampleListName(context) : Promise.resolve(null);
+    entries.push(await buildTemplateCatalogEntry(template, pane, context, token, await listName));
+  }
+
+  for (const pane of registry.panes.values()) {
+    if (templatedPaneIds.has(pane.id)) continue;
+    const [shortcut, ...aliases] = builtInPanePrefixes(pane.id);
+    const argument = paneFunctionArgument(undefined, pane);
+    entries.push({
+      token: paneFunctionCode(undefined, pane, registry),
+      label: pane.name,
+      description: `Open the ${pane.name} pane.`,
+      paneId: pane.id,
+      paneName: pane.name,
+      shortcut,
+      aliases,
+      argKind: argument.kind,
+      argPlaceholder: argument.placeholder,
+      ...context ? argExamples(pane.headless, context, pane, await (listName ??= exampleListName(context))) : null,
+      keywords: [],
+      defaultSettings: {},
+      capability: getPaneFunctionCapability(undefined, pane),
+    });
+  }
+
+  return entries.sort((left, right) => left.token.localeCompare(right.token));
+}
+
+/** Whether the whole query names a glossary term the function shows (`VaR` for MARS), by its code or an alias (DES for T). */
+function namesShownTerm(entry: Pick<PaneCatalogEntry, "token" | "shortcut" | "aliases">, query: string): boolean {
+  return [entry.token, entry.shortcut, ...entry.aliases].some((code) => !!code && glossaryNamesFunction(code, query));
+}
+
+// A multi-word query ranks a function carrying the whole phrase in its name or keywords first, then in its
+// description, then one carrying every word in its name or description, then every word counting its flags;
+// the rest rank by how many words they match.
+const PHRASE_IN_NAME_BAND = 4000;
+const PHRASE_IN_DESCRIPTION_BAND = 3000;
+const ALL_WORDS_BAND = 2000;
+const ALL_WORDS_WITH_FLAGS_BAND = 1000;
+const PER_MATCHED_WORD = 100;
+/** Loose matches (no function carries every word) listed before the rest are left to a refined query. */
+const LOOSE_MATCH_LIMIT = 5;
+/** Loose matches a word of the query names (in the function's code, name or aliases) are all listed, up to this many. */
+const LOOSE_NAMED_LIMIT = 8;
+/** A query word found in what the function is called (its code, name or aliases) outweighs one found in its keywords or description. */
+const PER_WORD_IN_NAME = 3;
+/** A query word that begins a function's code (`vol` for VOLS, `fx` for FXC) is the start of typing it. */
+const PER_WORD_STARTING_CODE = 3;
+/** A query word that is one of the function's own keywords (`vol` for the volatility functions, which also say volume's) names it. */
+const PER_WORD_IS_KEYWORD = 3;
+
+function phraseBand(entry: PaneCatalogEntry, phrase: string): number {
+  const lower = (values: Array<string | undefined>) => values
+    .filter((value): value is string => !!value).map((value) => value.toLowerCase().replace(/\s+/g, " "));
+  const names = lower([entry.token, entry.label, entry.paneName, entry.shortcut, ...entry.aliases, ...entry.keywords, ...entry.capability.aliases]);
+  if (names.some((name) => containsPhrase(name, phrase))) return PHRASE_IN_NAME_BAND;
+  const descriptions = lower([entry.description, ...entry.capability.intents]);
+  return descriptions.some((description) => containsPhrase(description, phrase)) ? PHRASE_IN_DESCRIPTION_BAND : 0;
+}
+
+/** The texts that say what a function is called and does, apart from its flags, each on its own. */
+function nameAndDescriptionFields(entry: PaneCatalogEntry): string[] {
+  return [
+    entry.token,
+    entry.label,
+    entry.description,
+    entry.paneId,
+    entry.paneName,
+    entry.templateId,
+    entry.shortcut,
+    ...entry.aliases,
+    ...entry.keywords,
+    ...entry.capability.aliases,
+    ...entry.capability.intents,
+    ...entry.capability.opens?.flatMap((opening) => opening.words) ?? [],
+  ].filter((value): value is string => !!value).map((value) => value.toLowerCase());
+}
+
+/** What a function is called and says it does, apart from its flags. */
+function nameAndDescription(entry: PaneCatalogEntry): string {
+  return nameAndDescriptionFields(entry).join(" ");
+}
+
+/** What a function is called: its code, name and aliases, apart from the keywords and description that say what it covers. */
+function identityFields(entry: PaneCatalogEntry): string[] {
+  return [entry.token, entry.label, entry.paneName, entry.shortcut, ...entry.aliases]
+    .filter((value): value is string => !!value).map((value) => value.toLowerCase().replace(/\s+/g, " "));
+}
+
+function flagText(entry: PaneCatalogEntry): string {
+  return [
+    entry.argKind,
+    entry.argPlaceholder,
+    entry.capability.outputKind,
+    ...entry.capability.options.flatMap((option) => [
+      option.description,
+      ...(option.values ?? []).flatMap((value) => [value.value, ...(value.aliases ?? [])]),
+    ]),
+    ...Object.keys(entry.defaultSettings),
+  ].filter((value): value is string => !!value).join(" ").toLowerCase();
+}
+
+interface CatalogMatchScore {
+  score: number;
+  /** The words of the query. */
+  terms: number;
+  /** Those found in the function's name, keywords or description. */
+  named: number;
+  /** Those found in what the function is called: its code, name or aliases. */
+  called: number;
+}
+
+/** How catalog matches are scored; `glossary: false` leaves out the glossary terms a function shows, as search did before them. */
+interface CatalogScoring {
+  glossary?: boolean;
+}
+
+/** A query that is, whole, a term a function shows (`VaR`) outweighs it starting a word of a description (`variance`). */
+const SHOWN_TERM_SCORE = 20;
+
+function scorePaneCatalogEntry(entry: PaneCatalogEntry, query: string, { glossary = true }: CatalogScoring = {}): CatalogMatchScore {
+  const terms = queryTerms(query);
+  if (terms.length === 0) return { score: 1, terms: 0, named: 0, called: 0 };
+  const none = { score: 0, terms: terms.length, named: 0, called: 0 };
+
+  const exactTokens = [
+    entry.token,
+    entry.shortcut,
+    ...entry.aliases,
+    ...entry.capability.suggestFor ?? [],
+    ...entry.capability.opens?.flatMap((opening) => opening.words) ?? [],
+    entry.templateId,
+    entry.paneId,
+  ].filter((value): value is string => !!value).map((value) => normalizeLookupToken(value));
+  const flagKeys = entry.capability.options
+    .flatMap((option) => [option.key, ...(option.aliases ?? [])]).map((value) => normalizeLookupToken(value));
+  // A value one of its options takes names the function as a flag's own name does: `compounders` is EQS's preset.
+  const flagValues = new Set(entry.capability.options.flatMap((option) => (option.values ?? [])
+    .flatMap((value) => [value.value, ...(value.aliases ?? [])])).map((value) => normalizeLookupToken(value)));
+  const named = nameAndDescription(entry);
+  const flags = flagText(entry);
+  const wholeQuery = query.toLowerCase().trim().replace(/\s+/g, " ");
+  const called = identityFields(entry);
+  // A word that opens one case of the function (CTM's `VX`) is typed as its code is.
+  const codes = [entry.token, entry.shortcut, ...entry.aliases, ...entry.capability.opens?.flatMap((opening) => opening.words) ?? []]
+    .filter((value): value is string => !!value).map((value) => normalizeLookupToken(value));
+
+  let score = containsPhrase(`${named} ${flags}`, wholeQuery) ? 12 : 0;
+  // A query that is one of the function's own keywords ("hedge" for OSA) beats one found inside a
+  // longer keyword ("hedge funds" for 13F).
+  const keywords = [entry.label, ...entry.keywords, ...entry.capability.aliases]
+    .filter((value): value is string => !!value).map((value) => value.toLowerCase().replace(/\s+/g, " "));
+  if (keywords.includes(wholeQuery)) score += 4;
+  let matchedTerms = 0;
+  let matchedNamed = 0;
+  let matchedCalled = 0;
+  let matchedFlagKeys = 0;
+  for (const term of terms) {
+    const normalized = normalizeLookupToken(term);
+    if (called.some((field) => containsPhrase(field, term))) {
+      score += PER_WORD_IN_NAME;
+      matchedCalled += 1;
+    }
+    if (codes.some((code) => normalized.length >= 2 && code.startsWith(normalized))) score += PER_WORD_STARTING_CODE;
+    if (keywords.includes(term)) score += PER_WORD_IS_KEYWORD;
+    // A term starts a word: "rate" is found in "rates" but not in "separate", nor "budget" in "budgetBps".
+    if (exactTokens.includes(normalized)) {
+      score += 8;
+      matchedNamed += 1;
+    } else if (containsPhrase(named, term)) {
+      score += 2;
+      matchedNamed += 1;
+    } else if (normalized !== term && named.includes(normalized)) {
+      score += 1;
+      matchedNamed += 1;
+    } else if (flagKeys.includes(normalized) || flagValues.has(normalized)) {
+      score += 2;
+      matchedFlagKeys += 1;
+    } else if (containsPhrase(flags, term)) {
+      score += 1;
+    } else {
+      continue;
+    }
+    matchedTerms += 1;
+  }
+
+  // The whole query naming a term the function shows (`VaR`, `value at risk`, `expected shortfall` for MARS and PORT)
+  // names the function, every word of it found, where its own words do not already (`beta` is in PORT's keywords,
+  // `trade` in PF's description: those rank as they did). A word of a longer query, or a loose alias, names nothing.
+  if (glossary && matchedNamed < terms.length && namesShownTerm(entry, query)) {
+    score += SHOWN_TERM_SCORE;
+    matchedTerms = terms.length;
+    matchedNamed = terms.length;
+  }
+  if (matchedTerms === 0) return none;
+  // The whole query a value an option takes (GF's `operating margin` metric) is a name the function answers to.
+  const valueNamed = terms.length > 1 && flagValues.has(normalizeLookupToken(wholeQuery));
+  if (valueNamed) matchedNamed = terms.length;
+  // Words found only in a function's flags make a match when they are a flag's own name ("expiration") or,
+  // together, cover the whole query ("funding rate" in two flags); one stray word in a flag's description
+  // ("budget" in OSA's hedge budget) does not.
+  if (matchedNamed === 0 && matchedFlagKeys === 0 && (terms.length === 1 || matchedTerms < terms.length)) return none;
+  score += Math.round((matchedTerms / terms.length) * 8);
+  if (entry.capability.botSafe) score += 2;
+  // One word has no phrase to prefer: it keeps the plain term scores.
+  if (terms.length === 1) return { score, terms: 1, named: matchedNamed, called: matchedCalled };
+  const allWords = matchedNamed === terms.length ? ALL_WORDS_BAND : matchedTerms === terms.length ? ALL_WORDS_WITH_FLAGS_BAND : 0;
+  return {
+    score: score + matchedTerms * PER_MATCHED_WORD + (phraseBand(entry, wholeQuery) || allWords),
+    terms: terms.length,
+    named: matchedNamed,
+    called: matchedCalled,
+  };
+}
+
+/**
+ * Whether a function matches a query only loosely: none of its words is in
+ * what the function is called (its code, name or aliases), nor is the query
+ * a word the function answers to (`suggestFor`). `catalog managers` finding
+ * ECO through "purchasing managers' index" is one.
+ */
+function isClosestCatalogMatch(entry: PaneCatalogEntry, query: string): boolean {
+  const pointed = [...entry.capability.suggestFor ?? [], ...entry.capability.opens?.flatMap((opening) => opening.words) ?? []]
+    .map((value) => normalizeLookupToken(value));
+  if (pointed.includes(normalizeLookupToken(query))) return false;
+  return scorePaneCatalogEntry(entry, query).called === 0;
+}
+
+function rankPaneCatalogEntries(entries: PaneCatalogEntry[], query: string, scoring: CatalogScoring = {}): PaneCatalogEntry[] {
+  return entries
+    .map((entry) => ({ entry, score: scorePaneCatalogEntry(entry, query, scoring).score }))
+    .filter(({ score }) => score > 0)
+    .sort((left, right) => right.score - left.score || left.entry.token.localeCompare(right.entry.token))
+    .map(({ entry }) => entry);
+}
+
+/** The shortest word start a fused query is cut into, and the shortest query that is cut. */
+const FUSED_PART_MIN = 3;
+
+/**
+ * Whether one of the function's texts has `head` and `tail` as the starts of two words in a row ("vol surf" in
+ * "implied volatility surface"), the way a name typed without its space is written. The two words may sit
+ * anywhere in the name and description, but not apart: "baltic" cut into "bal" and "tic" is not the
+ * "balance sheet" and the "ticker" of Financial Analysis.
+ */
+function hasConsecutiveWordStarts(entry: PaneCatalogEntry, head: string, tail: string): boolean {
+  const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const consecutive = new RegExp(`(^|[^a-z0-9])${escape(head)}[a-z0-9]*[^a-z0-9]+${escape(tail)}`);
+  return nameAndDescriptionFields(entry).some((field) => consecutive.test(field));
+}
+
+/**
+ * Two words typed as one ("volsurf" for Volatility Surface) match the functions that carry both
+ * words in a row, found by cutting the query into two word starts.
+ */
+function fusedQueryMatches(entries: PaneCatalogEntry[], query: string, scoring: CatalogScoring): PaneCatalogEntry[] {
+  const word = query.trim().toLowerCase();
+  if (/\s/.test(word)) return [];
+  for (let cut = FUSED_PART_MIN; cut <= word.length - FUSED_PART_MIN; cut += 1) {
+    const [head, tail] = [word.slice(0, cut), word.slice(cut)];
+    const split = `${head} ${tail}`;
+    const ranked = rankPaneCatalogEntries(entries, split, scoring);
+    const { shown, loose } = selectPaneCatalogMatches(ranked, split, ranked.length, scoring);
+    const written = loose ? [] : shown.filter((entry) => hasConsecutiveWordStarts(entry, head, tail));
+    if (written.length > 0) return written;
+  }
+  return [];
+}
+
+export function filterPaneCatalogEntries(entries: PaneCatalogEntry[], query: string, scoring: CatalogScoring = {}): PaneCatalogEntry[] {
+  const ranked = rankPaneCatalogEntries(entries, query, scoring);
+  return ranked.length > 0 ? ranked : fusedQueryMatches(entries, query, scoring);
+}
+
+/** Whether two words differ by one letter: one added, dropped, changed, or two neighbours swapped. */
+function oneLetterApart(a: string, b: string): boolean {
+  if (a === b || Math.abs(a.length - b.length) > 1) return false;
+  let start = 0;
+  while (start < a.length && start < b.length && a[start] === b[start]) start += 1;
+  const [restA, restB] = [a.slice(start), b.slice(start)];
+  if (restA.length === restB.length) return restA.slice(1) === restB.slice(1)
+    || restA.length >= 2 && restA[0] === restB[1] && restA[1] === restB[0] && restA.slice(2) === restB.slice(2);
+  return restA.length > restB.length ? restA.slice(1) === restB : restB.slice(1) === restA;
+}
+
+/** The shortest query word a typo is read for: shorter words are too often other words. */
+/** A shorter word is too often another word, not a typo ("moat" is not MOST). */
+const TYPO_MIN_LENGTH = 5;
+
+/**
+ * The query with each word no function carries read as the catalog word one letter from it ("fundng" is funding),
+ * the one the most functions carry; null when no word needs or has one. Only a word of five letters or more is
+ * read again, and never with another first letter: a first letter is rarely the typo, and "libor" is not HIBOR.
+ */
+export function correctCatalogQuery(entries: readonly PaneCatalogEntry[], query: string): string | null {
+  const counts = new Map<string, number>();
+  for (const entry of entries) {
+    for (const word of new Set(nameAndDescriptionFields(entry).join(" ").split(/[^a-z0-9]+/))) {
+      if (word.length >= TYPO_MIN_LENGTH - 1 && /^[a-z]+$/.test(word)) counts.set(word, (counts.get(word) ?? 0) + 1);
+    }
+  }
+  let changed = false;
+  const words = query.trim().toLowerCase().split(/\s+/).map((word) => {
+    if (word.length < TYPO_MIN_LENGTH || !/^[a-z]+$/.test(word) || counts.has(word)) return word;
+    const near = [...counts].filter(([known]) => known[0] === word[0] && oneLetterApart(word, known)).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0];
+    if (!near) return word;
+    changed = true;
+    return near[0];
+  });
+  return changed ? words.join(" ") : null;
+}
+
+interface PaneCatalogSelection {
+  shown: PaneCatalogEntry[];
+  /** Matches left out: the weaker ones, or those past the limit. */
+  hidden: number;
+  /** No function carries every word of the query; `shown` are the closest. */
+  loose: boolean;
+}
+
+/**
+ * The matches a search lists, best first. A multi-word query lists the functions that carry every word in their
+ * name or description; when none does, the few closest, so "year to date" does not list a hundred functions
+ * that each have a date somewhere. `--all` (an infinite limit) lists every match.
+ */
+export function selectPaneCatalogMatches(
+  ranked: PaneCatalogEntry[],
+  query: string,
+  limit: number,
+  scoring: CatalogScoring = {},
+): PaneCatalogSelection {
+  const scored = ranked.map((entry) => ({ entry, ...scorePaneCatalogEntry(entry, query, scoring) }));
+  const every = (items: typeof scored) => items.map(({ entry }) => entry);
+  const widened = !Number.isFinite(limit);
+  const multiWord = (scored[0]?.terms ?? 0) > 1;
+  if (widened || !multiWord) return { shown: every(scored).slice(0, limit), hidden: Math.max(0, ranked.length - limit), loose: false };
+
+  const complete = scored.filter(({ terms, named }) => named === terms);
+  if (complete.length > 0) {
+    const shown = every(complete).slice(0, limit);
+    return { shown, hidden: ranked.length - shown.length, loose: false };
+  }
+  // No function carries every word: the ones a word names come first, the code or name of a function being what a
+  // reader types ("fx vol" is FXC, whose name has fx, and VOLS, whose name has vol), ahead of one that mentions a word
+  // in its keywords ("implied fx" in ADR) or its flags, and however many of the words a weaker match has.
+  const named = scored.filter(({ named }) => named > 0);
+  const pool = named.length > 0 ? named : scored;
+  const leading = pool.filter((item) => item.called > 0).slice(0, LOOSE_NAMED_LIMIT);
+  const rest = pool.filter((item) => !leading.includes(item)).slice(0, Math.max(0, LOOSE_MATCH_LIMIT - leading.length));
+  const shown = every([...leading, ...rest]).slice(0, limit);
+  return { shown, hidden: ranked.length - shown.length, loose: true };
+}
+
+/** Functions an unknown name is answered with. */
+const SUGGESTION_LIMIT = 5;
+
+/**
+ * The functions closest to a name that opens none, as `catalog <name>` ranks them by name, keyword and
+ * description. None when no function carries every word of it.
+ */
+export async function suggestPaneFunctions(
+  registry: PaneFunctionCatalog,
+  context: MarketContext,
+  name: string,
+): Promise<PaneCatalogEntry[]> {
+  const entries = await buildPaneCatalogEntries(registry, context);
+  const { shown, loose } = selectPaneCatalogMatches(filterPaneCatalogEntries(entries, name), name, SUGGESTION_LIMIT);
+  return loose ? [] : shown;
+}
+
+/**
+ * Words a question asks with, which name nothing a function covers: "what did the DAX do yesterday" asks about the
+ * DAX, and "do" alone found DOE and DOCS.
+ */
+const QUESTION_WORDS = new Set([
+  "what", "whats", "what's", "which", "who", "why", "when", "where", "how", "much", "many", "did", "does", "do", "done", "is", "are", "was",
+  "were", "will", "would", "could", "should", "can", "has", "have", "had", "been", "be", "me", "my", "i", "we", "you", "it", "its", "it's",
+  "this", "that", "these", "those", "there", "show", "tell", "give", "get", "about", "today", "yesterday", "tonight", "now", "last",
+  "latest", "current", "currently", "doing", "happen", "happened", "going", "go", "went", "please", "the", "a", "an", "of", "on", "in",
+  "for", "to", "and", "or", "at", "by", "with", "from", "up", "down",
+  // Words that date a question rather than name its topic: "this week" found ATS, the weekly OTC volume.
+  "week", "weeks", "month", "months", "year", "years", "day", "days", "morning", "afternoon", "evening", "since", "after", "before",
+  "between", "ago", "past", "so", "far", "any",
+  // Words of an opinion asked for, which no function gives: "Is now a good time to buy?" found Time and Sales.
+  "good", "bad", "time", "idea", "buy", "sell", "worth", "think", "explain", "mean", "means", "say", "says", "saying", "said",
+]);
+
+/** Months and days of the week, and their short forms, which date a question rather than name its topic. */
+const DATE_WORDS = /^(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|mon(?:day)?|tue(?:s|sday)?|wed(?:nesday)?|thu(?:rs|rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?|\d+(?:st|nd|rd|th)?|\d{4}-\d{2}-\d{2})$/;
+
+/** The words that join a function's name, which name nothing in it: "time and sales" is "time sales". */
+const NAME_JOINERS = new Set(["and", "&", "of", "the", "a", "an", "for", "to", "in", "on", "by", "with"]);
+
+/**
+ * Where a question writes a function's name that has a word it asks with
+ * ("Time and Sales", "Earnings Days"): those words name the function there.
+ * Null for a name with no such word, which the topic keeps whole anyway.
+ */
+function nameWithQuestionWords(label: string): RegExp | null {
+  const words = label.toLowerCase().split(/[^a-z0-9&]+/).filter(Boolean);
+  if (words.length < 2 || !words.some((word) => !NAME_JOINERS.has(word) && (QUESTION_WORDS.has(word) || DATE_WORDS.test(word)))) return null;
+  const pattern = words.map((word) => word === "and" || word === "&" ? "(?:and|&)" : word).join(String.raw`[\s-]*`);
+  return new RegExp(String.raw`(?<![\p{L}\p{N}])${pattern}(?![\p{L}\p{N}])`, "gu");
+}
+
+/**
+ * A question's topic: its words without the ones it asks with, its dates and
+ * the tickers it names ("dax" for "what did the DAX do yesterday?", "report
+ * earnings" for "When does NVDA report earnings?"); empty when it is all
+ * asking. A function's name written in it (`names`) keeps its words: "time
+ * and sales" is TAS's, where "Is now a good time to buy?" asks about nothing.
+ */
+function questionTopic(question: string, tickers: readonly string[] = [], names: readonly RegExp[] = []): string {
+  const named = new Set(tickers.map((ticker) => ticker.toLowerCase()));
+  const text = question.toLowerCase().replace(/[?!.,;:"]/g, " ");
+  const kept = names.flatMap((name) => [...text.matchAll(name)].map((match) => [match.index, match.index + match[0].length] as const));
+  return [...text.matchAll(/\S+/g)].flatMap((match) => {
+    const word = match[0].replace(/^\$/, "").replace(/['’]s$/, "");
+    if (!word || named.has(word)) return [];
+    const inName = kept.some(([start, end]) => match.index >= start && match.index < end);
+    return (inName ? !NAME_JOINERS.has(word) : !QUESTION_WORDS.has(word) && !DATE_WORDS.test(word)) ? [word] : [];
+  }).join(" ");
+}
+
+/** A function a question names, as ASKG offers it signed out. */
+export interface FunctionForQuestion {
+  code: string;
+  label: string;
+  /** `gloom fn WEI`, `gloom fn CMP <tickers>`, `gloom fn GC jgb`: the command that runs it. */
+  command: string;
+  /** What the command bar runs it with, where the question names its argument: `GC JGB`, `ECO JP,AU`. */
+  input?: string;
+}
+
+/**
+ * A question's catalog matches: those that carry every word of its topic, then
+ * those a word of it names (GUIDE for "guidance"). A topic no function carries
+ * every word of gets only the second, never the closest of the rest.
+ */
+function confidentQuestionMatches(entries: PaneCatalogEntry[], topic: string): PaneCatalogEntry[] {
+  const ranked = filterPaneCatalogEntries(entries, topic);
+  const { shown, loose } = selectPaneCatalogMatches(ranked, topic, LOOSE_NAMED_LIMIT);
+  // After those that carry every word, the ones a word names: ERN for "holdings report earnings", which RIPL carries whole.
+  const named = ranked.filter((entry) => scorePaneCatalogEntry(entry, topic).called > 0);
+  return [...new Set([...loose ? [] : shown, ...named])];
+}
+
+/** What a function the catalog found is run with for the tickers a question names: the one it asks about first, or all of them for a list. */
+function tickerArgument(entry: PaneCatalogEntry, asked: TickerQuestion | null): string | null {
+  if (!asked) return null;
+  if (entry.argKind === "tickers" || entry.argKind === "ticker-list" || /\btickers\b/i.test(entry.argPlaceholder ?? "")) return asked.tickers.join(",");
+  return entry.argKind === "ticker" || /\bticker\b/i.test(entry.argPlaceholder ?? "") ? asked.primary : null;
+}
+
+/**
+ * The functions `catalog` finds for a question's topic, best first, up to
+ * `limit`: what Ask Gloom offers without an account ("what did the DAX do
+ * yesterday" finds WEI and CMP). A question about policy rates, curves or the
+ * macro calendar gets CBR, GC and ECO first, run for the markets it names
+ * (`ratesQuestionFunctions`): "BoJ and RBA policy rates and JGB yields" found
+ * CBR, then MDAY and FIRST. A question naming tickers gets their prices, news
+ * and analysts, or what else it asks of them, run for them (`tickerQuestion`),
+ * and one that names only tickers gets DES, CN and ANR. A topic no function
+ * carries every word of gets only the functions a word of it names, so a
+ * question nothing answers gets none, not the closest noise. Built from the
+ * templates alone, without a market context, so the app's pane asks it as the
+ * command line does.
+ */
+export async function functionsForQuestion(registry: PaneFunctionCatalog, question: string, limit = 3): Promise<FunctionForQuestion[]> {
+  if (!questionTopic(question)) return [];
+  const entries = await buildPaneCatalogEntries(registry, null);
+  const asked = await tickerQuestion(question, { functionCodes: new Set(entries.flatMap((entry) => [entry.token, ...entry.aliases])) });
+  const tickers = asked?.tickers ?? [];
+  const names = entries.flatMap((entry) => nameWithQuestionWords(entry.label) ?? []);
+  // "What moved the market today?" asks for its movers: MOST, not the money markets.
+  const topic = questionTopic(question.replace(/\bmov(?:ed|es|ing)\s+(?:the\s+)?(?:stock\s+)?(?:markets?|stocks)\b/i, "market movers"), tickers, names);
+  const run = (code: string, argument: string, input: string): FunctionForQuestion[] => {
+    const entry = entries.find((candidate) => candidate.token === code || candidate.aliases.includes(code));
+    return entry ? [{ code, label: entry.label, command: `gloom fn ${code}${argument ? ` ${argument}` : ""}`, ...(input ? { input: `${code} ${input}` } : {}) }] : [];
+  };
+  const forTickers = (asked?.functions ?? []).flatMap(({ code, argument, input }) => run(code, argument, input));
+  // What a question asks of the tickers it names is the answer: "Who holds the most AAL stock?" is HDS, not MOST.
+  if (forTickers.length > 0) return forTickers.slice(0, limit);
+  const stats = entries.find(({ token }) => token === "ECST");
+  const nowcast = stats && /\b(?:gdp\s*now|nowcasts?|nowcasting)\b/i.test(question)
+    ? [{ code: stats.token, label: "Atlanta Fed GDPNow", command: "gloom fn ECST gdpnow", input: "ECST gdpnow" }]
+    : [];
+  const rates = ratesQuestionFunctions(question).flatMap(({ code, argument, input }) => run(code, argument, input));
+  const calendar = rates.find(({ code }) => code === "ECO");
+  if (calendar && nowcast.length && /\bpmis?\b/i.test(question)) {
+    return [{ ...calendar, command: `${calendar.command} --impact all --search PMI` }, ...nowcast].slice(0, limit);
+  }
+  const preferred = rates[0]?.code === "ECO"
+    ? [rates[0], ...nowcast, ...rates.slice(1)]
+    : [...nowcast, ...rates];
+  const found = (topic ? confidentQuestionMatches(entries, topic) : [])
+    .filter((entry) => !preferred.some((named) => named.code === entry.token || entry.aliases.includes(named.code))).map((entry) => {
+      const named = tickerArgument(entry, asked);
+      const argument = named ?? argumentHint(entry);
+      return { code: entry.token, label: entry.label, command: `gloom fn ${entry.token}${argument ? ` ${argument}` : ""}`, ...(named ? { input: `${entry.token} ${named}` } : {}) };
+    });
+  const answers = [...preferred, ...found];
+  // A question that names tickers and asks nothing a function answers ("Tell me about DAL") is their description, news and analysts.
+  if (answers.length === 0 && asked) return ["DES", "CN", "ANR"].flatMap((code) => run(code, asked.primary, asked.primary)).slice(0, limit);
+  return answers.slice(0, limit);
+}
+
+const CATALOG_TEXT_WIDTH = 100;
+const READINESS_LABELS: Record<PaneFunctionReadiness, string> = {
+  ready: "ready",
+  partial: "partial",
+  "live-dom": "rendered",
+  unsupported: "none",
+};
+
+function readinessCell(readiness: PaneFunctionReadiness): string {
+  const label = READINESS_LABELS[readiness];
+  if (readiness === "ready") return cliStyles.success(label);
+  if (readiness === "partial") return cliStyles.warning(label);
+  return cliStyles.muted(label);
+}
+
+/**
+ * How its report reads, and `Pro` after it for a function only Gloom Pro opens (CALLS), which a signed-out or free
+ * run reads locked. A free preview of the same data (PERP) is not marked: free runs read it.
+ */
+function reportCell(entry: PaneCatalogEntry): string {
+  const readiness = readinessCell(entry.capability.reportReadiness);
+  if (FUNCTION_HELP[entry.token]?.access === "pro") return `${readiness} · ${cliStyles.warning("Pro")}`;
+  return entry.capability.dataRequirements.some((requirement) => /\bsign-in\b/i.test(requirement))
+    ? `${readiness} · ${cliStyles.warning("Sign-in")}` : readiness;
+}
+
+function optionDescription(option: PaneFunctionOptionDef): string {
+  const choices = optionChoices(option);
+  const parts = [option.description.replace(/\.$/, "")];
+  // An enum that also reads other values (a bar size of any length) lists its values as examples.
+  if (choices.join("|").length > MAX_INLINE_CHOICES) parts.push(`${option.list ? "Each one of" : option.normalize ? "Such as" : "One of"} ${choices.join(", ")}`);
+  const bounds = optionBounds(option);
+  if (bounds) parts.push(bounds);
+  if (option.defaultValue !== undefined && option.defaultValue !== "") parts.push(`Default ${String(option.defaultValue)}`);
+  return `${parts.join(". ")}.`;
+}
+
+/**
+ * The range a number option takes (`From 30 to 1,100`), so its limits are read
+ * before a value is refused, unless its description already names them.
+ */
+function optionBounds(option: PaneFunctionOptionDef): string | null {
+  if (option.type !== "integer") return null;
+  const named = (value: number) => [String(value), value.toLocaleString("en-US")].some((text) => new RegExp(`(^|[^\\d,.])${text.replace(/[.,]/g, "\\$&")}(?!\\d|[,.]\\d)`).test(option.description));
+  const min = option.minimum != null && !named(option.minimum) ? option.minimum.toLocaleString("en-US") : null;
+  const max = option.maximum != null && !named(option.maximum) ? option.maximum.toLocaleString("en-US") : null;
+  if (min && max) return `From ${min} to ${max}`;
+  return min ? `At least ${min}` : max ? `At most ${max}` : null;
+}
+
+/** A limitation as a sentence, so one does not run into the next: with a full stop unless it ends in one. */
+export function limitationSentence(text: string): string {
+  const trimmed = text.trim();
+  return !trimmed || /[.!?]["')\]]*$/.test(trimmed) ? trimmed : `${trimmed}.`;
+}
+
+/** A data requirement that is an account: a sign-in (free or verified) or Gloom Pro, as `catalog` names under Requires. */
+const ACCOUNT_REQUIREMENT = /\bsign-in\b|\baccount\b|\bPro\b/;
+
+/**
+ * Names as lines of at most `width`, each name whole and the names apart by
+ * semicolons, since a name may hold a comma (Furnishings, Fixtures & Appliances).
+ */
+function packNames(names: readonly string[], width: number): string[] {
+  const lines: string[] = [];
+  let line = "";
+  names.forEach((name, index) => {
+    const word = index < names.length - 1 ? `${name};` : name;
+    if (line && line.length + 1 + word.length > width) {
+      lines.push(line);
+      line = word;
+    } else {
+      line = line ? `${line} ${word}` : word;
+    }
+  });
+  if (line) lines.push(line);
+  return lines;
+}
+
+function renderCatalogEntry(entry: PaneCatalogEntry): string {
+  const width = Math.min(cliTerminalWidth() ?? CATALOG_TEXT_WIDTH, CATALOG_TEXT_WIDTH);
+  const capability = entry.capability;
+  const argument = argumentHint(entry);
+  const invocation = `${entry.token}${argument ? ` ${argument}` : ""}`;
+  const lines = [
+    `${cliStyles.accent(entry.token)}  ${cliStyles.bold(entry.label)}`,
+    ...wrapText(entry.description, width),
+    "",
+  ];
+  const stats: CliStatEntry[] = [
+    ["Argument", argument || cliStyles.muted("none")],
+    ["Report", reportCell(entry)],
+    ["Screenshot", readinessCell(capability.screenshotReadiness)],
+    ["Bot safe", capability.botSafe ? "yes" : "no"],
+    ["Pane", entry.paneId],
+  ];
+  if (entry.aliases.length > 0) stats.push(["Aliases", entry.aliases.join(", ")]);
+  const mnemonics = new Set([entry.token, ...entry.aliases].map((value) => value.toLowerCase()));
+  const keywords = capability.aliases.filter((keyword) => !mnemonics.has(keyword.toLowerCase()));
+  if (keywords.length > 0) stats.push(["Keywords", keywords.join(", ")]);
+  // "Requires" is what a reader must have, a sign-in or Pro; the rest says where the data comes from, which a
+  // signed-out run reads too (COT's CFTC history, CBR's rates).
+  const required = capability.dataRequirements.filter((requirement) => ACCOUNT_REQUIREMENT.test(requirement));
+  const sources = capability.dataRequirements.filter((requirement) => !ACCOUNT_REQUIREMENT.test(requirement));
+  if (required.length > 0) stats.push(["Requires", required.join(", ")]);
+  if (sources.length > 0) stats.push(["Data", sources.join(", ")]);
+  if (capability.limitations.length > 0) stats.push(["Limitations", capability.limitations.map(limitationSentence).join(" ")]);
+  lines.push(renderStats(stats));
+
+  if (capability.options.length > 0) {
+    lines.push("", renderSection("Options"));
+    lines.push(...renderDefinitions(
+      capability.options.map((option) => [optionFlags(option), optionDescription(option)] as const),
+      { width, termStyle: cliStyles.command },
+    ));
+  }
+
+  for (const { title, items } of capability.reference ?? []) {
+    lines.push("", renderSection(title), ...packNames(items, width - 2).map((line) => `  ${line}`));
+  }
+
+  lines.push("", renderSection("Examples"));
+  if (capability.reportReadiness !== "unsupported") {
+    lines.push(...wrapCommandLine(`gloom fn ${invocation}`, width));
+    for (const example of entry.argExamples ?? []) lines.push(...wrapCommandLine(`gloom fn ${entry.token} ${example}`, width));
+    for (const option of capability.options) {
+      for (const example of [option.example, ...(option.examples ?? [])]) {
+        if (example) lines.push(...wrapCommandLine(`gloom fn ${option.exampleWithoutArgument ? entry.token : invocation} ${example}`, width));
+      }
+    }
+  }
+  const shotInvocation = entry.shotArgument ? `${entry.token} ${entry.shotArgument}` : invocation;
+  lines.push(...wrapCommandLine(`gloom shot ${shotInvocation} --output ${entry.token.toLowerCase()}.png`, width));
+  return lines.join("\n");
+}
+
+/**
+ * The command that runs a function with the option value a query names (`compounders` is EQS's `--preset
+ * compounders`), with the argument it needs first; null when the query is no value of its options.
+ */
+function optionValueCommand(entry: PaneCatalogEntry, query: string): string | null {
+  const wanted = normalizeLookupToken(query);
+  if (!wanted) return null;
+  // A word that opens one case of the function (FA's `roic`) runs it with that case's options.
+  const opening = entry.capability.opens?.find((candidate) => candidate.words.some((word) => normalizeLookupToken(word) === wanted));
+  if (opening?.options && Object.keys(opening.options).length > 0) {
+    const argument = opening.argument || argumentHint(entry);
+    const flags = Object.entries(opening.options).map(([key, value]) => `${optionFlag(key)} ${value}`).join(" ");
+    return `gloom fn ${entry.token}${argument ? ` ${argument}` : ""} ${flags}`;
+  }
+  for (const option of entry.capability.options) {
+    const value = option.values?.find((candidate) => [candidate.value, ...(candidate.aliases ?? [])]
+      .some((name) => normalizeLookupToken(name) === wanted));
+    if (!value) continue;
+    const argument = argumentHint(entry);
+    return `gloom fn ${entry.token}${argument ? ` ${argument}` : ""} ${optionFlag(option.key)} ${value.value}`;
+  }
+  return null;
+}
+
+/** The functions a search lists, one row each. */
+function renderMatchesTable(shown: readonly PaneCatalogEntry[]): string {
+  return renderTable(
+    [
+      { header: "Function", shrink: false },
+      { header: "Name" },
+      { header: "Argument" },
+      { header: "Report" },
+      // A scan list: the description is cut where it does not fit, and `catalog <function>` prints it whole.
+      { header: "Description", shrink: true, minWidth: 20 },
+    ],
+    shown.map((entry) => [
+      cliStyles.command(entry.token),
+      entry.label,
+      argumentHint(entry),
+      reportCell(entry),
+      entry.description,
+    ]),
+  );
+}
+
+/** The most other functions an exact code's page names. */
+const ALSO_MATCHES_LIMIT = 5;
+
+/**
+ * The other functions that list a query as one of their own keywords, when the
+ * query is also a function's code: `catalog port` opens PORT and still names
+ * MAP, whose ports layer answers to the same word.
+ */
+function renderAlsoMatches(exact: PaneCatalogEntry, entries: readonly PaneCatalogEntry[], query: string): string {
+  const others = entries
+    .filter((entry) => entry !== exact && [...entry.keywords, ...entry.capability.aliases].some((keyword) => keyword.toLowerCase() === query))
+    .slice(0, ALSO_MATCHES_LIMIT);
+  return others.length === 0 ? "" : [renderSection(`Also matches "${query}"`), renderMatchesTable(others)].join("\n");
+}
+
+/**
+ * `fn <function> --help` and `shot <function> --help`: the function's own
+ * card, as `catalog <function>` prints it, then where the options every
+ * function takes are listed, since the card names only the function's.
+ */
+export function renderFunctionHelp(entry: PaneCatalogEntry, command: string): string {
+  const width = Math.min(cliTerminalWidth() ?? CATALOG_TEXT_WIDTH, CATALOG_TEXT_WIDTH);
+  const note = `The options every function takes, and the output formats, are in gloom help ${command}.`;
+  return [renderCatalogEntry(entry), "", ...wrapText(note, width).map((line) => cliStyles.muted(line))].join("\n");
+}
+
+/**
+ * The glossary part of a search: the meaning of a term the query names, or
+ * the terms that hold its words, to look up next.
+ */
+function renderCatalogGlossary(glossary: GlossaryLookup, width: number): string {
+  const defined = glossary.exact.length > 0 ? [renderSection("Glossary"), ...renderGlossaryEntries(glossary.exact)] : [];
+  const others = glossary.partial.map((entry) => entry.term).join(", ");
+  const related = others
+    ? wrapText(`${defined.length > 0 ? "Related" : "Glossary"}: ${others}. gloom catalog glossary <term> explains one.`, width)
+      .map((line) => cliStyles.muted(line))
+    : [];
+  return [...defined, ...related].join("\n");
+}
+
+/** Series a catalog search lists before pointing at `shot CAT` for the rest. */
+const CATALOG_SERIES_LIMIT = 8;
+
+/**
+ * `catalog [query]`: one function in full, or the matches, with the data
+ * series and glossary terms the query names. `gap` is the line for data no
+ * source carries yet (`knownGapMessage`): it leads, and stands in for "No
+ * functions match".
+ */
+export function renderPaneCatalogReport(
+  entries: PaneCatalogEntry[],
+  args: ParsedPaneCatalogArgs,
+  glossary: GlossaryLookup = { exact: [], partial: [] },
+  gap: string | null = null,
+  series: readonly SeriesMatch[] = [],
+  /** The `config` command a query names a setting of ("light theme"), printed last, beside the functions. */
+  setting: string | null = null,
+  /** The setting answers the query ahead of the functions its words find (`csv` is the flag, not CDS): printed first. */
+  settingFirst = false,
+): string {
+  const query = args.query.trim().toLowerCase();
+  const exact = query
+    ? entries.find((entry) => entry.token.toLowerCase() === query)
+      ?? entries.find((entry) => entry.aliases.some((alias) => alias.toLowerCase() === query))
+    : undefined;
+  const withSetting = (text: string) => (settingFirst ? [setting ?? "", text] : [text, setting ?? ""]).filter(Boolean).join("\n\n");
+  if (exact) return withSetting([renderCatalogEntry(exact), renderAlsoMatches(exact, entries, query)].filter(Boolean).join("\n\n"));
+
+  const width = Math.min(cliTerminalWidth() ?? CATALOG_TEXT_WIDTH, CATALOG_TEXT_WIDTH);
+  const terms = renderCatalogGlossary(glossary, width);
+  const charted = renderSeriesMatches(args.query.trim(), series, Number.isFinite(args.limit) ? CATALOG_SERIES_LIMIT : series.length, width);
+  const withGap = (text: string) => withSetting([gap ? wrapText(gap, width).join("\n") : "", text].filter(Boolean).join("\n\n"));
+  const withTerms = (text: string) => withGap([text, charted, terms].filter(Boolean).join("\n\n"));
+  if (args.query && entries.length === 1) {
+    // A value of one of its options (EQS's `compounders` preset) is run with that option; a function found only
+    // through a word of its description or keywords is the closest there is, and says so.
+    // The closest one leads with the command that runs it ("spin-off": gloom fn EVT <ticker>), not a dead end.
+    const run = optionValueCommand(entries[0]!, args.query);
+    const entry = entries[0]!;
+    const argument = argumentHint(entry);
+    const command = entry.capability.reportReadiness === "unsupported" ? "" : ` Try gloom fn ${entry.token}${argument ? ` ${argument}` : ""}.`;
+    const closest = run ? `${cliStyles.muted(`"${args.query.trim()}": ${run}`)}\n\n`
+      : isClosestCatalogMatch(entry, args.query)
+        ? `${cliStyles.muted(`Closest match for "${args.query.trim()}": no function is named for it.${command}`)}\n\n` : "";
+    return withTerms(`${closest}${renderCatalogEntry(entries[0]!)}`);
+  }
+
+  const note = (text: string) => wrapText(text, width).map((line) => cliStyles.muted(line)).join("\n");
+  if (entries.length === 0) {
+    // With no function to list, the command the query names comes first: "usdt" is CRYP's stablecoins
+    // before the USD/TWD series its letters start.
+    if (setting && charted) return [gap ? wrapText(gap, width).join("\n") : "", setting, charted, terms].filter(Boolean).join("\n\n");
+    if (charted) return withGap([charted, terms].filter(Boolean).join("\n\n"));
+    if (glossary.exact.length > 0 || gap || setting) return withGap(terms);
+    return withTerms(note(args.query
+      ? `No functions match "${args.query}". For stories that mention it: ${catalogNewsCommand(args.query)}. Run gloom catalog to browse them all.`
+      : "No functions are available."));
+  }
+
+  const { shown, hidden, loose } = selectPaneCatalogMatches(entries, args.query, args.limit);
+  const count = hidden > 0 ? `${shown.length} of ${entries.length}` : String(entries.length);
+  const title = args.query ? `Matches for "${args.query}"` : "Functions";
+  const more = args.query
+    ? `${hidden} more ${hidden === 1 ? "match" : "matches"}: refine the query, or add --all to list every match.`
+    : `Add --all to list all ${entries.length}.`;
+  // The functions that take the query as an option's value, with the command that runs them on it.
+  const runs = args.query ? shown.flatMap((entry) => optionValueCommand(entry, args.query) ?? []).slice(0, 3) : [];
+  const lines = [
+    `${renderSection(title)} ${cliStyles.muted(`(${count})`)}`,
+    renderMatchesTable(shown),
+    "",
+    ...runs.length > 0 ? [note(`"${args.query.trim()}": ${runs.join("; ")}`)] : [],
+    note([
+      loose ? "No function carries every word of the query; these are the closest." : "",
+      "gloom catalog <function> shows its options and examples.",
+      hidden > 0 ? more : "",
+    ].filter(Boolean).join(" ")),
+  ];
+  return withTerms(lines.join("\n"));
+}

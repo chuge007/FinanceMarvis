@@ -1,0 +1,772 @@
+"""ETF Controller Tests, on synthetic funds."""
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from financetoolkit.etf.etf_controller import ETF
+
+
+@pytest.fixture(name="etf")
+def fixture_etf():
+    rng = np.random.default_rng(0)
+    dates = pd.bdate_range("2025-01-01", periods=300).to_period("D")
+    benchmark = 100 * np.exp(np.cumsum(rng.normal(0.0004, 0.01, 300)))
+    closes = {
+        "AAA": benchmark * np.exp(np.cumsum(rng.normal(0, 0.0005, 300))),
+        "BBB": 50 * np.exp(np.cumsum(rng.normal(0.0004, 0.015, 300))),
+        "Benchmark": benchmark,
+    }
+    frames = {}
+    for column in ("Open", "High", "Low", "Close", "Adj Close"):
+        frames[column] = pd.DataFrame(closes, index=dates)
+    frames["Volume"] = pd.DataFrame(1e6, index=dates, columns=list(closes))
+    daily = pd.concat(frames, axis=1)
+
+    information = pd.DataFrame(
+        {
+            "AAA": {
+                "Name": "Fund A",
+                "Expense Ratio": 0.0003,
+                "NAV": float(closes["AAA"][-1]),
+                "Assets Under Management": 1e10,
+                "Updated At": str(dates[-1]),
+                "Holdings Count": 3,
+            },
+            "BBB": {
+                "Name": "Fund B",
+                "Expense Ratio": 0.005,
+                "NAV": float(closes["BBB"][-1]) / 1.01,
+                "Assets Under Management": 1e8,
+                "Updated At": str(dates[-1]),
+                "Holdings Count": 2,
+            },
+        }
+    )
+    holdings = pd.DataFrame(
+        {"Weight": [0.5, 0.3, 0.2, 0.6, 0.4], "ISIN": ["I1", "I2", "I3", "I4", "I5"]},
+        index=pd.MultiIndex.from_tuples(
+            [("AAA", "X"), ("AAA", "Y"), ("AAA", "Z"), ("BBB", "X"), ("BBB", "")],
+            names=[None, "Asset"],
+        ),
+    )
+    ratios = pd.DataFrame(
+        {
+            "X": {"Price-to-Earnings": 20.0, "Dividend Yield": 0.01},
+            "Y": {"Price-to-Earnings": 10.0, "Dividend Yield": 0.03},
+            "Z": {"Price-to-Earnings": 40.0, "Dividend Yield": 0.0},
+        }
+    )
+    sectors = pd.DataFrame(
+        {"AAA": [0.2, 0.8, None], "BBB": [0.5, 0.3, 0.2]},
+        index=pd.Index(["Energy", "Technology", "Utilities"], name="Sector"),
+    )
+    datasets = {
+        "information": information,
+        "holdings": holdings,
+        "sector_weightings": sectors,
+        "country_weightings": pd.DataFrame(),
+    }
+    return ETF(
+        tickers=["AAA", "BBB", "Benchmark"],
+        historical_function=lambda: daily,
+        fund_data_function=lambda dataset, overwrite=False: datasets[dataset],
+        ratios_function=lambda tickers: ratios[[t for t in tickers if t in ratios]],
+        start_date="2025-01-01",
+        end_date="2026-12-31",
+    )
+
+
+def test_profile_and_premium(etf):
+    profile = etf.get_profile()
+
+    assert list(profile.columns) == ["AAA", "BBB"]
+    assert profile.loc["Premium/Discount", "AAA"] == pytest.approx(0)
+    assert profile.loc["Premium/Discount", "BBB"] == pytest.approx(0.01, abs=1e-4)
+
+
+def test_tracking(etf):
+    tracking = etf.get_tracking()
+    yearly = etf.get_tracking(yearly=True)
+
+    assert tracking.loc["Correlation", "AAA"] > 0.99  # noqa: PLR2004
+    assert tracking.loc["Tracking Error", "AAA"] < tracking.loc["Tracking Error", "BBB"]
+    assert list(yearly.columns) == ["AAA", "BBB"]
+
+
+def test_concentration_overlap_and_look_through(etf):
+    concentration = etf.get_concentration()
+    overlap = etf.get_overlap()
+    valuation = etf.get_look_through_valuation()
+
+    assert concentration.loc["Largest Holding", "AAA"] == "X"
+    # The holding of BBB without a symbol is identified by its ISIN.
+    assert concentration.loc["Number of Holdings", "BBB"] == 2  # noqa: PLR2004
+    assert overlap.loc["AAA", "BBB"] == pytest.approx(0.5)
+    assert valuation.loc["Price-to-Earnings", "AAA"] == pytest.approx(
+        1 / (0.5 / 20 + 0.3 / 10 + 0.2 / 40), abs=1e-4
+    )
+    assert valuation.loc["Coverage", "BBB"] == pytest.approx(0.6)
+
+
+def test_liquidity(etf):
+    liquidity = etf.get_liquidity()
+
+    assert liquidity.loc["Average Volume", "AAA"] == pytest.approx(1e6)
+    assert (
+        liquidity.loc["Dollar Volume to Assets", "BBB"]
+        > liquidity.loc["Dollar Volume to Assets", "AAA"]
+    )
+
+
+def test_holdings_and_weightings(etf):
+    largest = etf.get_holdings(limit=1)
+    sectors = etf.get_sector_weightings()
+
+    assert list(largest["Weight"]) == [0.5, 0.6]
+    assert list(etf.get_holdings(limit=-1)["Weight"]) == [0.2, 0.4]
+    # The largest weights of the first fund come first, and a sector a fund does not hold
+    # weighs zero in it.
+    assert list(sectors.index) == ["Technology", "Energy", "Utilities"]
+    assert sectors.loc["Utilities", "AAA"] == 0
+    assert etf.get_country_weightings().empty
+
+
+def test_a_single_fund(etf):
+    single = ETF(
+        tickers=["AAA"],
+        historical_function=etf._historical_function,
+        fund_data_function=etf._fund_data_function,
+        ratios_function=etf._ratios_function,
+    )
+
+    # The holdings of a single fund are indexed by the asset only.
+    assert list(single.get_holdings().index) == ["X", "Y", "Z"]
+    assert single.get_concentration().loc["Largest Holding", "AAA"] == "X"
+
+
+def test_the_holdings_need_no_prices(etf):
+    def no_prices():
+        raise AssertionError("The prices were retrieved.")
+
+    etf._historical_function = no_prices
+
+    assert not etf.get_holdings().empty
+    assert not etf.get_concentration().empty
+
+
+def test_the_premium_compares_the_nav_with_the_close_of_its_date(etf):
+    information = etf._fund_data_function("information").copy()
+    close = etf._historical()["Close"]["AAA"]
+    # A NAV published after midnight UTC is the previous New York day's, equal to that
+    # day's close, three trading days before the last close.
+    nav_day = close.index[-4].to_timestamp()
+    information.loc["NAV", "AAA"] = float(close.iloc[-4])
+    information.loc["Updated At", "AAA"] = (
+        nav_day + pd.Timedelta(days=1, hours=2)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    datasets = {
+        "information": information,
+        "holdings": etf._fund_data_function("holdings"),
+    }
+    etf._fund_data_function = lambda dataset, overwrite=False: datasets[dataset]
+
+    profile = etf.get_profile(rounding=8)
+
+    assert profile.loc["Premium/Discount", "AAA"] == pytest.approx(0, abs=1e-8)
+    assert profile.loc["NAV Date", "AAA"] == nav_day.strftime("%Y-%m-%d")
+
+
+def with_information(etf, **fields):
+    """The ETF with fields of fund AAA's information replaced."""
+    information = etf._fund_data_function("information").copy()
+    for field, value in fields.items():
+        information.loc[field.replace("_", " "), "AAA"] = value
+    datasets = {
+        "information": information,
+        "holdings": etf._fund_data_function("holdings"),
+    }
+    etf._fund_data_function = lambda dataset, overwrite=False: datasets[dataset]
+    return etf
+
+
+def test_a_nav_updated_before_the_open_is_of_the_previous_close(etf):
+    close = etf._historical()["Close"]["AAA"]
+    # An update at 09:00 New York time (13:00 UTC in summer, 14:00 in winter) comes before
+    # that day's close, so the NAV is of the previous trading day's close.
+    nav_day = close.index[-2].to_timestamp()
+    update_day = close.index[-1].to_timestamp()
+    updated = (
+        (update_day + pd.Timedelta(hours=9))
+        .tz_localize("America/New_York")
+        .tz_convert("UTC")
+    )
+    with_information(
+        etf,
+        NAV=float(close.iloc[-2]),
+        Updated_At=updated.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+
+    profile = etf.get_profile(rounding=8)
+
+    assert profile.loc["NAV Date", "AAA"] == nav_day.strftime("%Y-%m-%d")
+    assert profile.loc["Premium/Discount", "AAA"] == pytest.approx(0, abs=1e-8)
+
+
+def test_a_date_only_update_is_the_nav_date(etf):
+    close = etf._historical()["Close"]["AAA"]
+    day = close.index[-1].to_timestamp().strftime("%Y-%m-%d")
+    with_information(etf, Updated_At=day)
+
+    assert etf.get_profile().loc["NAV Date", "AAA"] == day
+
+
+def test_no_premium_against_a_nav_in_another_currency(etf):
+    etf._currency_function = lambda: pd.Series({"AAA": "USD", "BBB": "USD"})
+    with_information(etf, NAV_Currency="EUR")
+
+    profile = etf.get_profile()
+
+    assert pd.isna(profile.loc["Premium/Discount", "AAA"])
+    assert profile.loc["Premium/Discount", "BBB"] == pytest.approx(0.01, abs=1e-4)
+
+
+def test_a_close_in_pence_is_compared_in_pounds(etf):
+    close = etf._historical()["Close"]["AAA"]
+    # The close is quoted in pence (GBp) and the NAV in pounds, a hundredth of it.
+    etf._currency_function = lambda: pd.Series({"AAA": "GBp"})
+    with_information(etf, NAV=float(close.iloc[-1]) / 100, NAV_Currency="GBP")
+
+    assert etf.get_profile(rounding=8).loc["Premium/Discount", "AAA"] == pytest.approx(
+        0, abs=1e-8
+    )
+
+
+def test_an_implausible_premium_is_left_out_with_a_warning(etf, caplog):
+    close = etf._historical()["Close"]["AAA"]
+    # Without a known listing currency a NAV in another unit shows as a premium of 99%.
+    with_information(etf, NAV=float(close.iloc[-1]) / 100)
+
+    with caplog.at_level("WARNING"):
+        profile = etf.get_profile()
+
+    assert pd.isna(profile.loc["Premium/Discount", "AAA"])
+    assert "AAA" in caplog.text
+
+
+def test_a_failing_currency_lookup_keeps_the_premium(etf):
+    def fail():
+        raise ValueError("no statistics")
+
+    etf._currency_function = fail
+
+    assert etf.get_profile().loc["Premium/Discount", "BBB"] == pytest.approx(
+        0.01, abs=1e-4
+    )
+
+
+def test_a_nav_date_on_a_weekend_is_reported_as_its_close(etf):
+    close = etf._historical()["Close"]["AAA"]
+    # An update on Monday before the open is 16 hours after Sunday; the NAV is of Friday's
+    # close and is dated as such.
+    fridays = [
+        day for day in close.index[:-1] if day.to_timestamp().dayofweek == 4
+    ]  # noqa: PLR2004
+    friday = fridays[-1].to_timestamp()
+    updated = (
+        (friday + pd.Timedelta(days=3, hours=8))
+        .tz_localize("America/New_York")
+        .tz_convert("UTC")
+    )
+    with_information(etf, Updated_At=updated.strftime("%Y-%m-%dT%H:%M:%SZ"))
+
+    assert etf.get_profile().loc["NAV Date", "AAA"] == friday.strftime("%Y-%m-%d")
+
+
+def test_a_nav_after_the_last_close_keeps_its_date_without_a_premium(etf):
+    close = etf._historical()["Close"]["AAA"]
+    # The NAV is struck on the trading day after the last close the prices hold.
+    nav_day = close.index[-1].to_timestamp() + pd.offsets.BDay(1)
+    updated = (
+        (nav_day + pd.Timedelta(hours=20))
+        .tz_localize("America/New_York")
+        .tz_convert("UTC")
+    )
+    with_information(etf, Updated_At=updated.strftime("%Y-%m-%dT%H:%M:%SZ"))
+
+    profile = etf.get_profile()
+
+    assert profile.loc["NAV Date", "AAA"] == nav_day.strftime("%Y-%m-%d")
+    assert pd.isna(profile.loc["Premium/Discount", "AAA"])
+
+
+def test_a_fund_missing_from_the_holdings_is_nan(etf):
+    holdings = etf._fund_data_function("holdings").drop(index="BBB", level=0)
+    information = etf._fund_data_function("information")
+    datasets = {"information": information, "holdings": holdings}
+    etf._fund_data_function = lambda dataset, overwrite=False: datasets[dataset]
+
+    concentration = etf.get_concentration()
+    overlap = etf.get_overlap()
+
+    assert concentration["BBB"].drop("Largest Holding").isna().all()
+    assert concentration.loc["Number of Holdings", "AAA"] == 3  # noqa: PLR2004
+    assert overlap["BBB"].isna().all() and overlap.loc["BBB"].isna().all()
+
+
+def test_a_stale_nav_gets_a_premium_when_asked_for(etf):
+    close = etf._historical()["Close"]["AAA"]
+    # A NAV dated before the prices begin has no close of its own date.
+    nav_day = close.index[0].to_timestamp() - pd.Timedelta(days=10)
+    with_information(
+        etf, NAV=float(close.iloc[-1]), Updated_At=nav_day.strftime("%Y-%m-%d")
+    )
+
+    assert pd.isna(etf.get_profile().loc["Premium/Discount", "AAA"])
+    assert etf.get_profile(stale_nav=True, rounding=8).loc[
+        "Premium/Discount", "AAA"
+    ] == pytest.approx(0, abs=1e-8)
+
+
+def test_a_stale_nav_after_the_prices_uses_the_latest_close(etf):
+    close = etf._historical()["Close"]["AAA"]
+    nav_day = close.index[-1].to_timestamp() + pd.offsets.BDay(1)
+    with_information(
+        etf, NAV=float(close.iloc[-1]), Updated_At=nav_day.strftime("%Y-%m-%d")
+    )
+
+    assert pd.isna(etf.get_profile().loc["Premium/Discount", "AAA"])
+    assert etf.get_profile(stale_nav=True, rounding=8).loc[
+        "Premium/Discount", "AAA"
+    ] == pytest.approx(0, abs=1e-8)
+
+
+def test_tracking_compares_a_fund_on_the_dates_it_has_a_close(etf):
+    daily = etf._historical()
+    # Fund AAA follows the Benchmark exactly until its prices stop 60 days before the end
+    # (a ticker change, say); after that the Benchmark keeps moving.
+    for column in ("Close", "Adj Close"):
+        daily[(column, "AAA")] = daily[(column, "Benchmark")]
+        daily.loc[daily.index[-60:], (column, "AAA")] = np.nan
+
+    yearly = etf.get_tracking(yearly=True, rounding=12)
+    monthly = etf.get_tracking(period="monthly", rounding=12)
+
+    assert (yearly["AAA"].dropna().abs() < 1e-12).all()  # noqa: PLR2004
+    assert monthly.loc["Tracking Difference", "AAA"] == pytest.approx(0, abs=1e-12)
+
+
+def test_a_fund_whose_weights_add_up_to_more_than_one_overlaps_itself_fully(etf):
+    holdings = etf._fund_data_function("holdings").copy()
+    holdings.loc[("AAA", "X"), "Weight"] = 0.6  # AAA's weights now add up to 1.1
+    datasets = {
+        "information": etf._fund_data_function("information"),
+        "holdings": holdings,
+    }
+    etf._fund_data_function = lambda dataset, overwrite=False: datasets[dataset]
+
+    overlap = etf.get_overlap()
+
+    assert overlap.loc["AAA", "AAA"] == pytest.approx(1)
+    assert overlap.loc["BBB", "BBB"] == pytest.approx(1)
+    assert overlap.loc["AAA", "BBB"] == pytest.approx(0.6 / 1.1, abs=1e-4)
+
+
+def test_holdings_and_liquidity_use_the_rounding_of_the_toolkit(etf):
+    holdings = etf._fund_data_function("holdings").copy()
+    holdings.loc[("AAA", "X"), "Weight"] = 0.123456789
+    datasets = {
+        "information": etf._fund_data_function("information"),
+        "holdings": holdings,
+    }
+    etf._fund_data_function = lambda dataset, overwrite=False: datasets[dataset]
+
+    liquidity = etf.get_liquidity()
+    unrounded = etf.get_liquidity(rounding=12)
+
+    assert etf.get_holdings().loc[("AAA", "X"), "Weight"] == 0.1235  # noqa: PLR2004
+    assert (
+        etf.get_holdings(rounding=2).loc[("AAA", "X"), "Weight"] == 0.12
+    )  # noqa: PLR2004
+    assert liquidity.loc["Dollar Volume to Assets", "AAA"] == round(
+        unrounded.loc["Dollar Volume to Assets", "AAA"], 4
+    )
+    # The price impact of a liquid fund is a fraction of a basis point and keeps its precision.
+    impact = liquidity.loc["Price Impact per $100 Million", "AAA"]
+    assert impact == pytest.approx(
+        unrounded.loc["Price Impact per $100 Million", "AAA"]
+    )
+    assert impact != round(impact, 4)
+
+
+def test_an_empty_premium_says_why(etf, caplog):
+    close = etf._historical()["Close"]["AAA"]
+    nav_day = close.index[-1].to_timestamp() + pd.offsets.BDay(1)
+    with_information(etf, Updated_At=nav_day.strftime("%Y-%m-%d"))
+
+    etf.get_profile()
+
+    assert "No premium data is available for AAA: its prices end on" in caplog.text
+    assert "stale_nav=True" in caplog.text
+
+
+@pytest.fixture(name="index_fund")
+def fixture_index_fund():
+    dates = pd.bdate_range("2026-09-21", "2026-11-03")
+    prices = pd.DataFrame(100.0, index=dates, columns=["FND", "X", "Y", "^IDX"])
+    # The month runs from the close of September 30: X gains 10%, Y loses 20% and both
+    # stay there until the holdings are published on November 3.
+    october = (dates > "2026-09-30") & (dates <= "2026-10-30")
+    later = dates > "2026-10-30"
+    prices.loc[october | later, "X"] = 110.0
+    prices.loc[october | later, "Y"] = 80.0
+    prices.loc[october | later, "FND"] = 100.0 * (1 + 0.5 * 0.1 + 0.4 * -0.2)
+    prices["^IDX"] = 5000.0
+    holdings = pd.DataFrame(
+        {
+            # The weights of November 3, after X's gain and Y's loss (the fund lost 3%),
+            # and a bond.
+            "Weight": [0.5 * 1.1 / 0.97, 0.4 * 0.8 / 0.97, 0.0],
+            "ISIN": ["I1", "I2", "US0000000001"],
+            "Updated At": ["2026-11-03 18:00:00"] * 3,
+        },
+        index=pd.MultiIndex.from_tuples(
+            [("FND", "X"), ("FND", "Y"), ("FND", "")], names=[None, "Asset"]
+        ),
+    )
+    # The rest of the fund is cash.
+    requested = []
+
+    def prices_function(tickers, start, end):
+        requested.append((tickers, start, end))
+        return prices.loc[start:end, [t for t in tickers if t in prices]]
+
+    etf = ETF(
+        tickers=["FND"],
+        historical_function=pd.DataFrame,
+        fund_data_function=lambda dataset, overwrite=False: {"holdings": holdings}.get(
+            dataset
+        ),
+        ratios_function=lambda tickers: pd.DataFrame(),
+        start_date="2026-10-01",
+        end_date="2026-10-30",
+        prices_function=prices_function,
+        sector_function=lambda tickers: pd.Series({"X": "Technology", "Y": "Energy"}),
+    )
+    return etf, requested
+
+
+def test_contributions_add_up_to_the_fund_return(index_fund):
+    etf, requested = index_fund
+    contribution = etf.get_contribution(index="^IDX", rounding=8)
+
+    # The holdings and the index are priced, from before the start date to the holdings' date.
+    assert set(requested[0][0]) == {"FND", "X", "Y", "^IDX"}
+    assert requested[0][1] < "2026-10-01" and requested[0][2] >= "2026-11-03"
+    assert contribution.loc["X", "Start Weight"] == pytest.approx(0.5)
+    assert contribution.loc["Y", "Start Weight"] == pytest.approx(0.4)
+    assert contribution.loc["X", "Contribution"] == pytest.approx(0.05)
+    assert contribution.loc["Y", "Contribution"] == pytest.approx(-0.08)
+    assert contribution.loc["Remainder", "Start Weight"] == pytest.approx(0.1)
+    assert contribution.loc["Remainder", "Contribution"] == pytest.approx(0)
+    assert contribution.loc["Total", "Contribution"] == pytest.approx(-0.03)
+    assert contribution.loc["Y", "Points"] == pytest.approx(-0.08 * 5000)
+    assert list(contribution.index) == ["X", "Y", "Remainder", "Total"]
+
+
+def test_contributions_per_sector_and_without_a_sector(index_fund):
+    etf, _ = index_fund
+    sectors = etf.get_contribution(group_by="sector", rounding=8)
+    excluding = etf.get_return_excluding("technology", rounding=8)
+
+    assert sectors.loc["Energy", "Return"] == pytest.approx(-0.2)
+    assert sectors.loc["Technology", "Points"] == pytest.approx(0.05 * 100)
+    assert excluding.loc["Excluded Weight", "FND"] == pytest.approx(0.5)
+    assert excluding.loc["Return Excluding", "FND"] == pytest.approx(-0.2)
+    assert excluding.loc["Priced Holdings Return", "FND"] == pytest.approx(-0.03 / 0.9)
+
+
+def test_return_excluding_defaults_to_the_largest_holding(index_fund):
+    etf, _ = index_fund
+    excluding = etf.get_return_excluding(rounding=8)
+
+    # X is the largest holding at the start (0.5 against Y's 0.4).
+    pd.testing.assert_frame_equal(excluding, etf.get_return_excluding("X", rounding=8))
+    assert excluding.loc["Excluded Weight", "FND"] == pytest.approx(0.5)
+
+
+def test_the_dollar_volume_of_a_fund_in_pence_is_in_dollars(etf):
+    historical = etf._historical()
+    traded = (historical["Close"]["AAA"] * historical["Volume"]["AAA"]).iloc[-252:]
+    # Every calendar day a pound is worth 1.25 dollars; the close of AAA is in pence and its
+    # assets, like its NAV, in pounds.
+    days = pd.date_range("2024-12-01", "2027-01-31")
+    etf._currency_function = lambda: pd.Series({"AAA": "GBp", "BBB": "USD"})
+    etf._prices_function = lambda tickers, start, end: pd.DataFrame(
+        {"GBPUSD=X": 1.25}, index=days
+    ).loc[start:end, tickers]
+    with_information(etf, NAV_Currency="GBP")
+
+    profile = etf.get_profile(rounding=12)
+    liquidity = etf.get_liquidity(rounding=12)
+
+    assert profile.loc["Average Dollar Volume", "AAA"] == pytest.approx(
+        traded.mean() / 100 * 1.25
+    )
+    assert liquidity.loc["Average Dollar Volume", "AAA"] == pytest.approx(
+        traded.mean() / 100 * 1.25
+    )
+    # The assets are converted too, so the ratio is that of pounds to pounds.
+    assert liquidity.loc["Dollar Volume to Assets", "AAA"] == pytest.approx(
+        traded.mean() / 100 / 1e10
+    )
+    assert liquidity.loc["Average Volume", "BBB"] == pytest.approx(1e6)
+
+
+def test_a_dollar_volume_without_an_exchange_rate_is_nan(etf, caplog):
+    etf._currency_function = lambda: pd.Series({"AAA": "EUR", "BBB": "USD"})
+    etf._prices_function = lambda tickers, start, end: pd.DataFrame(columns=tickers)
+
+    liquidity = etf.get_liquidity()
+
+    assert pd.isna(liquidity.loc["Average Dollar Volume", "AAA"])
+    assert pd.isna(liquidity.loc["Price Impact per $100 Million", "AAA"])
+    assert liquidity.loc["Average Dollar Volume", "BBB"] > 0
+    assert "No EURUSD=X exchange rate is available" in caplog.text
+
+
+def test_a_holding_listed_abroad_contributes_in_the_fund_currency():
+    dates = pd.bdate_range("2026-09-21", "2026-11-03")
+    after = dates > "2026-09-30"
+    # X gains 10% in dollars; Y is flat in euros while the euro gains 10% against the dollar,
+    # so the fund, which holds Y in dollars, gains 0.5 * 10% + 0.4 * 10% = 9%.
+    prices = pd.DataFrame(100.0, index=dates, columns=["FND", "X", "Y", "EURUSD=X"])
+    prices.loc[after, "X"] = 110.0
+    prices["EURUSD=X"] = 1.0
+    prices.loc[after, "EURUSD=X"] = 1.1
+    prices.loc[after, "FND"] = 109.0
+    holdings = pd.DataFrame(
+        {
+            "Weight": [0.5 * 1.1 / 1.09, 0.4 * 1.1 / 1.09],
+            "Updated At": ["2026-11-03"] * 2,
+        },
+        index=pd.MultiIndex.from_tuples(
+            [("FND", "X"), ("FND", "Y")], names=[None, "Asset"]
+        ),
+    )
+    etf = ETF(
+        tickers=["FND"],
+        historical_function=pd.DataFrame,
+        fund_data_function=lambda dataset, overwrite=False: {"holdings": holdings}.get(
+            dataset
+        ),
+        ratios_function=lambda tickers: pd.DataFrame(),
+        start_date="2026-10-01",
+        end_date="2026-10-30",
+        currency_function=lambda: pd.Series({"FND": "USD"}),
+        prices_function=lambda tickers, start, end: prices.loc[
+            start:end, [t for t in tickers if t in prices]
+        ],
+        holding_currency_function=lambda tickers: pd.Series({"X": "USD", "Y": "EUR"}),
+    )
+
+    contribution = etf.get_contribution(rounding=8)
+
+    assert contribution.loc["Y", "Start Weight"] == pytest.approx(0.4)
+    assert contribution.loc["Y", "Return"] == pytest.approx(0.1)
+    assert contribution.loc["Y", "Contribution"] == pytest.approx(0.04)
+    assert contribution.loc["Remainder", "Contribution"] == pytest.approx(0)
+    assert contribution.loc["Total", "Contribution"] == pytest.approx(0.09)
+
+
+def test_assets_without_a_nav_currency_are_in_the_listing_currency(etf):
+    historical = etf._historical()
+    traded = (historical["Close"]["AAA"] * historical["Volume"]["AAA"]).iloc[-252:]
+    # The close of AAA is in pence and no NAV currency is published, so its assets are
+    # taken in pounds, not in dollars.
+    days = pd.date_range("2024-12-01", "2027-01-31")
+    etf._currency_function = lambda: pd.Series({"AAA": "GBp", "BBB": "USD"})
+    etf._prices_function = lambda tickers, start, end: pd.DataFrame(
+        {"GBPUSD=X": 1.25}, index=days
+    ).loc[start:end, tickers]
+
+    liquidity = etf.get_liquidity(rounding=12)
+
+    assert liquidity.loc["Dollar Volume to Assets", "AAA"] == pytest.approx(
+        traded.mean() / 100 / 1e10
+    )
+
+
+@pytest.mark.parametrize("currency", ["GBX", "GBx", "gbp", "ZAC", "zac", "ILA"])
+def test_minor_units_are_recognized_in_any_casing_but_pounds(currency):
+    from financetoolkit.etf.etf_controller import _major_currency
+
+    major, factor = _major_currency(currency)
+
+    assert major == {"G": "GBP", "Z": "ZAR", "I": "ILS"}[currency[0].upper()]
+    assert factor == (1.0 if currency == "gbp" else 0.01)
+
+
+def _fund_in_pounds(rates_available: bool) -> ETF:
+    """A fund listed in pounds that tracks a dollar Benchmark exactly in pounds."""
+    rng = np.random.default_rng(1)
+    dates = pd.bdate_range("2025-01-01", periods=300)
+    benchmark = 100 * np.exp(np.cumsum(rng.normal(0.0004, 0.01, 300)))
+    usd_to_gbp = 0.8 * np.exp(np.cumsum(rng.normal(0, 0.005, 300)))
+    closes = {"VUSA.L": 40 * usd_to_gbp * benchmark / 100, "Benchmark": benchmark}
+    daily = pd.concat(
+        {
+            column: pd.DataFrame(closes, index=dates.to_period("D"))
+            for column in ("Close", "Adj Close")
+        },
+        axis=1,
+    )
+    rates = pd.DataFrame({"USDGBP=X": usd_to_gbp}, index=dates)
+    return ETF(
+        tickers=["VUSA.L"],
+        historical_function=lambda: daily,
+        fund_data_function=lambda dataset, overwrite=False: None,
+        ratios_function=lambda tickers: pd.DataFrame(),
+        start_date="2025-03-01",
+        end_date="2026-02-20",
+        currency_function=lambda: pd.Series({"VUSA.L": "GBP"}),
+        prices_function=lambda tickers, start, end: (
+            rates.reindex(columns=tickers) if rates_available else pd.DataFrame()
+        ),
+        holding_currency_function=lambda tickers: pd.Series({"SPY": "USD"}).reindex(
+            tickers
+        ),
+        benchmark_ticker="SPY",
+    )
+
+
+def test_tracking_converts_the_benchmark_into_the_fund_currency():
+    # Compared as they are, the pound's move against the dollar would be a tracking error
+    # of about 8% a year.
+    tracking = _fund_in_pounds(rates_available=True).get_tracking(rounding=10)
+
+    assert tracking.loc["Tracking Difference", "VUSA.L"] == pytest.approx(0, abs=1e-9)
+    assert tracking.loc["Tracking Error", "VUSA.L"] == pytest.approx(0, abs=1e-9)
+    assert tracking.loc["Correlation", "VUSA.L"] == pytest.approx(1)
+
+
+def test_tracking_without_an_exchange_rate_compares_the_prices_as_they_are(caplog):
+    with caplog.at_level("WARNING", logger="financetoolkit"):
+        tracking = _fund_in_pounds(rates_available=False).get_tracking()
+
+    assert tracking.loc["Tracking Error", "VUSA.L"] > 0.05  # noqa: PLR2004
+    assert any(
+        "include the move of the exchange rate" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_return_excluding_leaves_out_a_ticker_without_holdings(index_fund, caplog):
+    etf, _ = index_fund
+    # A stock next to the fund: it is priced like the fund but holds nothing.
+    etf._tickers = ["FND", "^IDX"]
+
+    excluding = etf.get_return_excluding("X", rounding=8)
+
+    assert list(excluding.columns) == ["FND"]
+    assert excluding.loc["Return Excluding", "FND"] == pytest.approx(-0.2)
+    assert "^IDX has no holdings and is left out." in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("method", "arguments"),
+    [
+        ("get_contribution", {"holdings": 0}),
+        ("get_contribution", {"holdings": -1}),
+        ("get_contribution", {"index": "NOPE"}),
+        ("get_return_excluding", {"holdings": 0}),
+        ("get_return_excluding", {"exclude": []}),
+        ("get_look_through_valuation", {"holdings": 0}),
+    ],
+)
+def test_contribution_arguments_are_checked(index_fund, method, arguments):
+    from financetoolkit.utilities.error_model import InvalidArgumentError
+
+    etf, _ = index_fund
+    with pytest.raises(InvalidArgumentError):
+        getattr(etf, method)(**arguments)
+
+
+@pytest.mark.parametrize("limit", [0, 1.5, True])
+def test_a_holdings_limit_of_zero_is_refused(etf, limit):
+    from financetoolkit.utilities.error_model import InvalidArgumentError
+
+    with pytest.raises(InvalidArgumentError, match="limit"):
+        etf.get_holdings(limit=limit)
+
+    # A negative limit keeps the smallest holdings.
+    assert not etf.get_holdings(limit=-1).empty
+
+
+def test_return_excluding_without_priced_holdings_is_nan_without_a_warning(etf):
+    import warnings
+
+    # The holdings' prices end long before the holdings' date, so no weight rolls back to
+    # a start weight and there is nothing to divide by.
+    rng = np.random.default_rng(1)
+    dates = pd.bdate_range("2024-11-01", periods=340).to_period("D")
+    prices = pd.DataFrame(
+        {s: 10 * np.exp(np.cumsum(rng.normal(0, 0.01, 340))) for s in ["X", "Y", "Z"]},
+        index=dates,
+    )
+    etf._prices_function = lambda tickers, start, end: prices[
+        [ticker for ticker in tickers if ticker in prices]
+    ]
+    etf._sector_function = lambda tickers: pd.Series({"X": "Tech", "Y": "Energy"})
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        excluding = etf.get_return_excluding("X", rounding=8)
+
+    assert excluding.loc["Priced Holdings Return"].isna().all()
+
+
+def test_funds_without_country_weightings_are_named(etf, caplog):
+    assert etf.get_country_weightings().empty
+    assert "no country weightings for AAA, BBB" in caplog.text
+
+    caplog.clear()
+    assert not etf.get_sector_weightings().empty
+    assert "weightings" not in caplog.text
+
+
+def test_funds_whose_weightings_request_failed_are_not_called_non_funds(etf, caplog):
+    from financetoolkit.utilities import error_model
+
+    sectors = pd.DataFrame(
+        {"AAA": [0.2, 0.8]}, index=pd.Index(["Energy", "Technology"], name="Sector")
+    )
+
+    def failing_for_bbb(dataset, overwrite=False):  # noqa: ARG001
+        # The collector reports BBB's failed request itself and leaves it out.
+        error_model.report_request_failure()
+        return sectors
+
+    etf._fund_data_function = failing_for_bbb
+    assert list(etf.get_sector_weightings().columns) == ["AAA"]
+    assert "weightings for BBB" not in caplog.text
+
+    # A later call served from memory does not read the failed fund as one without any.
+    etf._fund_data_function = lambda dataset, overwrite=False: sectors  # noqa: ARG005
+    etf.get_sector_weightings()
+    assert "weightings for BBB" not in caplog.text
+
+    # Asked again, an answer without BBB means it has none.
+    etf.get_sector_weightings(overwrite=True)
+    assert "no sector weightings for BBB" in caplog.text
+
+
+def test_a_failed_fmp_request_names_its_status_for_the_tickers(caplog):
+    from financetoolkit import fmp_model
+    from financetoolkit.utilities import error_model
+
+    frame = fmp_model._request_failed("HTTP 500")
+    error_model.check_for_error_messages({"QQQ": frame}, user_subscription="Free")
+
+    assert "failed (HTTP 500) for the following tickers: QQQ" in caplog.text
+    assert "unrecognised" not in caplog.text

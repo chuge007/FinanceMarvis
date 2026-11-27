@@ -1,0 +1,52 @@
+"""Springate Model Tests""" ""
+import pandas as pd
+import pytest
+
+from financetoolkit.models.distress import springate_model
+
+
+def test_get_ebt_to_current_liabilities_ratio(recorder):
+    recorder.capture(
+        springate_model.get_ebt_to_current_liabilities_ratio(
+            ebt=pd.Series([100, 110, 120, 130, 80]),
+            current_liabilities=pd.Series([500, 400, 300, 200, 100]),
+        )
+    )
+
+
+def test_get_springate_score(recorder):
+    recorder.capture(
+        springate_model.get_springate_score(
+            working_capital_to_total_assets_ratio=pd.Series([0.2, -0.05]),
+            ebit_to_total_assets_ratio=pd.Series([0.15, -0.03]),
+            ebt_to_current_liabilities_ratio=pd.Series([0.4, -0.08]),
+            sales_to_total_assets_ratio=pd.Series([1.2, 0.4]),
+        )
+    )
+    # Synthetic ground truth: healthy is well above the 0.862 cutoff, distressed below.
+    healthy = springate_model.get_springate_score(
+        working_capital_to_total_assets_ratio=0.2,
+        ebit_to_total_assets_ratio=0.15,
+        ebt_to_current_liabilities_ratio=0.4,
+        sales_to_total_assets_ratio=1.2,
+    )
+    distressed = springate_model.get_springate_score(
+        working_capital_to_total_assets_ratio=-0.05,
+        ebit_to_total_assets_ratio=-0.03,
+        ebt_to_current_liabilities_ratio=-0.08,
+        sales_to_total_assets_ratio=0.4,
+    )
+    assert round(healthy, 4) == 1.4105
+    assert healthy > 0.862
+    assert round(distressed, 4) == -0.0364
+    assert distressed < 0.862
+
+
+def test_get_springate_score_type_error():
+    with pytest.raises(TypeError):
+        springate_model.get_springate_score(
+            working_capital_to_total_assets_ratio="not a number",
+            ebit_to_total_assets_ratio=0.15,
+            ebt_to_current_liabilities_ratio=0.4,
+            sales_to_total_assets_ratio=1.2,
+        )

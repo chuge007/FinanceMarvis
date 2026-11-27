@@ -1,0 +1,105 @@
+import { getSharedMarketDataCoordinator, MarketDataCoordinator, resolveEntryValue } from "../../../market-data/coordinator";
+import type { ChartRequest, InstrumentRef } from "../../../market-data/request-types";
+import type { QueryEntry } from "../../../market-data/result-types";
+import type { DataProvider } from "../../../types/data-provider";
+import type { ListingDelisting, PricePoint } from "../../../types/financials";
+import type { BacktestBar } from "./rules";
+import { isFiniteNumber } from "../../../utils/guards";
+import { rollAdjustedHistory } from "../../../market-data/futures-roll-returns";
+
+export interface BacktestHistoryDependencies {
+  loadChart(request: ChartRequest, options?: { forceRefresh?: boolean }): Promise<QueryEntry<PricePoint[]>>;
+}
+export function createBacktestDependencies(marketData?: DataProvider): BacktestHistoryDependencies {
+  const coordinator = marketData ? new MarketDataCoordinator(marketData) : getSharedMarketDataCoordinator();
+  return {
+    loadChart: (request, options) => coordinator
+      ? coordinator.loadChart(request, options)
+      : Promise.reject(new Error("Market data coordinator unavailable")),
+  };
+}
+export interface BacktestHistory {
+  symbol: string;
+  bars: BacktestBar[];
+  /**
+   * Sessions served without a close the test can trade through (at or below
+   * zero, or missing), ascending; `undatedSkipped` counts points without a date.
+   */
+  skippedDates: string[];
+  undatedSkipped: number;
+  fetchedAt: number;
+  /** The listing no longer trades: its last bar is its last session, and no later one will come. */
+  delisting?: ListingDelisting;
+  /** A continuous future's bars, back-adjusted at each roll: "rolls back-adjusted" (rollAdjustedHistory). */
+  rollNote?: string;
+}
+
+/**
+ * One bar per UTC session date, ascending; later duplicates replace earlier
+ * ones. A session served only without a positive close is skipped and named,
+ * so the report can say which days the curve steps over, as is one the source
+ * left out of the series for that reason (`sourceSkipped`) within the bars' span.
+ */
+export function toBacktestBars(
+  points: readonly PricePoint[],
+  sourceSkipped: readonly string[] = [],
+): Pick<BacktestHistory, "bars" | "skippedDates" | "undatedSkipped"> {
+  const byDate = new Map<string, BacktestBar>();
+  const skipped = new Set<string>();
+  let undatedSkipped = 0;
+  for (const point of points) {
+    const time = point.date instanceof Date ? point.date.getTime() : Date.parse(String(point.date));
+    if (!Number.isFinite(time)) {
+      undatedSkipped += 1;
+      continue;
+    }
+    const date = new Date(time).toISOString().slice(0, 10);
+    if (!isFiniteNumber(point.close) || point.close <= 0) {
+      skipped.add(date);
+      continue;
+    }
+    byDate.set(date, {
+      date,
+      open: isFiniteNumber(point.open) && point.open > 0 ? point.open : null,
+      high: isFiniteNumber(point.high) && point.high > 0 ? point.high : null,
+      low: isFiniteNumber(point.low) && point.low > 0 ? point.low : null,
+      close: point.close,
+      ...(point.partial === true ? { partial: true as const } : {}),
+      ...(point.unsettled === true ? { unsettled: true as const } : {}),
+    });
+  }
+  const bars = [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date));
+  const first = bars[0]?.date, last = bars.at(-1)?.date;
+  for (const date of sourceSkipped) if (first && last && date > first && date < last) skipped.add(date);
+  return {
+    bars,
+    skippedDates: [...skipped].filter((date) => !byDate.has(date)).sort(),
+    undatedSkipped,
+  };
+}
+
+/**
+ * The daily closes a run tests. A run of the last five or ten years reads the
+ * newest bars one request returns (about twenty years); `wholeHistory`, for
+ * a run over every session (lookback max), reads on to the first bar kept.
+ */
+export async function loadBacktestHistory(
+  instrument: InstrumentRef,
+  options: { forceRefresh?: boolean; signal?: AbortSignal; wholeHistory?: boolean } = {},
+  dependencies: BacktestHistoryDependencies = createBacktestDependencies(),
+): Promise<BacktestHistory> {
+  const symbol = instrument.symbol.trim().toUpperCase();
+  const entry = await dependencies.loadChart(
+    { instrument, bufferRange: "ALL", granularity: "resolution", resolution: "1d", ...(options.wholeHistory ? {} : { newestBars: true }) },
+    { forceRefresh: options.forceRefresh },
+  );
+  options.signal?.throwIfAborted();
+  // A continuous future is tested on one contract's returns at each roll, its earlier prices scaled to the newest
+  // contract's: the run's prices (Close, Entry and Exit) are back-adjusted, and the report's headers say so.
+  const adjusted = rollAdjustedHistory(resolveEntryValue(entry) ?? [], symbol);
+  const history = toBacktestBars(adjusted.points, entry.history?.nonPositiveCloseDates);
+  if (!history.bars.length) throw new Error(entry.error?.message ?? "Daily price history unavailable");
+  const delisting = entry.history?.delisting;
+  return { symbol, ...history, fetchedAt: entry.fetchedAt ?? Date.now(), ...(delisting ? { delisting } : {}),
+    ...(adjusted.note ? { rollNote: adjusted.note } : {}) };
+}

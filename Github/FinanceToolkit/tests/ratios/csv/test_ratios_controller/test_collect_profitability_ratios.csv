@@ -1,0 +1,61 @@
+,,2020,2021,2022,2023
+AAPL,Gross Margin,0.3823,0.4178,0.4331,0.4413
+AAPL,Operating Margin,0.2415,0.2978,0.3029,0.2982
+AAPL,Net Profit Margin,0.2091,0.2588,0.2531,0.2531
+AAPL,Continuing Operations Profit Margin,0.2091,0.2588,0.2531,0.2531
+AAPL,EBITDA Margin,0.2817,0.3287,0.331,0.3283
+AAPL,Free Cash Flow Margin,0.2673,0.2541,0.2826,0.2598
+AAPL,Interest Coverage Ratio,23.0727,41.1905,40.7496,29.062
+AAPL,Income Before Tax Profit Margin,0.2444,0.2985,0.302,0.2967
+AAPL,Effective Tax Rate,0.1443,0.133,0.162,0.1472
+AAPL,Return on Assets,,0.2806,0.2836,0.275
+AAPL,Operating Return on Assets,,0.3229,0.3394,0.3241
+AAPL,Cash Return on Assets,,0.3083,0.3471,0.3134
+AAPL,Return on Equity,,1.4744,1.7546,1.7195
+AAPL,Return on Invested Capital,,0.4879,0.5229,0.547
+AAPL,Return on Net Operating Assets,,38.7091,8.6341,7.7171
+AAPL,Net Borrowing Cost,,0.0028,-0.002,-0.0036
+AAPL,Financial Leverage,,-0.962,-0.7966,-0.7768
+AAPL,Return on Capital Employed,0.3034,0.4831,0.6009,0.5514
+AAPL,Return on Tangible Assets,,0.2806,0.2836,0.275
+AAPL,Income Quality Ratio,1.4052,1.0988,1.2239,1.1397
+AAPL,Free Cash Flow to Operating Cash Flow Ratio,0.9094,0.8935,0.9123,0.9009
+AAPL,Cash Tax Rate,0.1416,0.2324,0.1643,0.1642
+AAPL,Tax Rate Divergence,-0.0027,0.0994,0.0023,0.017
+AAPL,Gross Profitability,0.3241,0.4354,0.4841,0.4797
+AAPL,Operating Profitability,0.9706,1.685,2.2992,1.7759
+AAPL,Cash-Based Operating Profitability,,0.3943,0.4204,0.4009
+AAPL,Cash Return on Invested Capital,,0.4801,0.5823,0.5589
+AAPL,Free Cash Flow Conversion,1.2779,0.9818,1.1166,1.0267
+AAPL,Free Cash Flow to EBITDA,0.9486,0.7731,0.8537,0.7915
+AAPL,Percent Accruals,-0.4052,-0.0988,-0.2239,-0.1397
+MSFT,Gross Margin,0.6778,0.6893,0.684,0.6892
+MSFT,Operating Margin,0.3703,0.4159,0.4206,0.4177
+MSFT,Net Profit Margin,0.3096,0.3645,0.3669,0.3415
+MSFT,Continuing Operations Profit Margin,0.3096,0.3645,0.3669,0.3415
+MSFT,EBITDA Margin,0.4598,0.4855,0.4935,0.4831
+MSFT,Free Cash Flow Margin,0.3163,0.3339,0.3286,0.2807
+MSFT,Interest Coverage Ratio,20.4396,29.8022,40.4183,44.9812
+MSFT,Income Before Tax Profit Margin,0.3708,0.423,0.4222,0.4214
+MSFT,Effective Tax Rate,0.1651,0.1383,0.1311,0.1898
+MSFT,Return on Assets,,0.193,0.2082,0.1863
+MSFT,Operating Return on Assets,,0.2202,0.2387,0.2279
+MSFT,Cash Return on Assets,,0.2417,0.2549,0.2255
+MSFT,Return on Equity,,0.4708,0.4715,0.3882
+MSFT,Return on Invested Capital,,0.302,0.3311,0.2904
+MSFT,Return on Net Operating Assets,,0.9966,0.7666,0.5476
+MSFT,Net Borrowing Cost,,-0.0027,0.0005,0.0149
+MSFT,Financial Leverage,,-0.5262,-0.3852,-0.2992
+MSFT,Return on Capital Employed,0.2313,0.2852,0.3091,0.2876
+MSFT,Return on Tangible Assets,,0.2324,0.2587,0.2331
+MSFT,Income Quality Ratio,1.3702,1.2525,1.2241,1.2103
+MSFT,Free Cash Flow to Operating Cash Flow Ratio,0.7455,0.7313,0.7317,0.6791
+MSFT,Cash Tax Rate,0.0,0.0,0.0,0.0
+MSFT,Tax Rate Divergence,-0.1651,-0.1383,-0.1311,-0.1898
+MSFT,Gross Profitability,0.3217,0.3471,0.3717,0.3545
+MSFT,Operating Profitability,0.425,0.4752,0.4876,0.4188
+MSFT,Cash-Based Operating Profitability,,0.3035,0.3256,0.3208
+MSFT,Cash Return on Invested Capital,,0.2812,0.2978,0.2408
+MSFT,Free Cash Flow Conversion,1.0215,0.9159,0.8957,0.8219
+MSFT,Free Cash Flow to EBITDA,0.6879,0.6877,0.6659,0.5809
+MSFT,Percent Accruals,-0.3702,-0.2525,-0.2241,-0.2103

@@ -1,0 +1,355 @@
+import { describe, expect, test } from "bun:test";
+import { formatCloudDateTime, formatCloudHistoryEnd, mapCloudFinancials, mapQuote } from "./normalizers";
+import type { CloudQuotePayload } from "../../api-client";
+import { mergeQuoteContribution, normalizeQuoteContribution } from "../../market-data/quotes/contributions";
+import { resolveCanonicalQuote, resolveTickerFinancialsQuoteState } from "../../market-data/quotes/resolution";
+import { deriveQuarterlyStatements } from "../../time-series/fundamentals";
+import { formatMarketChangeWithCurrency, formatMarketPriceWithCurrency, quoteFormatOptions } from "../../market-data/market/format";
+import { sessionQuotes } from "../../test-support/test-fixture-session-quotes";
+import type { Quote } from "../../types/financials";
+import { statedYearRange } from "../../market-data/quotes/live-valuation";
+import { quoteMarketStateLabel } from "../../market-data/market/status";
+import { dailyCloseText } from "../../market-data/quotes/freshness";
+import { quoteSourceName } from "../../market-data/quotes/export-identity";
+
+test("daily fund NAV mapping separates its observation kind from monetary price units", () => {
+  const raw: CloudQuotePayload = {
+    symbol: "VFIAX", currency: "USD", instrumentType: "MUTUALFUND", priceBasis: "nav",
+    price: 721.63, previousClose: 718.5, change: 3.13, changePercent: 3.13 / 718.5 * 100,
+    changeSessionDate: "2026-10-06", lastUpdated: Date.parse("2026-10-06T04:00:00Z"),
+    listingExchangeName: "NASDAQ", providerId: "gloomberb-cloud", dataSource: "delayed",
+    stale: false, sessionConfidence: "unknown",
+  };
+  const quote = mapQuote(raw);
+  expect(quote).toMatchObject({ priceObservation: "nav", priceBasis: "per-unit", price: 721.63,
+    change: 3.13, previousClose: 718.5, changeSessionDate: "2026-10-06", lastUpdated: raw.lastUpdated });
+  const options = quoteFormatOptions(quote);
+  expect(formatMarketPriceWithCurrency(quote.price, quote.currency, options)).toBe("$721.63");
+  expect(formatMarketChangeWithCurrency(quote.change, quote.currency, options, quote.price)).toBe("+$3.13");
+  expect(quote.changePercent).toBeCloseTo(0.4356298);
+
+  const financials = mapCloudFinancials({ quote: raw, annualStatements: [], quarterlyStatements: [], priceHistory: [] });
+  expect(financials.quote).toEqual(quote);
+  expect(financials.fundamentals).toBeUndefined();
+  const contribution = normalizeQuoteContribution(JSON.parse(JSON.stringify(quote)))!;
+  const selected = resolveCanonicalQuote({ "gloomberb-cloud": contribution }, Date.parse("2026-10-07T15:00:00Z")).quote;
+  expect(selected).toMatchObject({ priceObservation: "nav", priceBasis: "per-unit", price: 721.63,
+    changeSessionDate: "2026-10-06", lastUpdated: raw.lastUpdated, sessionConfidence: "unknown" });
+  expect(selected?.marketState).toBeUndefined();
+  for (const priceBasis of ["NAV", "unknown", 1]) {
+    expect(() => mapQuote({ ...raw, priceBasis } as CloudQuotePayload)).toThrow("Unsupported quote price basis");
+  }
+});
+
+test("intraday boundaries use venue time or explicit UTC while daily dates stay UTC calendar dates", () => {
+  const winter = new Date("2026-01-15T01:02:03.456Z");
+  const summer = new Date("2026-07-15T01:02:03.456Z");
+  for (const exchange of ["", "UNKNOWN"]) {
+    expect(formatCloudDateTime(winter, true, exchange)).toBe("2026-01-15T01:02:03Z");
+    expect(formatCloudDateTime(summer, true, exchange)).toBe("2026-07-15T01:02:03Z");
+  }
+  expect(formatCloudDateTime(winter, true, "NASDAQ")).toBe("2026-01-14 20:02:03");
+  expect(formatCloudDateTime(summer, true, "NASDAQ")).toBe("2026-07-14 21:02:03");
+  expect(formatCloudDateTime(summer, true, "CCC")).toBe("2026-07-15 01:02:03");
+  expect(formatCloudDateTime(winter, false, "NASDAQ")).toBe("2026-01-15");
+  expect(formatCloudDateTime(summer, false)).toBe("2026-07-15");
+});
+
+test("a daily window ending now holds today's bar once the session has settled, and only then", () => {
+  const end = (time: string, exchange: string) => formatCloudHistoryEnd(new Date(time), false, exchange);
+  // Gloom Cloud reads a date-only end as exclusive: 16 Oct 22:12Z must reach 17 Oct to hold Friday's bar.
+  expect(end("2026-10-16T22:12:00Z", "NASDAQ")).toBe("2026-10-17");
+  expect(end("2026-10-16T20:31:00Z", "NASDAQ")).toBe("2026-10-17");
+  // The session trades, has just closed (its bar not settled), or has not opened: today's date, the quote forms the day.
+  for (const time of ["2026-10-16T15:00:00Z", "2026-10-16T20:20:00Z", "2026-10-16T09:00:00Z"]) {
+    expect(end(time, "NASDAQ"), time).toBe("2026-10-16");
+  }
+  // After UTC midnight, Friday's bar is already inside the window; a weekend names no new session.
+  expect(end("2026-10-17T02:00:00Z", "NASDAQ")).toBe("2026-10-17");
+  expect(end("2026-10-17T15:00:00Z", "NASDAQ")).toBe("2026-10-17");
+  // Tokyo closed at 06:30Z, London trades until 15:30Z.
+  expect(end("2026-10-16T08:00:00Z", "JPX")).toBe("2026-10-17");
+  expect(end("2026-10-16T08:00:00Z", "LSE")).toBe("2026-10-16");
+  expect(end("2026-10-16T17:00:00Z", "LSE")).toBe("2026-10-17");
+  // Without a venue whose sessions are known the date stands, and intraday ends keep their time.
+  expect(end("2026-10-16T22:12:00Z", "")).toBe("2026-10-16");
+  expect(end("2026-10-16T22:12:00Z", "CCC")).toBe("2026-10-16");
+  expect(formatCloudHistoryEnd(new Date("2026-10-16T22:12:00Z"), true, "NASDAQ")).toBe("2026-10-16 18:12:00");
+});
+
+describe("cloud quote wire values", () => {
+  test.each([null, undefined, Number.NaN, Infinity, -Infinity])(
+    "normalizes unavailable daily changes independently, including %s",
+    (missing) => {
+      const quote: CloudQuotePayload = {
+        symbol: "VOD", currency: "GBp", price: 100, lastUpdated: 1,
+        providerId: "gloomberb-cloud", dataSource: "delayed",
+        change: missing, changePercent: 0,
+      };
+      const withoutChange = mapQuote(quote);
+      expect(withoutChange.change).toBeNaN();
+      expect(withoutChange.changePercent).toBe(0);
+      const withoutPercent = mapQuote({ ...quote, change: 2, changePercent: missing });
+      expect(withoutPercent.change).toBe(0.02);
+      expect(withoutPercent.changePercent).toBeNaN();
+    },
+  );
+});
+
+test("a previous close far below the 52-week low drops the move it implies, and a real gap keeps it", () => {
+  const base: CloudQuotePayload = {
+    symbol: "000001.SS", currency: "CNY", price: 3813.79, lastUpdated: 1,
+    providerId: "gloomberb-cloud", dataSource: "delayed", low52w: 3741.11,
+  };
+  // Served live on 2026-10-09: the close implies +1,859,927,904%.
+  const impossible = mapQuote({ ...base, previousClose: 0.00020505048, change: 3813.79, changePercent: 1859927904 });
+  expect(impossible.change).toBeNaN();
+  expect(impossible.changePercent).toBeNaN();
+  expect("previousClose" in impossible).toBe(false);
+  expect(mapQuote({ ...base, previousClose: 37.4, change: 3776.39, changePercent: 10097 }).change).toBeNaN();
+
+  // Just inside the margin, a stale 52-week low or an unadjusted split, and
+  // with no 52-week low there is nothing to judge against.
+  expect(mapQuote({ ...base, previousClose: 37.42, change: 3776.37, changePercent: 10092 }).previousClose).toBe(37.42);
+  const pennyGap = mapQuote({ ...base, symbol: "PNY", currency: "USD", price: 5, low52w: 0.4, previousClose: 0.5, change: 4.5, changePercent: 900 });
+  expect(pennyGap).toMatchObject({ previousClose: 0.5, change: 4.5, changePercent: 900 });
+  const { low52w: _omitted, ...withoutRange } = base;
+  expect(mapQuote({ ...withoutRange, previousClose: 0.0002, change: 3813.79, changePercent: 1 }).change).toBe(3813.79);
+});
+
+test("an index's 0 open is none, a 52-week range that repeats its day's is none, and one from the daily bars says so", () => {
+  const index = (overrides: Partial<CloudQuotePayload>) => mapQuote({
+    symbol: "^CASE30", currency: "EGP", instrumentType: "INDEX", price: 52023.4, previousClose: 52500.5, change: -477.1, changePercent: -0.91,
+    open: 52671.5, low: 51904.4, high: 52691.3, low52w: 51904.4, high52w: 52691.3, lastUpdated: Date.parse("2026-11-12T12:25:00Z"),
+    listingExchangeName: "EGX", providerId: "gloomberb-cloud", dataSource: "delayed", ...overrides,
+  } as CloudQuotePayload);
+  // As served on Thu 12 Nov 2026: the day's range again, so no 52-week range at all.
+  expect(statedYearRange(index({}))).toBeNull();
+  const fromBars = index({ low52w: 39537, high52w: 56931, yearRangeBasis: "daily-bars" });
+  expect(statedYearRange(fromBars)).toEqual({ low: 39537, high: 56931 });
+  expect(fromBars.yearRangeBasis).toBe("daily-bars");
+  // The word goes with its range: a tick relaying the same range keeps it, one with the day's range again (a copy
+  // saved before the server read the bars) drops it, never labelling the day's range "daily bars".
+  const kept = normalizeQuoteContribution(fromBars)!;
+  const { yearRangeBasis: _unsaid, ...relayed } = fromBars;
+  expect(mergeQuoteContribution(kept, { ...relayed, price: 52030 }).yearRangeBasis).toBe("daily-bars");
+  const { yearRangeBasis: _none, ...saved } = index({});
+  const merged = mergeQuoteContribution(kept, saved);
+  expect([merged.high52w, merged.yearRangeBasis]).toEqual([52691.3, undefined]);
+  expect(statedYearRange(merged)).toBeNull();
+  // A share whose range is its day's (a new listing) keeps it; a bound at 0 is none.
+  expect(statedYearRange(index({ symbol: "COMI.CA", instrumentType: "EQUITY" }))).toEqual({ low: 51904.4, high: 52691.3 });
+  expect(statedYearRange(index({ low52w: 0, high52w: 209714 }))).toBeNull();
+  // ^BVSP before B3's open: Open 0.00 and Day Range 0.00 - 0.00 are no prices.
+  const beforeOpen = index({ symbol: "^BVSP", currency: "BRL", open: 0, low: 0, high: 0, listingExchangeName: "B3" });
+  expect([beforeOpen.open, beforeOpen.low, beforeOpen.high]).toEqual([undefined, undefined, undefined]);
+  // ^MERV with no live quote: the latest daily bar's close, labelled with its session.
+  const merval = index({ symbol: "^MERV", currency: "ARS", dailyClose: { session: "2026-11-11" }, listingExchangeName: "BYMA" });
+  expect(merval.dailyClose).toEqual({ session: "2026-11-11" });
+  expect([quoteMarketStateLabel(merval), dailyCloseText(merval)]).toEqual(["DAILY CLOSE", "no live quote, daily close of Wed 11 Nov"]);
+  expect(index({ dailyClose: { session: "yesterday" } } as Partial<CloudQuotePayload>).dailyClose).toBeUndefined();
+  // A Treasury yield index's 0 is a level: ^IRX's open, low and 52-week low of 0.00 stand.
+  const bill = index({ symbol: "^IRX", currency: "USD", price: 0.01, open: 0, low: 0, high: 0.02, low52w: -0.01, high52w: 1.62,
+    listingExchangeName: "CBOE" });
+  expect([bill.open, bill.low, bill.high]).toEqual([0, 0, 0.02]);
+  expect(statedYearRange(bill)).toEqual({ low: -0.01, high: 1.62 });
+});
+
+test("a null last-session move from the service is no move", () => {
+  const quote = mapQuote({ symbol: "SPCX", currency: "USD", price: 166.95, change: 6.38, changePercent: 3.97, lastUpdated: 1,
+    providerId: "gloomberb-cloud", dataSource: "delayed", regularClose: 160.57,
+    regularChange: null as unknown as undefined, regularChangePercent: null as unknown as undefined });
+  expect(quote.regularClose).toBe(160.57);
+  expect("regularChange" in quote).toBe(false);
+  expect("regularChangePercent" in quote).toBe(false);
+});
+
+describe("mapCloudFinancials", () => {
+  test("divides GBp history with the raw quote currency, not the normalized GBP quote", () => {
+    const financials = mapCloudFinancials({
+      quote: {
+        providerId: "gloomberb-cloud",
+        dataSource: "delayed",
+        symbol: "VOD",
+        price: 23.1,
+        currency: "GBp",
+        regularClose: 23,
+        regularCloseSessionDate: "2026-05-12",
+        regularChange: 0.5,
+        regularChangePercent: 2.2222,
+        change: 1,
+        changePercent: 4.5,
+        lastUpdated: Date.parse("2026-05-13T15:00:00Z"),
+        listingExchangeName: "LSE",
+        exchangeName: "LSE",
+      },
+      annualStatements: [],
+      quarterlyStatements: [],
+      priceHistory: [{
+        date: "2026-05-13 10:15:00",
+        open: 23,
+        high: 23.4,
+        low: 22.8,
+        close: 23.1,
+        volume: 1000,
+      }],
+    });
+
+    expect(financials.quote?.currency).toBe("GBP");
+    expect(financials.quote?.price).toBeCloseTo(0.231);
+    expect(financials.quote?.regularClose).toBeCloseTo(0.23);
+    expect(financials.quote?.regularCloseSessionDate).toBe("2026-05-12");
+    // The move is in pence like the close; its percent is unitless.
+    expect(financials.quote?.regularChange).toBeCloseTo(0.005);
+    expect(financials.quote?.regularChangePercent).toBe(2.2222);
+    expect(financials.priceHistory[0]?.close).toBeCloseTo(0.231);
+    expect(financials.priceHistory[0]?.date.toISOString()).toBe("2026-05-13T09:15:00.000Z");
+  });
+});
+
+test("a stream frame without the 52-week range or market cap keeps the snapshot's values", () => {
+  const lastUpdated = Date.now();
+  const snapshot = mapQuote({
+    symbol: "AAPL", currency: "USD", price: 230, change: 1, changePercent: 0.4, lastUpdated: lastUpdated - 60_000,
+    providerId: "gloomberb-cloud", dataSource: "live", high52w: 260, low52w: 160, marketCap: 3.4e12, name: "Apple Inc.",
+    listingExchangeName: "NASDAQ", marketState: "REGULAR",
+  });
+  const frame = mapQuote({
+    symbol: "AAPL", currency: "USD", price: 231, change: 2, changePercent: 0.9, lastUpdated,
+    providerId: "gloomberb-cloud", dataSource: "live", listingExchangeName: "NASDAQ", marketState: "REGULAR",
+  });
+  expect("high52w" in frame).toBe(false);
+  expect(Object.values(frame).includes(undefined)).toBe(false);
+
+  const resolved = resolveTickerFinancialsQuoteState(
+    { annualStatements: [], quarterlyStatements: [], priceHistory: [], quote: snapshot },
+    frame,
+  )?.quote;
+  expect(resolved).toMatchObject({ price: 231, high52w: 260, low52w: 160, marketCap: 3.4e12, name: "Apple Inc." });
+
+  // An explicit undefined from any source is not a retraction either.
+  const merged = mergeQuoteContribution(
+    normalizeQuoteContribution(snapshot),
+    { ...frame, high52w: undefined, name: undefined },
+  );
+  expect(merged).toMatchObject({ high52w: 260, name: "Apple Inc." });
+});
+
+test("a stream frame from the next trading day drops the previous day's close, open and volume it leaves out", () => {
+  const monday = mapQuote({
+    symbol: "AAPL", currency: "USD", price: 110, change: 10, changePercent: 10, previousClose: 100, open: 101,
+    bid: 109.9, ask: 110.1, volume: 5e7, high52w: 150, changeSessionDate: "2026-09-14",
+    lastUpdated: Date.parse("2026-09-14T20:00:00Z"), providerId: "gloomberb-cloud", dataSource: "live",
+    listingExchangeName: "NASDAQ", marketState: "CLOSED",
+  });
+  // The server has no anchor for Tuesday yet, so it leaves the close, open and volume out.
+  const tuesdayAt = Date.parse("2026-09-15T14:00:00Z");
+  const tuesday = mapQuote({
+    symbol: "AAPL", currency: "USD", price: 112, change: Number.NaN, changePercent: Number.NaN, bid: 111.9, ask: 112.1,
+    changeSessionDate: "2026-09-15", lastUpdated: tuesdayAt, providerId: "gloomberb-cloud", dataSource: "live",
+    listingExchangeName: "NASDAQ", marketState: "REGULAR",
+  });
+
+  // The desktop window receives the frame as JSON.
+  for (const frame of [tuesday, JSON.parse(JSON.stringify(tuesday)) as typeof tuesday]) {
+    const merged = mergeQuoteContribution(normalizeQuoteContribution(monday), frame);
+    expect(merged).toMatchObject({ price: 112, bid: 111.9, high52w: 150, changeSessionDate: "2026-09-15" });
+    expect([merged.previousClose, merged.open, merged.volume]).toEqual([undefined, undefined, undefined]);
+    const resolved = resolveCanonicalQuote({ "gloomberb-cloud": merged }, tuesdayAt + 5_000).quote;
+    expect(resolved?.previousClose).toBeUndefined();
+    expect(Number.isFinite(resolved?.change)).toBe(false);
+  }
+
+  // Within one trading day a frame that leaves the anchor out keeps it.
+  const anchored = mergeQuoteContribution(normalizeQuoteContribution(tuesday), { ...tuesday, previousClose: 110, open: 111 });
+  const later = mergeQuoteContribution(anchored, { ...tuesday, price: 113, lastUpdated: tuesdayAt + 60_000 });
+  expect(later).toMatchObject({ price: 113, previousClose: 110, open: 111 });
+});
+
+test("served withdrawal ids become gaps that charts do not recompute", () => {
+  // Cloud strips O's Q4 2025 revenue and names it; its quarters mix measures,
+  // so the full year minus them would chart 1,642,725,000.
+  const financials = mapCloudFinancials({
+    annualStatements: [{ date: "2025-12-31", currency: "USD", totalRevenue: 5_749_377_000 }],
+    quarterlyStatements: [
+      { date: "2025-03-31", currency: "USD", totalRevenue: 1_380_505_000 },
+      { date: "2025-06-30", currency: "USD", totalRevenue: 1_338_516_000 },
+      { date: "2025-09-30", currency: "USD", totalRevenue: 1_387_631_000 },
+      { date: "2025-12-31", currency: "USD", netIncome: 296_085_000, withdrawnObservations: ["o-2025q4-revenue", "unknown-id"] },
+    ],
+    priceHistory: [],
+  });
+  expect(financials.quarterlyStatements.at(-1)).toEqual({
+    date: "2025-12-31", currency: "USD", netIncome: 296_085_000, unavailableFields: ["totalRevenue"],
+  });
+  expect(deriveQuarterlyStatements(financials.quarterlyStatements, financials.annualStatements).at(-1)?.totalRevenue).toBeUndefined();
+  const earnings = mapCloudFinancials({
+    annualStatements: [{ date: "2022-12-31", currency: "EUR", basicEps: 16.08, withdrawnObservations: [
+      "x-2022-annual-mixed-basicEps", "x-2022-annual-mixed-eps", "x-q4-operating-revenue", "x-q4-pretax", "x-q4-tax",
+    ] }],
+    quarterlyStatements: [],
+    priceHistory: [],
+  }).annualStatements[0];
+  expect(earnings).toEqual({ date: "2022-12-31", currency: "EUR", unavailableEarnings: ["basicEps", "eps"],
+    unavailableFields: ["operatingRevenue", "pretaxIncome", "taxProvision"] });
+});
+
+test("the overnight price rides only on the frame that says so, through the merge and the canonical quote", () => {
+  const { overnightMark, preMarket } = sessionQuotes();
+  const frame = (quote: Quote) =>
+    mapQuote(JSON.parse(JSON.stringify({ ...quote, providerId: "gloomberb-cloud", dataSource: "live" })) as CloudQuotePayload);
+  const night = frame(overnightMark);
+  expect(night).toMatchObject({ overnightPrice: 198.95, overnightChange: 0.17, overnightPriceKind: "mark", lastTradePrice: 198.8 });
+  expect(frame({ ...overnightMark, overnightPriceKind: "indicative" as never }).overnightPriceKind).toBeUndefined();
+
+  const nightAt = Date.parse("2026-10-12T00:31:00Z");
+  const held = normalizeQuoteContribution(night)!;
+  expect(resolveCanonicalQuote({ "gloomberb-cloud": held }, nightAt).quote).toMatchObject({
+    price: 198.95, marketState: "CLOSED", overnightPrice: 198.95, overnightPriceKind: "mark", lastTradePrice: 198.8,
+  });
+  // At 04:00 the pre-market frame leaves the overnight fields out: they go.
+  const morning = mergeQuoteContribution(held, frame(preMarket));
+  const resolved = resolveCanonicalQuote({ "gloomberb-cloud": morning }, Date.parse("2026-10-12T12:00:05Z")).quote!;
+  expect([resolved.marketState, resolved.overnightPrice, resolved.overnightChange, resolved.overnightPriceKind])
+    .toEqual(["PRE", undefined, undefined, undefined]);
+  // A source that says PRE drops a carried overnight price however it arrived.
+  expect(normalizeQuoteContribution({ ...night, marketState: "PRE" })?.overnightPrice).toBeUndefined();
+});
+
+test("a coin priced by one exchange's own trade is named by the exchange, as its source, until a quote without one replaces it", () => {
+  const raw: CloudQuotePayload = {
+    symbol: "USDT-USD", currency: "USD", instrumentType: "CRYPTOCURRENCY", price: 0.99893, previousClose: 0.9986,
+    change: 0.00033, changePercent: 0.033, lastUpdated: Date.parse("2026-11-13T15:08:44Z"), listingExchangeName: "CCC",
+    providerId: "gloomberb-cloud", dataSource: "live", priceVenue: "Coinbase",
+  };
+  const quote = mapQuote(raw);
+  expect(quote.priceVenue).toBe("Coinbase");
+  expect(quoteSourceName(quote)).toBe("Coinbase");
+  // The composite, and a name that is no exchange's, stay Gloom Cloud's.
+  expect(quoteSourceName(mapQuote({ ...raw, priceVenue: undefined }))).toBe("Gloom Cloud");
+  expect(mapQuote({ ...raw, priceVenue: "<script>" }).priceVenue).toBeUndefined();
+  // The venue is said of each observation: the composite read after an exchange's price does not keep its name.
+  const after = mergeQuoteContribution(normalizeQuoteContribution(quote)!, mapQuote({ ...raw, priceVenue: undefined, dataSource: "delayed", lastUpdated: raw.lastUpdated! + 60_000 }));
+  expect(after.priceVenue).toBeUndefined();
+  // A view's quote, resolved from what each source said, names the venue of the price it shows.
+  expect(resolveCanonicalQuote({ "gloomberb-cloud": normalizeQuoteContribution(quote)! }, raw.lastUpdated!).quote?.priceVenue).toBe("Coinbase");
+});
+
+test("what a coin's day range measures goes with that range: kept by a tick relaying it, replaced with a range from elsewhere", () => {
+  const raw: CloudQuotePayload = {
+    symbol: "USDT-USD", currency: "USD", instrumentType: "CRYPTOCURRENCY", price: 0.99893, previousClose: 0.9986,
+    change: 0.00033, changePercent: 0.033, lastUpdated: Date.parse("2026-11-13T15:08:44Z"), listingExchangeName: "CCC",
+    providerId: "gloomberb-cloud", dataSource: "delayed", low: 0.99868, high: 0.99906, volume: 47_340_000_000, statsBasis: "composite",
+  };
+  const served = normalizeQuoteContribution(mapQuote(raw))!;
+  expect(served.statsBasis).toBe("composite");
+  expect(mapQuote({ ...raw, statsBasis: "stream" as never }).statsBasis).toBeUndefined();
+  // A stream tick built on the served quote relays its range without saying: the word stays.
+  const tick = mapQuote({ ...raw, statsBasis: undefined, price: 0.9989, dataSource: "live", lastUpdated: raw.lastUpdated! + 5_000 });
+  expect(mergeQuoteContribution(served, tick).statsBasis).toBe("composite");
+  // One exchange's own day replaces the range, and says so; a range from elsewhere without a word drops it.
+  const exchangeDay = mapQuote({ ...raw, low: 0.998162, high: 0.999736, volume: 763_300, statsBasis: "exchange", dataSource: "live" });
+  expect(mergeQuoteContribution(served, exchangeDay).statsBasis).toBe("exchange");
+  expect(mergeQuoteContribution(served, mapQuote({ ...raw, low: 0.998, statsBasis: undefined })).statsBasis).toBeUndefined();
+  expect(resolveCanonicalQuote({ "gloomberb-cloud": mergeQuoteContribution(served, exchangeDay) }, raw.lastUpdated!).quote?.statsBasis).toBe("exchange");
+});

@@ -1,0 +1,585 @@
+import type { DesktopPaneShotRenderedRow } from "../desktop-pane-shot";
+import { cliStyles, cliTerminalWidth, renderSection, renderTable, wrapText } from "../../utils/cli-output";
+import { formatUtcTime, parseReportTime } from "../../utils/utc-time";
+import type { MarketContext } from "../types";
+import type { PaneFunctionReport } from "./report";
+import type { ResolvedPaneFunction } from "./resolver";
+import { functionsForQuestion, type PaneFunctionCatalog } from "./catalog";
+import { collectShotSymbols } from "./data";
+import { lockNoteLines } from "./lock-note";
+import { createHeadlessPaneContext } from "./headless";
+import type { HeadlessPaneContext } from "../../types/headless";
+import { lockNoteReason } from "../../plugins/builtin/shared/pro-lock-note";
+import { renderDesktopShot } from "./screenshot-render";
+import { resolvePersistedCloudSessionToken } from "./cloud-session";
+import type { PaneScreenshotResult } from "./screenshot-types";
+import { deriveRenderedFreshness, formatFreshnessLine, type ReportFreshness } from "./freshness";
+import { exportTextTable, reportFooterLines, type CliReportTables } from "../report-tables";
+import { declaredReportFreshness, renderedLoadError, renderedReportFailure, renderedReportFreshness, renderedReportNotices, renderedReportObservations } from "./report-notices";
+import { DATA_SERVICE_UNREACHABLE_MESSAGE, DataServiceUnreachableError } from "../../utils/network-failure";
+import { windowRows, type RowWindowOptions } from "../row-window";
+
+const DOM_REPORT_WIDTH = 1280;
+const DOM_REPORT_HEIGHT = 720;
+/** A pane whose reader has a page open grows to show all of it, up to about 18,000 px: a report saves no image to bound it. */
+const DOM_REPORT_MAX_HEIGHT_CELLS = 1000;
+const DOM_LIMITATION =
+  "Only values visible in the rendered pane are returned; clipped or off-screen data may be omitted.";
+const DOM_EVERY_ROW =
+  "Every row of the pane's table is returned, including rows scrolled out of view.";
+const DOM_WHOLE_PANE =
+  "The pane was grown to fit the page it has open, so all of its text is returned.";
+const DOM_WINDOWED =
+  "Only the requested rows from each rendered table are returned.";
+
+/** The sign-in wall's buttons, which a rendered view reads as words, with the key that presses one: `Sign up free ↩ Log in`. */
+const SIGN_IN_WALL_BUTTONS = /\s*\b(?:Log in|Sign up free|Resend Verification Email)(?:\s*[\u21A9\u21B5])?(?=\s|$)/g;
+
+/** Whether the wall asks for the account's email to be verified, not for a sign-in. */
+function asksToVerifyEmail(visibleText: string): boolean {
+  return /\bVerify your email\b/i.test(visibleText);
+}
+
+/**
+ * A pane behind the sign-in wall, as a report reads it: the wall's headline
+ * without its buttons, and what it needs in place of them.
+ */
+function signInWallText(visibleText: string, signInGate: "verify-email" | "pro" | "free" | undefined): string {
+  const headline = visibleText.replace(SIGN_IN_WALL_BUTTONS, "").trim();
+  const needs = signInGate === "verify-email" || (signInGate == null && asksToVerifyEmail(visibleText))
+    ? "Requires a verified email on your Gloom account: open the app (gloom) and resend the verification email from the command bar (Ctrl+P, Resend Verification Email)."
+    : signInGate === "pro" || (signInGate == null && /\bGloom Cloud Pro:\s*Sign in\b/i.test(headline))
+      ? "Sign in from the command bar (Ctrl+P, Log In or Sign Up), then upgrade if your account does not have Gloom Cloud Pro."
+      : "Requires a free Gloom sign-in: open the app (gloom) and log in or sign up free from the command bar (Ctrl+P, Log In or Sign Up); this command then reads with that session.";
+  return headline ? `${headline} ${needs}` : needs;
+}
+
+const LIST_MARKER = /^\s*[\u2022\u25E6\u25AA\u00B7\u2013-]\s*$/;
+
+/**
+ * The words of a pane that is prose, not a table, a line to each block it draws
+ * and wrapped to the terminal's width (100 where it has none): the pane's own title,
+ * which the report's heading says already, is left off its top.
+ */
+function proseLines(render: PaneScreenshotResult["render"], title: string): string[] {
+  const lines = render.visibleLines?.length ? render.visibleLines : [render.visibleText];
+  const width = Math.min(cliTerminalWidth() ?? 100, 100);
+  const titled = lines[0]?.trim() === title ? lines.slice(1) : lines;
+  const body: string[] = [];
+  // A stack's detail opens under its Back button, a control and not part of the page.
+  for (const line of titled[0] === "Back" ? titled.slice(1) : titled) {
+    // A list marker is drawn as a block of its own, ahead of the item's words.
+    const marker = body.at(-1);
+    if (marker !== undefined && LIST_MARKER.test(marker)) body[body.length - 1] = `${marker.trim()} ${line}`;
+    else body.push(line);
+  }
+  return body.flatMap((line) => wrapText(line, width));
+}
+
+function rowsContainEllipsis(rows: DesktopPaneShotRenderedRow[]): boolean {
+  return rows.some((row) => row.cells.some((cell) => !cell.reportOnly && /\u2026|\.\.\./.test(cell.text)));
+}
+
+/** Column identity per cell; a repeated label within one row stays distinct. */
+function domCellKeys(row: DesktopPaneShotRenderedRow): string[] {
+  const seen = new Map<string, number>();
+  return row.cells.map((cell) => {
+    const base = cell.columnId ?? cell.columnLabel;
+    const occurrence = seen.get(base) ?? 0;
+    seen.set(base, occurrence + 1);
+    return occurrence === 0 ? base : `${base}#${occurrence}`;
+  });
+}
+
+const DAY_MS = 86_400_000;
+/** A time of day in what a cell draws: `11:27`, `9am`. */
+const DRAWN_CLOCK = /\d{1,2}:\d{2}|\b\d{1,2}\s?[ap]m\b/i;
+
+/**
+ * A pane may shorten a time to fit ("Wed 11:27", "Oct 2"); the report prints
+ * the instant behind it with its date and zone instead. An instant at exactly
+ * 00:00 UTC that the cell draws without a time of day (a filing's date, an
+ * all-day event) is a day, not a midnight: it prints as the date, as a
+ * date-only value does. The CSV and JSON keep the instant.
+ */
+function cellText(cell: DesktopPaneShotRenderedRow["cells"][number]): string {
+  if (!cell.instant) return cell.text;
+  const time = parseReportTime(cell.instant);
+  if (time && !time.dateOnly && time.time % DAY_MS === 0 && !DRAWN_CLOCK.test(cell.text)) return formatUtcTime({ ...time, dateOnly: true });
+  return formatUtcTime(cell.instant) || cell.text;
+}
+
+/** A zone named at the end of a column header: `TIME HKT`, `TIME GMT+8`, `DATE ET`, `TIME UTC`. */
+const HEADER_ZONE = /^(.*\S)\s+(?:UTC|GMT(?:[+-]\d{1,2}(?::?\d{2})?)?|[A-Z]{1,4}T)$/;
+
+/**
+ * A column the report prints from the instants behind its cells (cellText:
+ * UTC, the reader's zone beside it when set; the CSV and JSON the instant
+ * itself) is headed in UTC. The pane's header names the clock it drew the
+ * times on, the host's (`TIME HKT` over Top News); over the report's UTC
+ * times it named the wrong zone. Any other header stays as the pane drew it.
+ */
+function reportedHeader(header: string, cells: ReadonlyArray<DesktopPaneShotRenderedRow["cells"][number] | undefined>): string {
+  const filled = cells.filter((cell) => cell !== undefined);
+  if (filled.length === 0 || !filled.every((cell) => cell.instant)) return header;
+  const zoned = HEADER_ZONE.exec(header);
+  return zoned ? `${zoned[1]} UTC` : header;
+}
+
+interface DomTable {
+  tableIndex: number;
+  columns: Array<{ key: string; header: string }>;
+  rows: Array<Map<string, DesktopPaneShotRenderedRow["cells"][number]>>;
+  selected?: boolean[];
+}
+
+function rowsByTable(rows: readonly DesktopPaneShotRenderedRow[]): Map<number, DesktopPaneShotRenderedRow[]> {
+  const byTable = new Map<number, DesktopPaneShotRenderedRow[]>();
+  for (const row of rows) {
+    const tableRows = byTable.get(row.tableIndex) ?? [];
+    tableRows.push(row);
+    byTable.set(row.tableIndex, tableRows);
+  }
+  return byTable;
+}
+
+function domTables(byTable: ReadonlyMap<number, DesktopPaneShotRenderedRow[]>, selected?: ReadonlySet<DesktopPaneShotRenderedRow>, text = false): DomTable[] {
+  return [...byTable].map(([tableIndex, tableRows]) => {
+    const cellsOf = (row: DesktopPaneShotRenderedRow) => text ? row.cells.filter((cell) => !cell.reportOnly) : row.cells;
+    // Captured rows omit blank cells, so a cell's position is not its column.
+    const columns: Array<{ key: string; header: string }> = [];
+    for (const row of tableRows) {
+      let previous = -1;
+      const cells = cellsOf(row);
+      const keys = domCellKeys({ ...row, cells });
+      for (const [cellIndex, cell] of cells.entries()) {
+        const key = keys[cellIndex]!;
+        let position = columns.findIndex((column) => column.key === key);
+        if (position < 0) {
+          position = previous + 1;
+          columns.splice(position, 0, { key, header: cell.columnLabel });
+        }
+        previous = position;
+      }
+    }
+    const cellRows = tableRows.map((row) => {
+      const cells = cellsOf(row);
+      const keys = domCellKeys({ ...row, cells });
+      return new Map(cells.map((cell, cellIndex) => [keys[cellIndex]!, cell]));
+    });
+    return {
+      tableIndex,
+      columns: [...columns.filter((column) => column.key !== GROUP_KEY), ...columns.filter((column) => column.key === GROUP_KEY)]
+        .map((column) => ({ ...column, header: reportedHeader(column.header, cellRows.map((cells) => cells.get(column.key))) })),
+      rows: cellRows,
+      ...(selected ? { selected: tableRows.map((row) => selected.has(row)) } : {}),
+    };
+  });
+}
+
+function domTableTitle(table: DomTable): string {
+  return `Rendered table ${table.tableIndex + 1}`;
+}
+
+function renderDomTables(tables: DomTable[]): string[] {
+  return tables.flatMap((table, index) => [
+    ...(index > 0 ? [""] : []),
+    ...(tables.length > 1 ? [renderSection(domTableTitle(table))] : []),
+    renderTable(
+      // Headed as the table's own columns are, in capitals where they are.
+      table.columns.map((column) => column.key === GROUP_KEY && table.columns.every((other) => other.key === GROUP_KEY
+        || other.header === other.header.toUpperCase()) ? { ...column, header: column.header.toUpperCase() } : column),
+      table.rows.filter((_, index) => table.selected?.[index] ?? true).map((cells) => table.columns.map((column) => {
+        const cell = cells.get(column.key);
+        return cell ? cellText(cell) : "";
+      })),
+    ),
+  ]);
+}
+
+const GROUP_KEY = "__group";
+
+/**
+ * A table's rows for an export: a section header (FUT's sector) is no row of
+ * its own but the `Group` of each row under it, the table's last column.
+ */
+function groupedRows(rows: readonly DesktopPaneShotRenderedRow[]): DesktopPaneShotRenderedRow[] {
+  const groups = new Map<number, string>();
+  return rows.flatMap((row) => {
+    if (row.section) {
+      groups.set(row.tableIndex, row.cells[0]?.text ?? "");
+      return [];
+    }
+    const group = groups.get(row.tableIndex);
+    return group ? [{ ...row, cells: [...row.cells, { columnId: GROUP_KEY, columnLabel: "Group", text: group }] }] : [row];
+  });
+}
+
+function selectedDomRows(tables: ReadonlyMap<number, DesktopPaneShotRenderedRow[]>, window: RowWindowOptions): Set<DesktopPaneShotRenderedRow> {
+  return new Set([...tables.values()].flatMap((table) => windowRows(table, window).rows));
+}
+
+/** The rendered tables as `--csv` writes them, with the instant behind a shortened time. */
+function domReportTables(
+  tables: DomTable[],
+  title: string,
+  freshness: ReportFreshness | null,
+  incomplete: boolean | string,
+  notices: readonly string[],
+): CliReportTables {
+  return {
+    tables: tables.map((table) => {
+      const full = exportTextTable(
+        tables.length > 1 ? domTableTitle(table) : title,
+        table.columns.map((column) => column.header),
+        table.rows.map((cells) => table.columns.map((column) => cells.get(column.key))),
+      );
+      const exported = table.selected ? { ...full, rows: full.rows.filter((_, index) => table.selected![index]) } : full;
+      // The group column came after the fixed ones: it closes the row, so no earlier column moves.
+      return table.columns.at(-1)?.key === GROUP_KEY ? { ...exported, appendedColumns: 1 } : exported;
+    }),
+    footer: reportFooterLines({ ...(freshness ? { freshness } : {}), incomplete, notes: notices }),
+  };
+}
+
+function renderedFailureReason(
+  result: PaneScreenshotResult,
+  rows: DesktopPaneShotRenderedRow[],
+): string | null {
+  // Rows the pane kept from an earlier load, which it could not refresh (renderedLoadFailure has the bare pane's).
+  const loadError = renderedLoadError(result.render.semanticUi ?? []);
+  if (loadError) return `The rendered pane could not refresh: ${loadError}`;
+  if (result.render.loadingStateDetected) return "The rendered pane was still loading.";
+  if (result.render.errorStateDetected) {
+    const marker = result.render.errorStateMarkers[0];
+    return marker ? `The rendered pane reported: ${marker}` : "The rendered pane reported an error.";
+  }
+  if (result.render.emptyStateDetected) {
+    const marker = result.render.emptyStateMarkers[0];
+    return marker ? `The rendered pane reported: ${marker}` : "The rendered pane reported an empty state.";
+  }
+  if (rows.length === 0) return "The rendered pane exposed no structured rows or visible text.";
+  return null;
+}
+
+/** The rows a report reads: every row of a table that publishes them all, else what the viewport shows. */
+function reportRows(result: PaneScreenshotResult): DesktopPaneShotRenderedRow[] {
+  const rows = result.render.reportRows ?? result.render.rows;
+  if (rows.length > 0) return rows;
+  if (
+    result.render.loadingStateDetected
+    || result.render.errorStateDetected
+    || result.render.emptyStateDetected
+    || !result.render.visibleText
+  ) {
+    return [];
+  }
+  return [{
+    tableIndex: 0,
+    rowIndex: 0,
+    selected: false,
+    cells: [{ columnLabel: "Rendered view", text: result.render.visibleText }],
+  }];
+}
+
+export async function buildDomPaneReportFromRender(
+  resolved: ResolvedPaneFunction,
+  result: PaneScreenshotResult,
+  /** Reads data for the lock note, which names a free route only when it has data for the symbol. */
+  context?: HeadlessPaneContext,
+): Promise<PaneFunctionReport> {
+  const sourceRows = reportRows(result);
+  const hasStructuredRows = (result.render.reportRows ?? result.render.rows).length > 0;
+  const grouped = groupedRows(sourceRows);
+  const tables = rowsByTable(grouped);
+  const window = resolved.rowWindow;
+  const selected = window && hasStructuredRows ? selectedDomRows(tables, window) : undefined;
+  const rows = selected ? [...selected] : sourceRows;
+  const windowed = selected != null && selected.size < grouped.length;
+  // A table that reported every row is whole, whatever the viewport cut from the capture.
+  const truncationReasons = [...(result.render.reportTruncationReasons ?? result.render.truncationReasons)];
+  if (rowsContainEllipsis(sourceRows) && !truncationReasons.includes("one or more cells are visibly clipped")) {
+    truncationReasons.push("one or more cells are visibly clipped");
+  }
+  const truncated = truncationReasons.length > 0
+    || (result.render.reportTruncationReasons ? false : result.render.truncated);
+  const failureReason = renderedFailureReason(result, sourceRows);
+  if (window && !hasStructuredRows && !failureReason && !result.render.accessGate) {
+    throw new RenderedReportFailure(`--${window.tail != null ? "tail" : "limit"} requires a rendered table; this view contains only text.`);
+  }
+  // A pane that drew rows beside an error or empty marker ("Quote unavailable.") has data: only one with none has no data for its symbols.
+  const unavailableSymbols = failureReason && rows.length === 0 && result.symbols.length > 0 ? result.symbols : [];
+  // What the view leaves out and how to see more, such as OMON's strikes outside its window.
+  const rendered = renderedReportNotices(result.render.semanticUi ?? []);
+  const notices = [...(resolved.pane.reportNotices?.(resolved.instance.settings ?? {}) ?? []), ...rendered.notices,
+    ...windowed ? [`Showing ${rows.length} of ${grouped.length} rendered rows (--${window?.tail != null ? `tail ${window.tail}` : `limit ${window?.limit}`} per table).`] : []];
+  const textLines = [resolved.label, "", ...notices, ...(notices.length > 0 ? [""] : [])];
+  // A wall in place of the whole pane: nothing was read, so the report says
+  // what is locked and how to reach it, and cites no source.
+  const gate = !hasStructuredRows ? result.render.accessGate ?? null : null;
+  const lockNote = gate
+    ? await resolved.pane.reportLockNote?.({
+      gate,
+      symbol: result.symbols[0] ?? null,
+      token: resolved.token,
+      ...gate === "sign-in" && (result.render.signInGate === "verify-email"
+        || (result.render.signInGate == null && asksToVerifyEmail(result.render.visibleText ?? ""))) ? { verifyEmail: true } : {},
+      ...context ? { context } : {},
+    }) ?? null
+    : null;
+  const locked = gate === "sign-in" || lockNote ? gate : null;
+  const lockReason = lockNote ? lockNoteReason(lockNote) : null;
+  if (hasStructuredRows) {
+    textLines.push(...renderDomTables(domTables(tables, selected, true)));
+  } else if (lockNote) {
+    textLines.push(...lockNoteLines(lockNote));
+  } else if (gate !== "sign-in" && result.render.emptyStateText?.length) {
+    // A pane with nothing but its empty state says that, not its filters' labels (`No trials match ZZQX.`).
+    textLines.push(...result.render.emptyStateText.flatMap((line) => wrapText(line, Math.min(cliTerminalWidth() ?? 100, 100))));
+  } else if (result.render.visibleText) {
+    textLines.push(...(gate === "sign-in" ? [signInWallText(result.render.visibleText, result.render.signInGate)] : proseLines(result.render, resolved.label)));
+  } else {
+    textLines.push(failureReason ?? "No rendered values were available.");
+  }
+  if (failureReason && rows.length > 0) textLines.push("", failureReason);
+  // A pane that knows its feed dates the report; the footer and cell times fill in the rest.
+  const declared = { ...declaredReportFreshness(resolved), ...renderedReportFreshness(result.render.semanticUi ?? []) };
+  const derived = deriveRenderedFreshness(declared, {
+    footerText: result.render.footerText ?? "",
+    cellTimes: sourceRows.flatMap((row) => row.cells.flatMap((cell) => cell.instant ?? [])),
+    observed: renderedReportObservations(result.render.semanticUi ?? []),
+  });
+  // Drawn from copies saved earlier, its refresh having failed: dated as saved, never as delayed at the copy's time.
+  const freshness = derived && result.savedCopyAt != null && !derived.savedAt
+    ? { ...derived, savedAt: new Date(result.savedCopyAt).toISOString() }
+    : derived;
+
+  const complete = failureReason === null && !truncated;
+  // Each table published its rows and nothing else was cut: the report is the whole view.
+  const everyRow = complete && !windowed && result.render.reportRows !== undefined;
+  // A reader grown to fit its page (a docs page) and not cut once grown is read whole.
+  const wholePane = complete && !windowed && !everyRow && resolved.pane.shotFitsReader === true;
+  return {
+    data: {
+      kind: "rendered-view",
+      target: resolved.token,
+      capabilityId: resolved.capability.id,
+      symbols: result.symbols,
+      options: resolved.options,
+      rowCount: rows.length,
+      empty: rows.length === 0,
+      complete,
+      unavailableSymbols,
+      rows,
+      visibleText: windowed ? "" : result.render.visibleText,
+      truncated,
+      truncationReasons,
+      ...(everyRow ? { everyRow } : {}),
+      ...(wholePane ? { wholePane } : {}),
+      ...(windowed ? { renderedRowCount: grouped.length } : {}),
+      limitation: windowed && !truncated ? DOM_WINDOWED : everyRow ? DOM_EVERY_ROW : wholePane ? DOM_WHOLE_PANE : DOM_LIMITATION,
+      ...(lockReason ?? failureReason ? { reason: lockReason ?? failureReason } : {}),
+      ...(notices.length > 0 ? { metadata: { ...rendered.facts, notices } } : {}),
+      ...(locked ? { locked } : { freshness }),
+    },
+    text: textLines.join("\n").trimEnd(),
+    tables: domReportTables(
+      domTables(tables, selected),
+      resolved.label,
+      locked ? null : freshness,
+      !complete && (lockReason ?? failureReason ?? (truncationReasons.length > 0 ? truncationReasons.join("; ") : true)),
+      notices,
+    ),
+  };
+}
+
+/** The report's closing lines; a locked view, which read nothing, cites no source. */
+export function appendDomReportFooter(
+  text: string,
+  view: DomReportView,
+  freshness: ReportFreshness | undefined,
+): string {
+  return [
+    text,
+    "",
+    domReportNote(view),
+    ...(freshness ? [cliStyles.muted(formatFreshnessLine(freshness))] : []),
+  ].join("\n");
+}
+
+/** How much of the pane a rendered-view report holds: none behind a wall, cut, every row its tables publish, all of a pane grown to fit, or what the viewport shows. */
+export type DomReportView = "locked" | "clipped" | "windowed" | "every-row" | "whole" | "visible";
+
+export function domReportView(data: Readonly<Record<string, unknown>>): DomReportView {
+  if (data.locked) return "locked";
+  return data.truncated === true ? "clipped" : data.renderedRowCount != null ? "windowed"
+    : data.everyRow === true ? "every-row" : data.wholePane === true ? "whole" : "visible";
+}
+
+/**
+ * What a rendered-view report says about where its values come from. How long
+ * the render took is no part of it: that is the machine's, not the data's
+ * (`elapsedMs` in JSON keeps it).
+ */
+export function domReportNote(view: DomReportView): string {
+  return view === "locked"
+    ? "Rendered view: the pane is locked, so no values were read."
+    : view === "every-row"
+    ? "Rendered view: every row of the pane's table, including rows scrolled out of view."
+    : view === "whole"
+    ? "Rendered view: the pane grown to fit the whole page."
+    : view === "windowed"
+    ? "Rendered view: requested rows from each table."
+    : `Rendered view: values come from the visible pane. ${view === "clipped" ? "The rendered view is clipped." : "The rendered view may be clipped."}`;
+}
+
+function failedDomReport(
+  resolved: ResolvedPaneFunction,
+  rawArg: string,
+  error: unknown,
+): PaneFunctionReport {
+  const message = (error instanceof Error ? error.message : String(error))
+    .split("\n")[0]!
+    .replace(/^Error:\s*/, "")
+    .trim();
+  const reason = `The rendered view could not be read: ${message || "unknown renderer error"}`;
+  const symbols = collectShotSymbols(resolved, rawArg);
+  const freshness = deriveRenderedFreshness(declaredReportFreshness(resolved), { footerText: "", cellTimes: [] });
+  return {
+    data: {
+      kind: "rendered-view",
+      target: resolved.token,
+      capabilityId: resolved.capability.id,
+      symbols,
+      options: resolved.options,
+      rowCount: 0,
+      empty: true,
+      complete: false,
+      unavailableSymbols: symbols,
+      rows: [],
+      visibleText: "",
+      truncated: false,
+      truncationReasons: [],
+      limitation: DOM_LIMITATION,
+      reason,
+      freshness,
+    },
+    text: [resolved.label, "", reason].join("\n"),
+    tables: { tables: [], footer: reportFooterLines({ freshness, incomplete: reason }) },
+  };
+}
+
+/** A report the rendered pane says it cannot give; the command fails with the pane's words and advice line. */
+class RenderedReportFailure extends Error {
+  constructor(message: string, readonly details?: string) {
+    super(message);
+  }
+}
+
+/**
+ * The failure a rendered pane with nothing to show stands for: the load its
+ * status footer says failed (`pane-load-error`), else the error state its
+ * body draws. Such a report has no data, so it is no report: it fails as the
+ * plain commands do, a request that never reached the data service in their
+ * words ("Gloom couldn't reach its data service", and what to check), never
+ * the empty body ("No events") dated as if it had been read. ECO printed "No
+ * events" and "retrieved" at the time of the run through a proxy that refused
+ * every connection. Null for a pane that drew rows, a wall, or no failure.
+ */
+function renderedLoadFailure(render: PaneScreenshotResult["render"]): Error | null {
+  if ((render.reportRows ?? render.rows).length > 0 || render.accessGate) return null;
+  const message = renderedLoadError(render.semanticUi ?? []) ?? render.stateText?.error?.[0] ?? null;
+  if (!message) return null;
+  if (message.includes(DATA_SERVICE_UNREACHABLE_MESSAGE)) return new DataServiceUnreachableError(new Error(message));
+  return new RenderedReportFailure(message);
+}
+
+/**
+ * The report of a pane the sign-in wall covers whole (`PaneDef.signInWall`)
+ * when there is no session: its lock note, as the rendered wall reports it,
+ * without waiting for the wall to render. Null with a session, or for any
+ * other pane.
+ */
+async function signedOutDomReport(
+  resolved: ResolvedPaneFunction,
+  context: MarketContext,
+  rawArg: string,
+  catalog?: PaneFunctionCatalog,
+): Promise<PaneFunctionReport | null> {
+  if (!resolved.pane.signInWall || !resolved.pane.reportLockNote || resolvePersistedCloudSessionToken(context)) return null;
+  const symbols = collectShotSymbols(resolved, rawArg);
+  const argument = rawArg.trim();
+  const note = await resolved.pane.reportLockNote({
+    gate: "sign-in", symbol: symbols[0] ?? null, token: resolved.token,
+    context: createHeadlessPaneContext(resolved, context, new AbortController().signal),
+    // A question asked behind the wall (ASKG) is offered the functions the catalog finds for it.
+    ...argument ? { argument } : {},
+    ...catalog ? { functionsFor: (question: string, limit: number) => functionsForQuestion(catalog, question, limit) } : {},
+  });
+  const reason = lockNoteReason(note);
+  return {
+    data: {
+      kind: "rendered-view",
+      target: resolved.token,
+      capabilityId: resolved.capability.id,
+      symbols,
+      options: resolved.options,
+      rowCount: 0,
+      empty: true,
+      complete: false,
+      unavailableSymbols: [],
+      rows: [],
+      visibleText: "",
+      truncated: false,
+      truncationReasons: [],
+      limitation: DOM_LIMITATION,
+      reason,
+      locked: "sign-in",
+    },
+    text: [resolved.label, "", ...lockNoteLines(note)].join("\n").trimEnd(),
+    tables: domReportTables([], resolved.label, null, reason, []),
+  };
+}
+
+export async function buildDomFunctionReport(
+  resolved: ResolvedPaneFunction,
+  context: MarketContext,
+  rawArg: string,
+  catalog?: PaneFunctionCatalog,
+): Promise<PaneFunctionReport> {
+  const signedOut = await signedOutDomReport(resolved, context, rawArg, catalog);
+  if (signedOut) return signedOut;
+  let result: PaneScreenshotResult;
+  try {
+    result = await renderDesktopShot({
+      resolved,
+      context,
+      rawArg,
+      outputPath: "",
+      width: DOM_REPORT_WIDTH,
+      height: DOM_REPORT_HEIGHT,
+      theme: null,
+      scale: 1,
+      watermark: null,
+      fitReader: true,
+      maxHeightCells: DOM_REPORT_MAX_HEIGHT_CELLS,
+      options: {},
+      captureImage: false,
+    });
+  } catch (error) {
+    return failedDomReport(resolved, rawArg, error);
+  }
+  // No header and no partial view: the error alone, and a failed exit, as the plain command gives.
+  const failure = renderedReportFailure(result.render.semanticUi ?? []);
+  if (failure) throw new RenderedReportFailure(failure.message, failure.details);
+  const loadFailure = renderedLoadFailure(result.render);
+  if (loadFailure) throw loadFailure;
+  // The capture's refusal drawn in the pane's place (chat, a team's) is not its content: say why there is none.
+  if (result.refused && result.unusableReason) throw new RenderedReportFailure(result.unusableReason);
+  try {
+    return await buildDomPaneReportFromRender(resolved, result, createHeadlessPaneContext(resolved, context, new AbortController().signal));
+  } catch (error) {
+    if (error instanceof RenderedReportFailure) throw error;
+    return failedDomReport(resolved, rawArg, error);
+  }
+}

@@ -1,0 +1,159 @@
+"""ETF Model Tests"""
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from financetoolkit.etf import etf_model
+
+
+def test_concentration():
+    result = etf_model.get_concentration(
+        pd.Series({"A": 0.3, "B": 0.2, "C": 0.5, "D": -0.1})
+    )
+
+    assert result["Number of Holdings"] == 3  # noqa: PLR2004
+    assert result["Largest Holding"] == "C"
+    assert result["Herfindahl-Hirschman Index"] == pytest.approx(0.38)
+    assert result["Effective Number of Holdings"] == pytest.approx(1 / 0.38)
+
+
+def test_overlap_counts_the_smaller_shared_weight():
+    overlap = etf_model.get_overlap(
+        {"X": pd.Series({"A": 0.5, "B": 0.5}), "Y": pd.Series({"A": 0.2, "C": 0.8})}
+    )
+
+    assert overlap.loc["X", "Y"] == pytest.approx(0.2)
+    assert overlap.loc["X", "X"] == pytest.approx(1)
+
+
+def test_look_through_valuation_uses_harmonic_means():
+    weights = pd.Series({"A": 0.3, "B": 0.2, "C": 0.5})
+    ratios = pd.DataFrame(
+        {"Price-to-Earnings": [10, 20, 40], "Dividend Yield": [0.03, 0.02, 0.0]},
+        index=["A", "B", "C"],
+    )
+
+    result = etf_model.get_look_through_valuation(weights, ratios)
+
+    assert result["Price-to-Earnings"] == pytest.approx(
+        1 / (0.3 / 10 + 0.2 / 20 + 0.5 / 40)
+    )
+    # A holding without a dividend counts with a yield of zero.
+    assert result["Dividend Yield"] == pytest.approx(0.3 * 0.03 + 0.2 * 0.02)
+    assert result["Coverage"] == pytest.approx(1)
+
+
+def test_price_impact_and_tracking():
+    returns = pd.Series([0.01, -0.02, 0.01])
+    dollar_volume = pd.Series([1e9, 2e9, 1e9])
+    assert etf_model.get_price_impact(returns, dollar_volume) == pytest.approx(
+        np.mean([0.01 / 1e9, 0.02 / 2e9, 0.01 / 1e9]) * 1e8
+    )
+
+    rng = np.random.default_rng(0)
+    benchmark = pd.Series(rng.normal(0.0004, 0.01, 500))
+    fund = benchmark - 0.0003 / 252
+    tracking = etf_model.get_tracking(fund, benchmark)
+    # The difference of the annualized returns: about the yearly cost.
+    assert tracking["Tracking Difference"] == pytest.approx(-0.0003, rel=0.05)
+    assert tracking["Tracking Error"] == pytest.approx(0, abs=1e-12)
+    assert tracking["Beta"] == pytest.approx(1)
+
+
+def test_the_tracking_difference_is_the_difference_of_annualized_returns():
+    benchmark = pd.Series([0.01, -0.02, 0.015, 0.005] * 63)
+    fund = benchmark - 0.0001
+    tracking = etf_model.get_tracking(fund, benchmark, 252)
+
+    expected = (1 + fund).prod() - (1 + benchmark).prod()
+    assert tracking["Tracking Difference"] == pytest.approx(expected)
+
+
+def test_a_fund_without_weights_has_no_concentration_or_overlap():
+    empty = pd.Series(dtype=float)
+    assert etf_model.get_concentration(empty).drop("Largest Holding").isna().all()
+
+    weights = {"VOO": pd.Series({"AAPL": 0.6, "MSFT": 0.4}), "NEW": empty}
+    overlap = etf_model.get_overlap(weights)
+    assert overlap.loc["VOO", "VOO"] == pytest.approx(1.0)
+    assert overlap["NEW"].isna().all() and overlap.loc["NEW"].isna().all()
+
+
+def test_active_share_is_half_the_absolute_weight_difference():
+    active_share = etf_model.get_active_share(
+        {
+            "X": pd.Series({"A": 0.5, "B": 0.5}),
+            "Y": pd.Series({"A": 0.2, "C": 0.8}),
+            "Z": pd.Series({"D": 0.3}),
+            "W": pd.Series(dtype=float),
+        }
+    )
+
+    # |0.5 - 0.2| + |0.5 - 0| + |0 - 0.8| = 1.6, halved.
+    assert active_share.loc["X", "Y"] == pytest.approx(0.8)
+    assert active_share.loc["Y", "X"] == pytest.approx(0.8)
+    assert active_share.loc["X", "X"] == pytest.approx(0)
+    # Without a holding in common the funds differ fully; an incomplete list is scaled.
+    assert active_share.loc["X", "Z"] == pytest.approx(1)
+    # A fund without holdings data has no active share.
+    assert np.isnan(active_share.loc["X", "W"])
+
+
+def test_contribution_rolls_the_weights_back_to_the_start():
+    # At the start the fund held X and Y at 0.3 each and 0.4 cash. X then doubled and Y
+    # stayed flat, so the fund grew by 30%: X weighs 0.6 / 1.3 and Y 0.3 / 1.3 on the date
+    # of the holdings.
+    weights = pd.Series({"X": 0.6 / 1.3, "Y": 0.3 / 1.3, "Bond": 0.1})
+    start = pd.Series({"X": 100.0, "Y": 100.0})
+    end = pd.Series({"X": 110.0, "Y": 95.0})
+    weight_date = pd.Series({"X": 200.0, "Y": 100.0})
+
+    contribution = etf_model.get_contribution(weights, start, end, weight_date, 1.3)
+
+    # The bond has no price, so it has no contribution of its own.
+    assert list(contribution.index) == ["X", "Y"]
+    assert contribution.loc["X", "Start Weight"] == pytest.approx(0.3)
+    assert contribution.loc["Y", "Start Weight"] == pytest.approx(0.3)
+    assert contribution.loc["Y", "Return"] == pytest.approx(-0.05)
+    assert contribution["Contribution"].sum() == pytest.approx(0.3 * 0.1 + 0.3 * -0.05)
+
+
+def test_a_fund_whose_holdings_earnings_cancel_out_has_no_multiple(caplog):
+    weights = pd.Series({"X": 0.5, "Y": 0.3, "Z": 0.2})
+    ratios = pd.DataFrame(
+        {
+            "Price-to-Earnings": {"X": 20.0, "Y": -10.0, "Z": 40.0},
+            "Price-to-Book": {"X": 2.0, "Y": 1.0, "Z": 4.0},
+        }
+    )
+
+    valuation = etf_model.get_look_through_valuation(weights, ratios)
+    # The losses of Y (0.3 / -10) cancel the earnings of X and Z (0.5 / 20 + 0.2 / 40), so
+    # 1 / Σ w / PE is a rounding error (about 4e17) rather than a P/E.
+    assert pd.isna(valuation["Price-to-Earnings"])
+    assert (
+        "The earnings of the holdings add up to a loss or to about zero" in caplog.text
+    )
+    assert valuation["Price-to-Book"] == pytest.approx(
+        1 / (0.5 / 2 + 0.3 / 1 + 0.2 / 4)
+    )
+    assert valuation["Coverage"] == pytest.approx(1)
+
+    losses = etf_model.get_look_through_valuation(
+        weights, ratios.assign(**{"Price-to-Earnings": [20.0, -5.0, 40.0]})
+    )
+    assert pd.isna(losses["Price-to-Earnings"])
+
+
+def test_the_overlap_takes_the_weights_as_listed():
+    incomplete = pd.Series({"X": 0.3, "Y": 0.3})
+    complete = pd.Series({"X": 0.5, "Y": 0.5})
+
+    overlap = etf_model.get_overlap({"a": incomplete, "c": complete})
+    active_share = etf_model.get_active_share({"a": incomplete, "c": complete})
+
+    # The overlap is of the listed 60%, the active share of the scaled proportions.
+    assert overlap.loc["a", "a"] == pytest.approx(0.6)
+    assert overlap.loc["a", "c"] == pytest.approx(0.6)
+    assert active_share.loc["a", "c"] == pytest.approx(0)

@@ -1,0 +1,722 @@
+import { getPublishedUsEquityCalendarDay } from "../../../market-data/published-us-sessions";
+import type { PricePoint } from "../../../types/financials";
+import { rollingRealizedVolatility } from "../shared/volatility";
+import { ivNotCollectedText, type IvCloseBasis, type IvCoverageStatus, type IvHistoryPayload, type IvMethod, type IvPoint, type IvRiskReversalStats,
+  type IvScreenRow, type IvStats, type ScreenHv } from "./client";
+
+/**
+ * A history's warnings in words for the reader. A symbol demand coverage does
+ * not collect (unavailable, with the server's coverage wording as its warning)
+ * is said plainly, whatever an older server words it as: not collected, or no
+ * longer collected when it has readings, with no time promised.
+ */
+export function ivHistoryWarnings(payload: Pick<IvHistoryPayload, "status" | "symbol" | "warnings" | "latest" | "series">): string[] {
+  return payload.status === "unavailable" && payload.warnings.length
+    ? [ivNotCollectedText(payload.symbol, !!payload.latest || payload.series.length > 0)] : [...payload.warnings];
+}
+
+export const HV_WINDOWS = [20, 30] as const;
+export type HvWindow = (typeof HV_WINDOWS)[number];
+export type IvLookback = "1Y" | "2Y" | "ALL";
+const RICH_PERCENTILE = 80;
+const CHEAP_PERCENTILE = 20;
+
+/** A reading trailing the symbol's newest session by more sessions than this is stale. */
+const STALE_AFTER_SESSIONS = 5;
+const DAY_MS = 86_400_000;
+
+/** Whether `date` ("2026-10-23") is a US equity session: the published NYSE calendar where it covers, else a weekday. */
+function isSession(date: string): boolean {
+  const published = getPublishedUsEquityCalendarDay("NYSE", date);
+  if (published) return published === "session";
+  const weekday = new Date(`${date}T00:00:00Z`).getUTCDay();
+  return weekday !== 0 && weekday !== 6;
+}
+
+/** US sessions after `date` up to and including `through`: how far behind that session a reading is. */
+export function sessionsBehind(date: string, through: string): number {
+  const end = Date.parse(`${through}T00:00:00Z`);
+  let behind = 0;
+  for (let time = Date.parse(`${date}T00:00:00Z`) + DAY_MS; time <= end; time += DAY_MS) {
+    if (isSession(new Date(time).toISOString().slice(0, 10))) behind += 1;
+  }
+  return behind;
+}
+
+/** The newest of the dates given: the newest session the symbol's stored readings, backfill and prices reach. */
+function newestSession(...dates: ReadonlyArray<string | null | undefined>): string | null {
+  return dates.filter((date): date is string => !!date).map((date) => date.slice(0, 10)).sort().at(-1) ?? null;
+}
+
+/** How many sessions a reading is behind the newest, and whether that makes it stale (over `STALE_AFTER_SESSIONS`). */
+export function staleness(date: string | null | undefined, newest: string | null): { sessionsBehind: number | null; stale: boolean } {
+  const behind = date && newest ? sessionsBehind(date.slice(0, 10), newest) : null;
+  return { sessionsBehind: behind, stale: behind != null && behind > STALE_AFTER_SESSIONS };
+}
+
+/** An HV further than this many sessions from the IV's date says nothing about it: IV/HV is left empty. */
+const HV_MAX_SESSIONS_APART = 3;
+
+/**
+ * HV after the close of the last session on or before `date`, when that is within
+ * `HV_MAX_SESSIONS_APART` sessions of it; null before the series starts or when the
+ * nearest HV is older than that.
+ */
+export function hvOn(hv: ScreenHv, date: string): { date: string; value: number } | null {
+  for (let index = hv.series.length - 1; index >= 0; index -= 1) {
+    const [sessionDate, value] = hv.series[index]!;
+    if (sessionDate <= date) return sessionsBehind(sessionDate, date) <= HV_MAX_SESSIONS_APART ? { date: sessionDate, value } : null;
+  }
+  return null;
+}
+
+/**
+ * How a reading's method is worded wherever it is dated: "quote", "close", or "close mid" for a
+ * close solved from quote midpoints (mid or mixed). Two readings that word alike share one label.
+ */
+export function readingSource(method: IvMethod | null | undefined, basis?: IvCloseBasis | null): string {
+  return method === "quote-mid" ? "quote" : basis === "mid" || basis === "mixed" ? "close mid" : "close";
+}
+
+const STALE_NOTE_LIMIT = 5;
+/**
+ * The stale readings, dated, and what that leaves out, in one wording for HIVG and VCA: "Stale, left
+ * out of rank: IV 1Y ATM 2025-01-17 (over 5 sessions behind)." The list stops at five, then "N more".
+ */
+export function staleReadingsNote(leftOut: string, items: ReadonlyArray<{ label: string; date: string }>): string | null {
+  if (!items.length) return null;
+  const listed = items.slice(0, STALE_NOTE_LIMIT).map((item) => `${item.label} ${item.date}`);
+  const more = items.length - listed.length;
+  return `Stale, left out of ${leftOut}: ${listed.join(", ")}${more > 0 ? `, ${more} more` : ""} (over ${STALE_AFTER_SESSIONS} sessions behind).`;
+}
+
+/**
+ * How far from both neighbouring closes, as a ratio, a trade-close IV30 must
+ * stand before its own chain's longer tenor is asked whether it moved with it.
+ */
+const OFF_MARKET_JUMP = 1.35;
+/**
+ * The forward volatility from 30 days to the longer tenor, as a share of the
+ * IV30, below which (or, for a drop, above whose inverse) the longer tenor
+ * did not move with it. A genuine repricing in the next 30 days (an event, a
+ * shock) lifts the 60- and 90-day readings of the same chain too.
+ */
+const OFF_MARKET_FORWARD = 0.6;
+
+/** Sessions of the underlying's own closes its daily volatility is read over, before a session's move is judged. */
+const OFF_MARKET_MOVE_SESSIONS = 20;
+/**
+ * A session's close-to-close move, in daily standard deviations of the
+ * sessions before it, at or past which the underlying itself moved: a jump in
+ * IV that day may be the market's (2024-08-05's shock), whatever its shape.
+ */
+const OFF_MARKET_MOVE_SIGMAS = 2;
+
+/**
+ * Whether the underlying's close barely moved on `date`: its log return under
+ * `OFF_MARKET_MOVE_SIGMAS` daily standard deviations of the 20 sessions before
+ * it. False when its closes do not reach that far, since an IV that cannot be
+ * checked against its underlying is kept.
+ */
+function underlyingStill(closes: ReadonlyMap<string, number>, days: readonly string[], date: string): boolean {
+  const at = days.indexOf(date);
+  if (at < OFF_MARKET_MOVE_SESSIONS + 1) return false;
+  const returns = days.slice(at - OFF_MARKET_MOVE_SESSIONS - 1, at + 1).map((day) => closes.get(day)!)
+    .flatMap((close, index, all) => index === 0 || !(close > 0) || !(all[index - 1]! > 0) ? [] : [Math.log(close / all[index - 1]!)]);
+  if (returns.length !== OFF_MARKET_MOVE_SESSIONS + 1) return false;
+  const move = returns.at(-1)!;
+  const prior = returns.slice(0, -1);
+  const mean = prior.reduce((sum, value) => sum + value, 0) / prior.length;
+  const deviation = Math.sqrt(prior.reduce((sum, value) => sum + (value - mean) ** 2, 0) / (prior.length - 1));
+  return deviation > 0 && Math.abs(move) < OFF_MARKET_MOVE_SIGMAS * deviation;
+}
+
+/**
+ * The sessions whose trade-close IV30 is off-market: the print itself is bad,
+ * not just the move large. Each of these holds:
+ * - the server solved the close partly from quote midpoints (`basis` mid or
+ *   mixed), having found closing prints outside the closing two-sided quote;
+ * - the reading stands at least 35% above (or below) the closes either side
+ *   of it, so the next close no longer shows it;
+ * - the same close's IV60 (else IV90) does not follow it: only the 30-day
+ *   figure moved, where a genuine repricing lifts the whole chain;
+ * - the underlying's own close barely moved that session (`underlyingStill`).
+ * FXY's 12.2% on 2026-10-23 is one: between 8.2% and 8.6%, beside an IV60 of
+ * 9.4%, on a flat session. A shock (SPY on 2024-08-05, down 2.9%) keeps its
+ * rank. The newest close has no next one, so is never judged.
+ */
+export function offMarketSessions(series: readonly IvPoint[], prices: readonly PricePoint[]): Set<string> {
+  const iv = series.filter((point) => point.method === "trade-close" && point.iv30 != null && point.iv30 > 0)
+    .sort((a, b) => a.sessionDate.localeCompare(b.sessionDate));
+  const closes = new Map(prices.map((price) => [day(price.date), price.close] as const));
+  const days = [...closes.keys()].sort();
+  const flagged = new Set<string>();
+  iv.forEach((point, index) => {
+    const before = iv[index - 1], after = iv[index + 1];
+    const iv30 = point.iv30!;
+    const back = point.iv60 ?? point.iv90;
+    if (!before || !after || back == null || !(back > 0) || (point.basis !== "mid" && point.basis !== "mixed")) return;
+    const tenor = point.iv60 != null ? 60 : 90;
+    const forwardVariance = (back * back * tenor - iv30 * iv30 * 30) / (tenor - 30);
+    const forward = forwardVariance > 0 ? Math.sqrt(forwardVariance) / iv30 : 0;
+    const above = Math.min(iv30 / before.iv30!, iv30 / after.iv30!);
+    const below = Math.min(before.iv30! / iv30, after.iv30! / iv30);
+    const alone = (above >= OFF_MARKET_JUMP && forward < OFF_MARKET_FORWARD) || (below >= OFF_MARKET_JUMP && forward > 1 / OFF_MARKET_FORWARD);
+    if (alone && underlyingStill(closes, days, point.sessionDate)) flagged.add(point.sessionDate);
+  });
+  return flagged;
+}
+
+/**
+ * The off-market readings, dated, in the stale note's wording: "Off-market,
+ * left out of rank: IV30 2026-10-23 12.2% (away from the closes either side
+ * and its own longer tenor)."
+ */
+function offMarketNote(points: ReadonlyArray<{ date: string; value: number }>): string | null {
+  if (!points.length) return null;
+  const listed = points.slice(-STALE_NOTE_LIMIT).map((point) => `${point.date} ${(point.value * 100).toFixed(1)}%`);
+  const more = points.length - listed.length;
+  return `Off-market, left out of rank: IV30 ${listed.join(", ")}${more > 0 ? `, ${more} earlier` : ""} `
+    + "(a close partly from quote midpoints, away from the closes either side and its own longer tenor, on a session the underlying barely moved).";
+}
+
+export interface DatedValue { date: Date; value: number | null }
+export type IvStatUnit = "vol" | "points" | "ratio";
+/** One measure's latest value ranked against its own prior 52 weeks. */
+export interface IvStatRow {
+  id: string;
+  label: string;
+  unit: IvStatUnit;
+  value: number | null;
+  date: string | null;
+  method: IvMethod | "prices" | null;
+  /** Prices a trade close was solved from, when the server says (see `IvCloseBasis`). */
+  basis: IvCloseBasis | null;
+  low: number | null;
+  high: number | null;
+  rank: number | null;
+  percentile: number | null;
+  samples: number;
+  /**
+   * The reading trails the symbol's newest session by more than `STALE_AFTER_SESSIONS`
+   * sessions: its rank and percentile are left out, since they would rank an old
+   * figure as though it were current.
+   */
+  stale: boolean;
+  /** Sessions between the reading and the symbol's newest session. */
+  sessionsBehind: number | null;
+}
+/** Rank and percentile need this many prior sessions, matching the server. */
+const MIN_RANK_SAMPLES = 120;
+/**
+ * Minutes a symbol's first backfill usually takes from the request that
+ * queued it: nine in ten have history by then (docs/research-data.md).
+ */
+const FIRST_BACKFILL_MINUTES = 10;
+const FIRST_BACKFILL_TEXT = `a first backfill usually takes under ${FIRST_BACKFILL_MINUTES} minutes`;
+
+/** "06:41 UTC" today, with the date on another day: "2026-10-09 06:41 UTC". */
+function utcClock(time: number, now: number): string {
+  const iso = new Date(time).toISOString();
+  return iso.slice(0, 10) === new Date(now).toISOString().slice(0, 10)
+    ? `${iso.slice(11, 16)} UTC` : `${iso.slice(0, 16).replace("T", " ")} UTC`;
+}
+
+/** When a symbol was queued, or null when the answer does not say (older servers) or says a time still to come. */
+function queuedTime(queuedAt: string | null | undefined, now: number): number | null {
+  const time = queuedAt ? Date.parse(queuedAt) : Number.NaN;
+  return Number.isFinite(time) && time <= now ? time : null;
+}
+
+/**
+ * When to look again for history queued at `from`: "a first backfill usually
+ * takes under 10 minutes, try again after 06:41 UTC". One queued for longer
+ * than that is running late, and says so rather than give a time it cannot
+ * know. A view that checks again by itself (`retry: false`) needs no time to
+ * come back at.
+ */
+function firstBackfillText(from: number, now: number, retry: boolean): string {
+  const retryAt = from + FIRST_BACKFILL_MINUTES * 60_000;
+  if (retryAt <= now) return `longer than the usual ${FIRST_BACKFILL_MINUTES} minutes${retry ? ", try again shortly" : ""}`;
+  return retry ? `${FIRST_BACKFILL_TEXT}, try again after ${utcClock(retryAt, now)}` : FIRST_BACKFILL_TEXT;
+}
+
+/** "queued for backfill since 06:31 UTC; a first backfill usually takes under 10 minutes, try again after 06:41 UTC" */
+function queuedText(queuedAt: string | null | undefined, now: number): string {
+  const queued = queuedTime(queuedAt, now);
+  return `queued for backfill${queued == null ? "" : ` since ${utcClock(queued, now)}`}; ${firstBackfillText(queued ?? now, now, true)}`;
+}
+export interface IvHistoryModel {
+  symbol: string;
+  status: IvHistoryPayload["status"];
+  iv30: DatedValue[];
+  iv90: DatedValue[];
+  /** Trade-close one-year IV; it starts later than IV30 and has gaps where long-dated series did not trade. */
+  iv365: DatedValue[];
+  /** Same-session quote captures, drawn as points over the trade-close line. */
+  quoteIv30: DatedValue[];
+  hv: DatedValue[];
+  spread: DatedValue[];
+  /**
+   * Each session's 30-day 25-delta put IV minus call IV (put-call: positive
+   * means puts are richer), from its close where the close carries the wings,
+   * else from its quote capture. The risk reversal, call minus put, is its
+   * negative.
+   */
+  skew: DatedValue[];
+  /** First session with a stored skew; skew is blank before it. */
+  skewSince: string | null;
+  /** "skew from 2026-09-23", or why there is no skew at all. */
+  skewNote: string | null;
+  /** How many sessions the risk reversal's percentile rests on, until they reach back a year. */
+  riskReversalNote: string | null;
+  stats: IvStatRow[];
+  /** Which measures are stale and what that leaves out, when any is. */
+  staleNote: string | null;
+  /**
+   * Sessions whose trade-close IV30 is off-market (`offMarketSessions`):
+   * shown as stored, marked, and left out of every rank and range.
+   */
+  offMarket: Set<string>;
+  /** Which readings are off-market, when any is. */
+  offMarketNote: string | null;
+  since: string | null;
+  /** Where the 1Y series starts and how deep it is, when that differs from the rest or leaves it unranked. */
+  oneYearNote: string | null;
+  asOf: string | null;
+  warnings: string[];
+}
+
+const day = (value: Date | string) => typeof value === "string" ? value.slice(0, 10) : value.toISOString().slice(0, 10);
+const utc = (date: string) => new Date(`${date}T00:00:00Z`);
+
+/** Midrank percentile of value within samples, 0 to 100; null below the minimum. */
+export function midrankPercentile(samples: readonly number[], value: number, minimum = MIN_RANK_SAMPLES): number | null {
+  if (samples.length < minimum) return null;
+  let below = 0, equal = 0;
+  for (const sample of samples) {
+    if (sample < value) below += 1;
+    else if (sample === value) equal += 1;
+  }
+  return (below + equal / 2) / samples.length * 100;
+}
+
+function lookbackStart(asOf: string, lookback: IvLookback): string | null {
+  if (lookback === "ALL") return null;
+  const date = utc(asOf);
+  date.setUTCFullYear(date.getUTCFullYear() - (lookback === "2Y" ? 2 : 1));
+  return day(date);
+}
+
+/** The latest value against the 52 weeks before it, with the same rules as the server's IV rank. */
+function seriesStat(id: string, label: string, unit: IvStatUnit, points: readonly DatedValue[], method: IvStatRow["method"]): IvStatRow {
+  const latest = [...points].reverse().find((point) => point.value != null);
+  if (!latest) return { id, label, unit, value: null, date: null, method, basis: null, low: null, high: null, rank: null, percentile: null, samples: 0,
+    stale: false, sessionsBehind: null };
+  const start = lookbackStart(day(latest.date), "1Y")!;
+  const window = points.filter((point) => point.value != null && day(point.date) >= start && point.date < latest.date).map((point) => point.value!);
+  const value = latest.value!;
+  const low = window.length ? Math.min(value, ...window) : null, high = window.length ? Math.max(value, ...window) : null;
+  const enough = window.length >= MIN_RANK_SAMPLES;
+  return { id, label, unit, value, date: day(latest.date), method, basis: null, low, high,
+    rank: enough && high! > low! ? (value - low!) / (high! - low!) * 100 : null,
+    percentile: midrankPercentile(window, value), samples: window.length, stale: false, sessionsBehind: null };
+}
+
+function byMethod(series: readonly IvPoint[], method: IvMethod, field: "iv30" | "iv90" | "iv365") {
+  return series.filter((point) => point.method === method && point[field] != null)
+    .map((point) => ({ date: utc(point.sessionDate), value: point[field] }))
+    .sort((a, b) => a.date.getTime() - b.date.getTime());
+}
+
+/**
+ * 25-delta skew per session, put minus call: the close's wings where the close
+ * carries them, as the session's IV30 is the close's, else the quote
+ * capture's, so a session the capture missed still has its skew. A server
+ * that sends no wing fields at all predates them, which is not the same as a
+ * symbol with no capture yet.
+ */
+function skewSeries(series: readonly IvPoint[]): { points: DatedValue[]; note: string | null } {
+  const bySession = new Map<string, IvPoint>();
+  for (const point of series) {
+    if (point.put25_30 == null || point.call25_30 == null) continue;
+    const held = bySession.get(point.sessionDate);
+    if (!held || (held.method === "quote-mid" && point.method === "trade-close")) bySession.set(point.sessionDate, point);
+  }
+  const points = [...bySession.values()].map((point) => ({ date: utc(point.sessionDate), value: point.put25_30! - point.call25_30! }))
+    .sort((a, b) => a.date.getTime() - b.date.getTime());
+  if (points[0]) return { points, note: `skew from ${day(points[0].date)}` };
+  if (!series.length) return { points, note: null };
+  return { points, note: series.every((point) => point.put25_30 === undefined) ? "skew unavailable from this server" : "no skew history yet" };
+}
+
+/**
+ * IV history against realized volatility of the same underlying. HV uses the
+ * adjusted daily closes behind HVG; the spread pairs each trade-close IV30
+ * with HV on the same session, so gaps in either series stay gaps.
+ */
+export function projectIvHistory(
+  payload: IvHistoryPayload, prices: readonly PricePoint[],
+  options: { lookback?: IvLookback; hvWindow?: HvWindow; now?: number } = {},
+): IvHistoryModel {
+  const lookback = options.lookback ?? "1Y";
+  const window = options.hvWindow ?? 20;
+  const warnings = ivHistoryWarnings(payload);
+  const tradeIv30 = byMethod(payload.series, "trade-close", "iv30");
+  const offMarket = offMarketSessions(payload.series, prices);
+  // Ranks and ranges read every close but the off-market ones, which stay in the history as stored.
+  const ranked = <T extends { date: Date }>(points: T[]) => offMarket.size ? points.filter((point) => !offMarket.has(day(point.date))) : points;
+  const latestDate = [payload.latest?.date, tradeIv30.at(-1) && day(tradeIv30.at(-1)!.date)].filter((value): value is string => !!value).sort().at(-1) ?? null;
+  const start = latestDate ? lookbackStart(latestDate, lookback) : null;
+  const visible = <T extends { date: Date }>(points: T[]) => start ? points.filter((point) => day(point.date) >= start) : points;
+  const rolling = rollingRealizedVolatility(prices, { windows: [window] })
+    .map((point) => ({ date: utc(day(point.date)), value: point.values[window] ?? null }));
+  const hvByDay = new Map(rolling.map((point) => [day(point.date), point.value]));
+  const spreadAll = tradeIv30.map((point) => {
+    const hv = hvByDay.get(day(point.date));
+    return { date: point.date, value: hv == null || point.value == null ? null : point.value - hv };
+  });
+  const earliest = tradeIv30[0] ? day(tradeIv30[0].date) : null;
+  // HV starts with the IV record so the two lines share one time axis.
+  const hv = visible(rolling.filter((point) => !earliest || day(point.date) >= earliest));
+
+  const latest = payload.latest;
+  const iv90ByDay = new Map(byMethod(payload.series, "trade-close", "iv90").map((point) => [day(point.date), point.value]));
+  const termAll = tradeIv30.map((point) => {
+    const iv90 = iv90ByDay.get(day(point.date));
+    return { date: point.date, value: point.value == null || iv90 == null || !(iv90 > 0) ? null : point.value / iv90 };
+  });
+  const fromServer = (id: string, label: string, stats: IvStats | null): IvStatRow => ({ id, label, unit: "vol",
+    value: stats?.value ?? null, date: stats?.date ?? null, method: stats?.method ?? null, basis: stats?.basis ?? null,
+    low: stats?.low ?? null, high: stats?.high ?? null,
+    rank: stats?.rank ?? null, percentile: stats?.percentile ?? null, samples: stats?.samples ?? 0, stale: false, sessionsBehind: null });
+  // The server ranks every close; one off-market in the year before the reading is ranked again without it, by the same rules.
+  const iv30Stats = payload.stats.iv30;
+  const iv30Window = iv30Stats ? lookbackStart(iv30Stats.date, "1Y")! : null;
+  const reranked = iv30Stats && [...offMarket].some((date) => date >= iv30Window! && date < iv30Stats.date)
+    ? { ...seriesStat("iv30", "IV 30d ATM", "vol", ranked(tradeIv30).filter((point) => day(point.date) <= iv30Stats.date), iv30Stats.method),
+      method: iv30Stats.method, basis: iv30Stats.basis ?? null }
+    : null;
+  const stats: IvStatRow[] = [reranked ?? fromServer("iv30", "IV 30d ATM", iv30Stats)];
+  // A newer quote capture is shown on its own row: its rank would mix methods.
+  if (latest?.method === "quote-mid" && latest.iv30 != null && (!payload.stats.iv30 || latest.date > payload.stats.iv30.date)) {
+    stats.push({ id: "iv30-quote", label: "IV 30d quote", unit: "vol", value: latest.iv30, date: latest.date, method: "quote-mid", basis: null,
+      low: null, high: null, rank: null, percentile: null, samples: 0, stale: false, sessionsBehind: null });
+  }
+  // IV1Y ranks trade closes only; until there is one, a stored quote gives its level, unranked.
+  const oneYear = payload.stats.iv365 ?? null;
+  stats.push(fromServer("iv90", "IV 90d ATM", payload.stats.iv90),
+    !oneYear && latest?.iv365 != null
+      ? { id: "iv365", label: "IV 1Y ATM", unit: "vol", value: latest.iv365, date: latest.date, method: latest.method, basis: latest.basis ?? null,
+        low: null, high: null, rank: null, percentile: null, samples: 0, stale: false, sessionsBehind: null }
+      : fromServer("iv365", "IV 1Y ATM", oneYear),
+    ...(payload.stats.rr25 ? [riskReversalRow(payload.stats.rr25)] : []),
+    seriesStat("hv", `HV ${window}`, "vol", rolling, "prices"),
+    seriesStat("spread", `IV 30d - HV ${window}`, "points", ranked(spreadAll), "trade-close"),
+    seriesStat("term", "IV 30d / 90d", "ratio", ranked(termAll), "trade-close"));
+
+  // The newest session the symbol reaches, by its prices, its backfill and every reading it has: a reading more
+  // than STALE_AFTER_SESSIONS behind it is shown as it is, marked stale, and ranks nothing.
+  const newest = newestSession(payload.coverage?.backfilledThrough, latest?.date, latestDate,
+    ...payload.series.map((point) => point.sessionDate), ...prices.map((price) => day(price.date)));
+  const measured = stats.map((row): IvStatRow => {
+    const behind = staleness(row.date, newest);
+    return { ...row, ...behind, ...behind.stale ? { rank: null, percentile: null } : {} };
+  });
+  const staleRows = measured.filter((row) => row.stale);
+  const staleText = staleReadingsNote("rank", staleRows.map((row) => ({ label: row.label, date: row.date! })));
+
+  // Worded as VCA words each symbol (screenCoverage).
+  if (payload.status === "queued") warnings.push(`${payload.symbol} ${queuedText(payload.coverage?.addedAt, options.now ?? Date.now())}.`);
+  else if (payload.status === "backfilling") {
+    const through = payload.coverage?.backfilledThrough;
+    warnings.push(`${payload.symbol} backfilling${through ? ` through ${through}` : ""}.`);
+  } else if (payload.status === "unavailable" && !payload.warnings.length) warnings.push(`No options history for ${payload.symbol}.`);
+  if (!prices.length) warnings.push("Realized volatility unavailable: daily price history is missing.");
+
+  const tradeIv365 = byMethod(payload.series, "trade-close", "iv365");
+  const skew = skewSeries(payload.series);
+  const since = payload.coverage?.since ?? earliest;
+  const oneYearSince = payload.coverage?.iv365Since ?? (tradeIv365[0] ? day(tradeIv365[0].date) : null);
+  const oneYearNote = !oneYearSince ? (since ? "no IV1Y history yet" : null)
+    : oneYear?.percentile == null ? `IV1Y from ${oneYearSince}, ${tradeIv365.length} session${tradeIv365.length === 1 ? "" : "s"}`
+    : since && oneYearSince > since ? `IV1Y from ${oneYearSince}` : null;
+
+  const riskReversal = measured.find((row) => row.id === "rr25");
+  return {
+    symbol: payload.symbol, status: payload.status,
+    riskReversalNote: riskReversal && !riskReversal.stale ? riskReversalSessionsNote(payload.stats.rr25) : null,
+    iv30: visible(tradeIv30), iv90: visible(byMethod(payload.series, "trade-close", "iv90")), iv365: visible(tradeIv365),
+    quoteIv30: visible(byMethod(payload.series, "quote-mid", "iv30")),
+    hv, spread: visible(spreadAll), skew: visible(skew.points),
+    skewSince: skew.points[0] ? day(skew.points[0].date) : null, skewNote: skew.note, stats: measured, staleNote: staleText,
+    offMarket, offMarketNote: offMarketNote(visible(tradeIv30).filter((point) => offMarket.has(day(point.date)))
+      .map((point) => ({ date: day(point.date), value: point.value! }))),
+    since, oneYearNote, asOf: latestDate, warnings,
+  };
+}
+
+/** HIVG's statistics row for the 30-day 25-delta risk reversal, ranked by the server against its own year. */
+function riskReversalRow(stats: IvRiskReversalStats): IvStatRow {
+  return { id: "rr25", label: "25D RR call-put", unit: "points", value: stats.value, date: stats.date, method: stats.method,
+    basis: stats.basis ?? null, low: stats.low, high: stats.high, rank: stats.rank, percentile: stats.percentile,
+    samples: stats.samples, stale: false, sessionsBehind: null };
+}
+
+/**
+ * "25D RR percentile rests on 33 sessions from 2026-09-23; a year is about 250."
+ * Said while the risk reversal's history is short of a year, so its percentile
+ * is read for what it is; "25D RR percentile needs 20 sessions; 12 so far" below
+ * the minimum. Null once a year is in, or with no risk reversal.
+ */
+export function riskReversalSessionsNote(stats: IvRiskReversalStats | null | undefined): string | null {
+  if (!stats || stats.fullYear) return null;
+  if (stats.percentile == null) return `25D RR percentile needs ${stats.minSamples} prior sessions; ${stats.samples} so far.`;
+  return `25D RR percentile rests on ${stats.samples} session${stats.samples === 1 ? "" : "s"}${
+    stats.windowStart ? ` from ${stats.windowStart}` : ""}; a year is about 250.`;
+}
+
+export type RichCheap = "rich" | "cheap" | "fair" | null;
+export interface RichCheapRow {
+  symbol: string;
+  /** Where the symbol's history stands, as HIVG reads it; an older server says only ready or queued. */
+  status: IvCoverageStatus;
+  /** When the symbol was queued for backfill, when the server says. */
+  queuedAt: string | null;
+  /** The last session its backfill has reached. */
+  backfilledThrough: string | null;
+  /** Why an unavailable symbol is not collected (coverage for requested names is full): not final, unlike one with no options history. */
+  warning: string | null;
+  iv30: number | null;
+  date: string | null;
+  method: IvMethod | null;
+  /** Prices a trade close was solved from, when the server says (see `IvCloseBasis`). */
+  basis: IvCloseBasis | null;
+  /**
+   * The reading trails the symbol's newest session by more than `STALE_AFTER_SESSIONS`
+   * sessions. It is shown, marked stale, and left out of IV/HV, rank, percentile and
+   * Rich/Cheap, and so are its skew and IV1Y rank when they are as old.
+   */
+  stale: boolean;
+  /** Sessions between the reading and the symbol's newest session. */
+  sessionsBehind: number | null;
+  /** The underlying's price at the newest reading: the session's close, or the spot at the quote capture. */
+  spot: number | null;
+  rank: number | null;
+  percentile: number | null;
+  /** Trade close the rank is measured on: the session of the IV30 shown, which IVR, IVP and the verdict are read from with it. */
+  rankDate: string | null;
+  termSlope: number | null;
+  /** The one-year IV of the IV30's own session. */
+  iv1y: number | null;
+  /**
+   * IV1Y percentile on the close IVR and IVP are ranked on. Empty when the 1Y
+   * series has no reading that session, or there is no IV1Y beside it to describe.
+   */
+  iv1yPercentile: number | null;
+  /** The 25-delta risk reversal at 30 days: call IV minus put IV, so positive means calls are richer, as OVDV signs it. */
+  riskReversal: number | null;
+  /** Session of the reading the risk reversal comes from. */
+  skewDate: string | null;
+  /** How the risk reversal was read: the session's close, or the quote capture an older server gives alone. */
+  skewMethod: IvMethod | null;
+  /** Where the risk reversal sits in its own prior 52 weeks, 0 to 100, from the server. */
+  riskReversalPercentile: number | null;
+  /** Prior sessions that percentile rests on, and whether they reach back a year. */
+  riskReversalSamples: number;
+  riskReversalFullYear: boolean;
+  riskReversalSince: string | null;
+  /**
+   * Realized volatility on the reading's own date, so the row reads as IV30 over HV;
+   * the newest HV for a stale reading or one with no HV on its date.
+   */
+  hv: number | null;
+  /** Session of the HV shown. */
+  hvDate: string | null;
+  /** IV30 over the HV of its own date; empty for a stale reading. */
+  ivHv: number | null;
+  verdict: RichCheap;
+}
+
+/**
+ * The dates the screened rows agree on, so each is said once instead of per
+ * row. The reading (IV30, term slope, IV/HV) and the rank (IVR, IVP) are one
+ * ranked close where a symbol has one, so a rank is dated as its row is; an
+ * unranked reading is dated alone. A group the rows disagree on gets its own
+ * column.
+ */
+export interface RichCheapDates {
+  reading: { date: string; method: IvMethod; basis: IvCloseBasis | null } | null;
+  /** The trade close every ranked row is ranked on. */
+  rank: string | null;
+  /** Some risk reversal comes from a different session than its row's reading. */
+  skewApart: boolean;
+  /** Some HV is dated on a different session than the IV it sits beside. */
+  hvApart: boolean;
+}
+export function richCheapDates(rows: readonly RichCheapRow[]): RichCheapDates {
+  const read = rows.filter((row) => row.date && row.method);
+  const ranked = rows.filter((row) => row.rankDate);
+  const first = read[0], firstRanked = ranked[0];
+  return {
+    // A stale row's own date is said in its row, never once for all.
+    // The label the rows would be dated with, not the raw basis: a mid and a mixed close are both "close mid".
+    reading: first && read.every((row) => row.date === first.date && readingSource(row.method, row.basis) === readingSource(first.method, first.basis) && !row.stale)
+      ? { date: first.date!, method: first.method!, basis: first.basis } : null,
+    rank: firstRanked && ranked.every((row) => row.rankDate === firstRanked.rankDate) ? firstRanked.rankDate : null,
+    skewApart: rows.some((row) => row.riskReversal != null && row.skewDate !== row.date),
+    hvApart: rows.some((row) => row.hv != null && row.hvDate != null && row.hvDate !== row.date),
+  };
+}
+
+/** Rich or cheap against the symbol's own year: IV30 percentile at or above 80, or at or below 20. */
+export function verdictFor(percentile: number | null): RichCheap {
+  if (percentile == null) return null;
+  return percentile >= RICH_PERCENTILE ? "rich" : percentile <= CHEAP_PERCENTILE ? "cheap" : "fair";
+}
+
+export function projectRichCheap(rows: readonly IvScreenRow[], hv: ReadonlyMap<string, ScreenHv | null> = new Map()): RichCheapRow[] {
+  return rows.map((row) => {
+    const latest = row.latest;
+    const series = hv.get(row.symbol) ?? null;
+    // One dated row: IV30, its rank and the verdict all come from the ranked close when there is one,
+    // never a newer reading's IV30 beside an older close's rank, nor a rank beside a reading with no IV30.
+    const ranked = row.iv30 && Number.isFinite(row.iv30.value) && row.iv30.date ? row.iv30 : null;
+    const reading = ranked ? { iv30: ranked.value, date: ranked.date, method: ranked.method, basis: ranked.basis ?? null }
+      : latest ? { iv30: latest.iv30, date: latest.date, method: latest.method, basis: latest.basis ?? null } : null;
+    const iv30 = reading?.iv30 ?? null;
+    const date = reading?.date ?? null;
+    // A figure of the reading itself: the series ranked on its session, else the newest reading's when it is that reading.
+    const sameSession = (fromLatest: number | null | undefined, stats: IvStats | null | undefined) =>
+      date == null ? null : stats?.date === date && Number.isFinite(stats.value) ? stats.value
+        : latest?.date === date && latest.method === reading?.method ? fromLatest ?? null : null;
+    // The newest session the symbol reaches: its prices, its backfill and every reading it has.
+    const newest = newestSession(row.coverage?.backfilledThrough, latest?.date, row.iv30?.date, row.iv90?.date, row.iv365?.date,
+      row.skew?.date, row.rr25?.date, series?.date);
+    const { stale, sessionsBehind: behind } = staleness(date, newest);
+    // The risk reversal of the ranked close, with its percentile, where the server gives it; else the quote capture's alone.
+    const rr = row.rr25 ?? null;
+    const skew = rr ? { date: rr.date, value: rr.value, method: rr.method }
+      : row.skew ? { date: row.skew.date, value: row.skew.call25 - row.skew.put25, method: "quote-mid" as const } : null;
+    const skewStale = skew ? staleness(skew.date, newest).stale : false;
+    const rankedNow = !stale && ranked != null && iv30 != null;
+    const percentile = rankedNow ? ranked.percentile ?? null : null;
+    // HV on the reading's own date: today's HV beside an old IV says nothing about it.
+    const atReading = series && !stale && date ? hvOn(series, date) : null;
+    const shown = atReading ?? (series?.value != null && series.date ? { date: series.date, value: series.value } : null);
+    const iv90 = sameSession(latest?.iv90, row.iv90);
+    const iv1y = sameSession(latest?.iv365, row.iv365);
+    return {
+      symbol: row.symbol, status: row.coverageStatus ?? row.status, queuedAt: row.coverage?.addedAt ?? null,
+      backfilledThrough: row.coverage?.backfilledThrough ?? null, warning: row.warnings?.[0] ?? null,
+      iv30, date, method: reading?.method ?? null, basis: reading?.basis ?? null,
+      // The underlying's price at the reading the row shows: a close's session close, as the server gives it with
+      // the rank or, from an older server, the session's daily close; else the newest reading's when it is that
+      // very reading. Never a 15:40 capture's beside a close.
+      stale, sessionsBehind: behind,
+      spot: ranked?.spot ?? (reading?.method === "trade-close" && date ? series?.closes?.get(date) : undefined)
+        ?? (latest && date != null && latest.date === date && latest.method === reading?.method ? latest.spot ?? null : null),
+      rank: rankedNow ? ranked.rank ?? null : null, percentile, rankDate: rankedNow ? ranked.date : null,
+      termSlope: iv30 != null && iv90 != null ? iv30 - iv90 : null,
+      iv1y,
+      iv1yPercentile: rankedNow && iv1y != null && row.iv365?.date === date ? row.iv365.percentile : null,
+      riskReversal: skewStale || !skew ? null : skew.value, skewDate: skewStale ? null : skew?.date ?? null,
+      skewMethod: skewStale ? null : skew?.method ?? null,
+      riskReversalPercentile: skewStale || !rr ? null : rr.percentile,
+      riskReversalSamples: skewStale || !rr ? 0 : rr.samples, riskReversalFullYear: !skewStale && !!rr?.fullYear,
+      riskReversalSince: skewStale ? null : rr?.windowStart ?? null,
+      hv: shown?.value ?? null, hvDate: shown?.date ?? null,
+      ivHv: iv30 != null && atReading != null && atReading.value > 0 ? iv30 / atReading.value : null,
+      verdict: verdictFor(percentile),
+    };
+  });
+}
+
+interface ScreenCoverage {
+  /** One line per state, each symbol dated: queued since when, backfilled through which session. */
+  notes: string[];
+  /** Symbols whose history is still to come or not collected: the screen is incomplete while there are any. */
+  pending: string[];
+  /** Those of them with no reading to show yet. */
+  missing: string[];
+}
+
+/**
+ * What VCA says about symbols without a full history, in the report's notes
+ * and the pane's notices. A queued symbol says since when and, with `retry`,
+ * when to look again: ten minutes after the newest of them was queued. One
+ * backfilling says how far it has got. One that finished with no options
+ * history is final and leaves the screen complete; one demand coverage does
+ * not collect is not final. An older server says only ready or queued, without
+ * dates, so its queued symbols are counted from now as before. A symbol in
+ * `explained` (a listing that stopped trading, which its row says) is not
+ * listed again as having no options history.
+ */
+export function screenCoverage(
+  rows: readonly RichCheapRow[],
+  options: { now?: number; retry?: boolean; explained?: ReadonlySet<string> } = {},
+): ScreenCoverage {
+  const now = options.now ?? Date.now();
+  const queued = rows.filter((row) => row.status === "queued");
+  const backfilling = rows.filter((row) => row.status === "backfilling");
+  const final = rows.filter((row) => row.status === "unavailable" && !row.warning && !options.explained?.has(row.symbol));
+  const uncovered = rows.filter((row) => row.status === "unavailable" && row.warning);
+  const notes: string[] = [];
+  if (queued.length) {
+    const times = queued.map((row) => queuedTime(row.queuedAt, now));
+    const listed = queued.map((row, index) => times[index] == null ? row.symbol : `${row.symbol} since ${utcClock(times[index]!, now)}`);
+    const newest = Math.max(...times.map((time) => time ?? now));
+    notes.push(`Queued for backfill: ${listed.join(", ")}; ${firstBackfillText(newest, now, options.retry ?? true)}.`);
+  }
+  if (backfilling.length) {
+    notes.push(`Backfilling: ${backfilling.map((row) => row.backfilledThrough ? `${row.symbol} through ${row.backfilledThrough}` : row.symbol).join(", ")}.`);
+  }
+  if (final.length) notes.push(`No options history: ${final.map((row) => row.symbol).join(", ")}.`);
+  // Said plainly, whatever an older server words it as: no time is promised for a name whose history is not collected.
+  if (uncovered.length) notes.push(`Not collected, coverage for requested names is full: ${uncovered.map((row) => row.symbol).join(", ")}.`);
+  const pending = [...queued, ...backfilling, ...uncovered];
+  return { notes, pending: pending.map((row) => row.symbol),
+    missing: pending.filter((row) => row.iv30 == null && row.date == null).map((row) => row.symbol) };
+}
+
+/** The symbols whose reading is stale, dated, and what that leaves out of the screen. */
+export function screenStaleNote(rows: readonly RichCheapRow[]): string | null {
+  return staleReadingsNote("IV/HV, rank and Rich/Cheap", rows.flatMap((row) => row.stale && row.date ? [{ label: row.symbol, date: row.date }] : []));
+}
+
+/**
+ * How many sessions the screen's risk reversal percentiles rest on while they
+ * are short of a year, said once when the rows agree: "25D RR pctl rests on 33
+ * sessions from 2026-09-23; a year is about 250." Rows that differ are listed
+ * ("SPY 33, TSLA 12"). Null once every percentile rests on a year.
+ */
+export function screenRiskReversalNote(rows: readonly RichCheapRow[]): string | null {
+  const short = rows.filter((row) => row.riskReversalPercentile != null && !row.riskReversalFullYear);
+  if (!short.length) return null;
+  const first = short[0]!;
+  const same = short.every((row) => row.riskReversalSamples === first.riskReversalSamples && row.riskReversalSince === first.riskReversalSince);
+  const counted = same ? `${first.riskReversalSamples} sessions${first.riskReversalSince ? ` from ${first.riskReversalSince}` : ""}`
+    : `fewer sessions than a year (${short.map((row) => `${row.symbol} ${row.riskReversalSamples}`).join(", ")})`;
+  return `25D RR pctl rests on ${counted}; a year is about 250.`;
+}
+
+/**
+ * The VCA pane's notices: the report's wording without a time to come back
+ * at, since the pane checks again by itself, and a count of ready symbols with
+ * no IV30, which is how an older server reports one that found no options.
+ */
+export function screenPaneNotices(rows: readonly RichCheapRow[], now = Date.now()): string[] {
+  const empty = rows.filter((row) => row.status === "ready" && row.iv30 == null).length;
+  return [...screenCoverage(rows, { now, retry: false }).notes,
+    ...(empty ? [`${empty} symbol${empty === 1 ? " has" : "s have"} no stored implied volatility yet.`] : []),
+    ...[screenStaleNote(rows), screenRiskReversalNote(rows)].filter((note): note is string => !!note)];
+}
+
+export const VCA_PRESETS = {
+  etfs: ["SPY", "QQQ", "IWM", "DIA", "EEM", "EFA", "FXI", "EWZ", "GLD", "SLV", "GDX", "USO", "TLT", "HYG",
+    "XLE", "XLF", "XLK", "XLV", "XLY", "XLP", "XLI", "XLU", "SMH", "XBI", "KRE"],
+  megacaps: ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "AVGO", "AMD", "NFLX", "ORCL", "CRM",
+    "JPM", "BAC", "GS", "V", "MA", "XOM", "CVX", "LLY", "UNH", "WMT", "COST", "HD", "BA"],
+} as const;
+export type VcaPreset = keyof typeof VCA_PRESETS;
+export const VCA_LIMIT = 60;

@@ -1,0 +1,90 @@
+import { useCallback, useMemo } from "react";
+import { Box } from "../../../ui";
+import { useAsyncResource, useAutoRefresh, usePluginPaneState, useUpdatedAgo } from "../../../public/react";
+import { CompositeChart, MarketBoardStack, PaneStatusBody, usePaneNoticeFooter, usePaneStatusLinkFooter, type StatItem } from "../../../components";
+import { ageFooterSegment } from "../../../components/layout/pane/footer";
+import { colors } from "../../../theme/colors";
+import { isAccessDenied } from "../../../api-client/errors";
+import type { CentralBankRow } from "../../../api-client/central-bank-rates";
+import { staticSeries } from "../../../components/chart/static/series";
+import { StatChartDetail } from "../../../components/market-board";
+import type { PaneProps } from "../../../types/plugin";
+import { MISSING_VALUE, formatPercentileRank } from "../../../utils/format";
+import { usePaneRefreshKey } from "../../../components/data-table/table-pane";
+import { useResearchCloudSession } from "../shared/research-cloud-session";
+import { getCachedCentralBankRates, loadCentralBankRates } from "./client";
+import { centralBankRatesHeadless } from "./headless";
+import { reportFooterSegment } from "../shared/source-footer";
+import {
+  hasNoPolicyRate, policyBoardRow, policyChange, policyChangeDate, policyHistory, policyLevel, policyObservations, policyRate, policyRowNote,
+  policySource,
+} from "./model";
+
+const PANELS = [{ id: "main" }];
+
+function PolicyDetail({ row, width, height, focused }: { row: CentralBankRow; width: number; height: number; focused: boolean }) {
+  const history = useMemo(() => policyHistory(row), [row]);
+  const series = useMemo(() => [staticSeries(history.map((point) => ({ date: new Date(point.date), observedAt: new Date(point.date), value: point.value })),
+    { id: row.id, label: row.instrument, color: colors.positive, calendarSpaced: true, style: "step" })], [row, history]);
+  const p = row.percentile;
+  // A bank whose terms ask it: the figures computed from its rates say so (the CBE's).
+  const computed = row.computedFrom ? `computed from ${row.computedFrom}` : null;
+  // The chart shows the rank window, so the range carries no window or sample
+  // count; short details keep the figures several to a row.
+  const items: StatItem[] = [
+    { id: "level", label: row.range ? "Target range" : "Policy rate", value: policyLevel(row),
+      detail: [formatPercentileRank(p.value, "1Y"), computed].filter(Boolean).join(" · ") },
+    { id: "move", label: "Last change", value: policyChange(row),
+      detail: [policyChangeDate(row), computed].filter(Boolean).join(" · ") || undefined },
+    // A target range ranks and charts its midpoint, which the band's range would not say.
+    { id: "range", label: "1Y range", value: `${policyRate(p.min)} to ${policyRate(p.max)}`, detail: row.range ? "midpoint" : undefined },
+    { id: "asOf", label: "As of", value: row.asOf ?? MISSING_VALUE, tone: row.status === "stale" ? "warning" : undefined,
+      detail: [row.publicationFrequency, row.lagDays == null ? null : `${row.lagDays}d lag`,
+        row.confirmedAt ? `confirmed ${row.confirmedAt.slice(0, 10)}` : null, row.status === "stale" ? "stale" : null]
+        .filter(Boolean).join(" · ") || undefined },
+    // An older server does not say which meeting was the latest: the field is left out rather than read as none.
+    ...row.latestDecision === undefined ? [] : [{ id: "decided", label: row.latestDecision?.kind === "fixing" ? "Last fixing" : "Last decision",
+      value: row.latestDecision?.date ?? MISSING_VALUE }],
+    { id: "meeting", label: row.nextMeeting?.kind === "fixing" ? "Next fixing" : "Next meeting", value: row.nextMeeting?.date ?? MISSING_VALUE },
+    { id: "source", label: "Source", value: policySource(row) ?? MISSING_VALUE, detail: row.sourceSeriesIds.join(", ") || undefined },
+    { id: "instrument", label: "Instrument", value: row.instrument, detail: row.centralBank ?? undefined, wide: true },
+  ];
+  return <StatChartDetail items={items} width={width} height={height} empty={!history.some((point) => point.value != null)}
+    emptySubject="policy history" emptyTitle="No policy history available."
+    renderChart={(chartHeight) => <CompositeChart series={series} panels={PANELS} width={width} height={chartHeight} showLegend={false}
+      focused={focused} navigable={false} showTimeAxis formatAxisValue={policyRate} remoteKind="central-bank-policy-history" />} />;
+}
+
+export function CentralBankRatesPane({ width, height, focused }: PaneProps) {
+  const session = useResearchCloudSession();
+  const loader = useCallback((force: boolean) => loadCentralBankRates(force), [session.requestKey]);
+  const resource = useAsyncResource(loader, { initialData: getCachedCentralBankRates, clearOnError: isAccessDenied });
+  const [selectedId, setSelectedId] = usePluginPaneState<string | null>("selected", null);
+  const [openId, setOpenId] = usePluginPaneState<string | null>("open", null);
+  const data = resource.data?.payload;
+  const rows = useMemo(() => data?.rows.filter((row) => !hasNoPolicyRate(row)).map(policyBoardRow) ?? [], [data]);
+  const selected = rows.find((row) => row.id === openId) ?? rows.find((row) => row.id === selectedId);
+  const updatedAgo = useUpdatedAgo(resource.updatedAt);
+  useAutoRefresh(resource.updatedAt, resource.load);
+  usePaneRefreshKey(() => resource.reload(), { focused });
+  usePaneNoticeFooter({ registrationId: "central-bank-rates:notices", focused,
+    // A bank with no rate or an old one says so on its row (`rowNote`); the footer is the board's.
+    notices: resource.data?.refreshError ? [resource.data.refreshError] : [] });
+  usePaneStatusLinkFooter({ registrationId: "central-bank-rates", focused, loading: resource.loading, error: resource.error,
+    url: selected?.observation.sourceUrl ?? null, showOpenHint: true,
+    // Its sources and the rows' dates, as `fn CBR` ends; how long ago it loaded goes first on a narrow row.
+    info: data ? [reportFooterSegment(centralBankRatesHeadless, { sections: [], freshness: { observations: policyObservations(data) } }),
+      ...(updatedAgo ? [ageFooterSegment(updatedAgo)] : [])] : [],
+    stale: !!data && resource.data?.stale,
+  });
+  return <Box width={width} height={height} flexDirection="column">
+    <PaneStatusBody loading={resource.loading && !data} error={!data ? resource.error : null}
+      empty={!resource.loading && !resource.error && !data} subject="central bank rates">
+      {/* The board heads the move's date LAST CHANGE, so the move itself is MOVE. */}
+      {data ? <MarketBoardStack rows={rows} width={width} height={height} focused={focused}
+        selectedId={selectedId} onSelectedIdChange={setSelectedId} openId={openId} onOpenIdChange={setOpenId}
+        valueWidth={14} changeLabel="MOVE" labelHeader="JURISDICTION" labelWidth={14} labelDetailHeader="INSTRUMENT"
+        rowNote={(row) => policyRowNote(row.observation)} renderDetail={(row) => <PolicyDetail row={row.observation} width={width} height={Math.max(5, height - 2)} focused={focused} />} /> : null}
+    </PaneStatusBody>
+  </Box>;
+}

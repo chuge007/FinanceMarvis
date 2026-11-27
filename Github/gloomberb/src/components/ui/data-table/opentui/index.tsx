@@ -1,0 +1,1095 @@
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Box, ScrollBox, Span, Text, TextAttributes, useNativeRenderer, type BoxRenderable } from "../../../../ui";
+import { capturePointerDrag, releasePointerDrag } from "../../../../ui/pointer-drag";
+import { hoverBg, inactiveSelectedText } from "../../../../theme/colors";
+import { selectedRowCellColor } from "../../../../theme/tone-contrast";
+import { useThemeColors } from "../../../../theme/theme-context";
+import { usePaneInstance } from "../../../../state/app/context";
+import { useSelectionFill } from "../../selection-fill";
+import { useShortcut, useViewport } from "../../../../react/input";
+import { measurePerf } from "../../../../utils/perf-marks";
+import { displayWidth } from "../../../../utils/format";
+import { useDoubleClickActivation } from "../../../use-double-click-activation";
+import { useScrollBoxScrollActivity } from "../../../table-view-shared";
+import { EmptyState } from "../../status";
+import { observeScrollBoxContentSize, observeScrollBoxViewportSize } from "../../../../renderers/opentui/scrollbox-layout";
+import {
+  expandTableColumns,
+  drawnTableColumns,
+  fitTableColumns,
+  tableColumnWidth,
+  fitTableHeaderText,
+  getTableWidth,
+  hiddenTableColumnText,
+  hasMeaningfulTableHorizontalOverflow,
+  tableColumnLeadGap,
+  tableColumnStarts,
+  tableContentWidthProps,
+  tableFarEdgePad,
+  tableFreezesFirstColumn,
+  tableScrollStep,
+  useMeasuredTableContentWidth,
+} from "../../table-layout";
+import type {
+  DataTableColumn,
+  DataTableProps,
+} from "../types";
+import { resolveDataTableScrollTop } from "../visible-range";
+import { useFocusOwningPane, useVisibleRangeEmitter } from "../hooks";
+import { ObservedTableRow } from "../observed-row";
+import { useStableColumns } from "../stable-columns";
+import { COLUMN_DRAG_THRESHOLD_CELLS, columnDropBoundary, columnDropIndex } from "../column-order";
+import {
+  columnsShownWhole,
+  cutColumnText,
+  fitColumnCellText,
+  resolveDataTableColumnClips,
+  resolveDataTableVisibleWindow,
+  resolveMoreColumnsHint,
+  MORE_COLUMNS_HINT_WIDTH,
+  reuseDataTableColumnClips,
+  type DataTableColumnClip,
+} from "./model";
+
+interface DataTableRowPointerTarget<T> {
+  item: T;
+  index: number;
+}
+
+/** A press on a header that may become a drag of its column. */
+interface HeaderPress {
+  columnId: string;
+  from: number;
+  startX: number;
+  dragging: boolean;
+}
+
+interface HeaderDragEvent {
+  x?: number;
+  preventDefault?: () => void;
+  stopPropagation?: () => void;
+}
+
+/** A column being dragged, and the gap it would drop into (null where it would stay). */
+interface ColumnDrag {
+  from: number;
+  boundary: number | null;
+}
+
+type ManagedScrollBar = {
+  visible: boolean;
+  resetVisibilityControl?: () => void;
+};
+
+function setScrollBarVisible(scrollBar: unknown, visible: boolean): void {
+  const bar = scrollBar as ManagedScrollBar | undefined;
+  if (!bar) return;
+  if (visible && bar.resetVisibilityControl) {
+    bar.resetVisibilityControl();
+    return;
+  }
+  bar.visible = visible;
+}
+
+/** The widths of what a row drew in each column, null for a cell of its own (`content`) that gives none (`contentWidth`). */
+interface RowCellWidths {
+  columnsKey: string;
+  widths: (number | null)[];
+}
+
+function OpenTuiDataTableRowInner<
+  T,
+  C extends DataTableColumn,
+>({
+  colors,
+  columnGap,
+  columnStarts,
+  contentWidth,
+  cellColumns,
+  displayColumns,
+  focusPane,
+  frozenColumnOffset,
+  getRowBackgroundColor,
+  handleRowMouseDown,
+  horizontalPadding,
+  index,
+  item,
+  itemKey,
+  onRowContextMenu,
+  onRowMouseDown,
+  onTableMouseDown,
+  renderCell,
+  renderSectionHeader,
+  rowContextMenuSurface,
+  sectionWidth,
+  selected,
+  selectionBg,
+  selectionLit: paneSelectionLit,
+  selectedTextOverridesCellColor,
+  columnClips,
+  cellWidths,
+  columnsKey,
+}: {
+  /** Where the row leaves the width of each column's text as it draws it, for the table to fit its columns to. */
+  cellWidths: Map<string, RowCellWidths>;
+  columnsKey: string;
+  /** Only compared by the row memo; see `getRowVersion`. */
+  rowVersion?: unknown;
+  /** Columns of the row in view, which a section header's action keeps to. */
+  sectionWidth: number;
+  colors: ReturnType<typeof useThemeColors>;
+  columnGap: number;
+  columnStarts: number[];
+  contentWidth: number;
+  /**
+   * The columns as each cell's text is made for and measured at: as an unfitted table draws them, so
+   * text that fits itself to its column (a price's digits) neither shrinks with the blank the fit took
+   * from it nor grows with the room the fit gave it.
+   */
+  cellColumns: C[];
+  displayColumns: C[];
+  focusPane: () => void;
+  frozenColumnOffset?: number;
+  getRowBackgroundColor?: DataTableProps<T, C>["getRowBackgroundColor"];
+  handleRowMouseDown: (
+    targetKey: string,
+    value: DataTableRowPointerTarget<T>,
+    event?: { detail?: number },
+  ) => void;
+  horizontalPadding: number;
+  index: number;
+  item: T;
+  itemKey: string;
+  onRowContextMenu?: DataTableProps<T, C>["onRowContextMenu"];
+  onRowMouseDown?: DataTableProps<T, C>["onRowMouseDown"];
+  onTableMouseDown?: DataTableProps<T, C>["onTableMouseDown"];
+  renderCell: DataTableProps<T, C>["renderCell"];
+  renderSectionHeader?: DataTableProps<T, C>["renderSectionHeader"];
+  rowContextMenuSurface: boolean;
+  selected: boolean;
+  /** The selected row's fill (`useSelectionFill`): quieter, in the row's own text colours, when the pane is not focused. */
+  selectionBg: string;
+  selectionLit: boolean;
+  selectedTextOverridesCellColor: boolean;
+  /** How the viewport cuts each column, null when every column shows whole (resolveDataTableColumnClips). */
+  columnClips: readonly (DataTableColumnClip | null)[] | null;
+}) {
+  const sectionHeader = renderSectionHeader?.(item, index) ?? null;
+  const selectionLit = selected && paneSelectionLit;
+  // On the quieter fill a row keeps its own colours, each lifted only where it would not read there.
+  const ink = (color: string) => (selected && !selectionLit ? inactiveSelectedText(color, colors) : color);
+
+  if (sectionHeader) {
+    // A header the cursor can land on (a collapsible group) shows it like a row.
+    const headerColor = selectionLit
+      ? sectionHeader.color ?? colors.selectedText
+      : ink(sectionHeader.color ?? colors.textBright);
+    const action = sectionHeader.action;
+    return (
+      <Box
+        flexDirection="row"
+        height={1}
+        {...tableContentWidthProps(contentWidth)}
+        // Beside a pinned first column the heading stays in view too, not cut to its last letters.
+        paddingLeft={horizontalPadding + (frozenColumnOffset ?? 0)}
+        paddingRight={horizontalPadding}
+        backgroundColor={selected ? selectionBg : sectionHeader.backgroundColor ?? colors.bg}
+        onMouseDown={(event: any) => {
+          focusPane();
+          onTableMouseDown?.(event);
+          sectionHeader.onMouseDown?.(event);
+          event.preventDefault();
+        }}
+      >
+        {sectionHeader.expanded !== undefined && (
+          <Text fg={headerColor}>{sectionHeader.expanded ? "\u25be " : "\u25b8 "}</Text>
+        )}
+        {action ? (
+          // Kept to the columns in view, so a table wider than its pane does not push the action out of sight.
+          <Box flexDirection="row" height={1} flexShrink={1} minWidth={0} width={Math.max(1, sectionWidth - horizontalPadding * 2)}>
+            <Text attributes={sectionHeader.attributes ?? TextAttributes.BOLD} fg={headerColor} wrapMode="none" truncate flexShrink={1} minWidth={0}>
+              {sectionHeader.text}
+            </Text>
+            <Box flexGrow={1} minWidth={1} />
+            <Box
+              flexShrink={0}
+              height={1}
+              cursor="pointer"
+              hoverBackgroundColor={selected ? undefined : hoverBg(colors)}
+              onMouseDown={(event: any) => {
+                // The action, not the header's own press (a group's collapse).
+                event.stopPropagation?.();
+                event.preventDefault?.();
+                focusPane();
+                action.onPress();
+              }}
+            >
+              <Text fg={selectionLit ? colors.selectedText : ink(colors.text)}>{action.label}</Text>
+            </Box>
+          </Box>
+        ) : (
+          <Text
+            attributes={sectionHeader.attributes ?? TextAttributes.BOLD}
+            fg={headerColor}
+          >
+            {sectionHeader.text}
+          </Text>
+        )}
+      </Box>
+    );
+  }
+
+  const rowState = { selected, inactive: selected && !selectionLit };
+  const widths: (number | null)[] = [];
+  cellWidths.set(itemKey, { columnsKey, widths });
+  const rowBackgroundColor = getRowBackgroundColor?.(item, index, rowState);
+  const rowBg = selected ? selectionBg : rowBackgroundColor ?? colors.bg;
+  const rowHoverBg = selected ? undefined : hoverBg(colors);
+
+  return (
+    <Box
+      flexDirection="row"
+      height={1}
+      {...tableContentWidthProps(contentWidth)}
+      paddingX={horizontalPadding}
+      backgroundColor={rowBg}
+      hoverBackgroundColor={rowHoverBg}
+      data-gloom-context-menu-surface={rowContextMenuSurface ? "true" : undefined}
+      onMouseDown={(event: any) => {
+        focusPane();
+        onTableMouseDown?.(event);
+        if (onRowMouseDown?.(item, index, event) === true) return;
+        event.preventDefault();
+        handleRowMouseDown(itemKey, { item, index }, event);
+      }}
+      onContextMenu={(event: any) => {
+        focusPane();
+        onRowContextMenu?.(item, index, event);
+      }}
+    >
+      {displayColumns.map((column, columnIndex) => {
+        const frozen = columnIndex === 0 && frozenColumnOffset !== undefined;
+        const clip = columnClips?.[columnIndex] ?? null;
+        const cellColumn = cellColumns[columnIndex] ?? column;
+        const made = renderCell(item, cellColumn, index, rowState);
+        widths[columnIndex] = made.content === undefined ? displayWidth(made.text) : made.contentWidth ?? null;
+        const columnStart = columnStarts[columnIndex] ?? 0;
+        const leadGap = tableColumnLeadGap(displayColumns, columnIndex, columnGap);
+        const inset = clip ? clip.inset : !frozen && frozenColumnOffset !== undefined
+          ? Math.min(column.width, Math.max(0, frozenColumnOffset + (displayColumns[0]?.width ?? 0) + columnGap - columnStart)) : 0;
+        const shownWidth = clip ? clip.width : column.width - inset;
+        // A drawn cell lays itself out in the column as drawn; its width is the one made for its column unfitted.
+        // One that says its width (`contentWidth`) is made for the cells of a cut column that show, as cut text
+        // is fitted to them, so it gives up a piece whole where the edge would cut it.
+        const drawnColumn = made.contentWidth !== undefined && shownWidth > 0 && shownWidth < column.width
+          ? { ...column, width: shownWidth } : column;
+        const cell = made.content !== undefined && cellColumn !== drawnColumn ? renderCell(item, drawnColumn, index, rowState) : made;
+        // Cut text is fitted to what shows; a number the edge cuts stays blank in its own place,
+        // and its cell keeps its background and its press. A drawn cell left no cells draws nothing, as text does.
+        const fitted = fitColumnCellText(cell.text, clip ? column.width : shownWidth, column.align, clip, cell.note, cell.keepEnd);
+        const contentCut = shownWidth <= 0 || (clip !== null && column.align === "right" && fitted.text.trim() === "");
+        return (
+          <Box
+            key={column.id}
+            width={column.width + columnGap + (frozen ? horizontalPadding : 0)}
+            marginLeft={frozen ? -horizontalPadding : leadGap}
+            position="relative"
+            left={frozen ? frozenColumnOffset : undefined}
+            zIndex={frozen ? 1 : undefined}
+            backgroundColor={cell.backgroundColor ?? rowBg}
+            onMouseDown={(event: any) => {
+              focusPane();
+              onTableMouseDown?.(event);
+              if (cell.onMouseDown) {
+                cell.onMouseDown(event);
+                return;
+              }
+              if (onRowMouseDown?.(item, index, event) === true) {
+                event.stopPropagation?.();
+                return;
+              }
+              event.preventDefault();
+              event.stopPropagation?.();
+              handleRowMouseDown(itemKey, { item, index }, event);
+            }}
+          >
+            {cell.content !== undefined && !contentCut ? (frozenColumnOffset === undefined && !clip ? cell.content : (
+              <>
+                {frozen && <Text position="absolute" left={0} top={0}>{" ".repeat(column.width + columnGap + horizontalPadding)}</Text>}
+                <Box marginLeft={frozen ? horizontalPadding : inset} width={Math.max(0, shownWidth)} overflow="hidden">
+                  {cell.content}
+                </Box>
+              </>
+            )) : (
+              <Text
+                attributes={cell.attributes ?? TextAttributes.NONE}
+                fg={selectionLit
+                  ? selectedRowCellColor(cell.color, !!selectedTextOverridesCellColor, cell.keepColorWhenSelected, colors) ?? colors.selectedText
+                  // A cell on a fill of its own keeps the colour it chose for it.
+                  : cell.backgroundColor && cell.backgroundColor !== selectionBg ? cell.color ?? colors.text : ink(cell.color ?? colors.text)}
+              >
+                {fitted.note ? <>
+                  {`${frozen ? " ".repeat(horizontalPadding) : ""}${" ".repeat(inset)}${fitted.text}`}
+                  <Span fg={ink(colors.textDim)} attributes={TextAttributes.NONE}>{fitted.note}</Span>
+                  {`${fitted.padding ?? ""}${frozen ? " ".repeat(columnGap) : ""}`}
+                </> : `${frozen ? " ".repeat(horizontalPadding) : ""}${" ".repeat(inset)}${fitted.text}${frozen ? " ".repeat(columnGap) : ""}`}
+              </Text>
+            )}
+          </Box>
+        );
+      })}
+    </Box>
+  );
+}
+
+const OpenTuiDataTableRow = memo(OpenTuiDataTableRowInner) as typeof OpenTuiDataTableRowInner;
+
+export function OpenTuiDataTable<T, C extends DataTableColumn = DataTableColumn>({
+  columns: columnsProp,
+  items,
+  sortColumnId,
+  sortDirection,
+  onHeaderClick,
+  onColumnMove,
+  anchoredColumns = 1,
+  headerScrollRef,
+  scrollRef,
+  syncHeaderScroll,
+  onBodyScrollActivity,
+  headerScrollId,
+  bodyScrollId,
+  getItemKey,
+  isSelected,
+  onSelect,
+  onActivate,
+  onTableMouseDown,
+  visibleRangeKey,
+  onVisibleRangeChange,
+  visibleRangeBuffer,
+  onRowMouseDown,
+  onRowContextMenu,
+  rowContextMenuSurface = false,
+  renderCell,
+  selectedTextOverridesCellColor = false,
+  getRowVersion,
+  rowSource,
+  renderSectionHeader,
+  getRowBackgroundColor,
+  emptyContent,
+  bodyAfter,
+  emptyStateTitle,
+  emptyStateHint,
+  emptyStateActions,
+  virtualize = true,
+  overscan = 3,
+  columnGap = 1,
+  horizontalPadding = 1,
+  fillAvailableWidth = true,
+  showHorizontalScrollbar = true,
+  freezeFirstColumn: freezeFirstColumnProp,
+  scrollToIndex,
+  scrollToIndexFrom,
+  scrollToIndexAlign = "nearest",
+  scrollToIndexVersion = 0,
+}: DataTableProps<T, C>) {
+  const columns = useStableColumns(columnsProp);
+  const colors = useThemeColors();
+  const focusPane = useFocusOwningPane();
+  const paneInstanceId = usePaneInstance()?.instanceId ?? null;
+  const selectionFill = useSelectionFill();
+  const appViewport = useViewport();
+  const nativeRenderer = useNativeRenderer();
+  const [scrollVersion, setScrollVersion] = useState(0);
+  // How far the columns are scrolled sideways: a frozen first column moves with
+  // it, and a column the viewport cuts is drawn to what shows (resolveDataTableColumnClips).
+  const [scrollLeft, setScrollLeft] = useState(0);
+  const frozenColumnOffset = scrollLeft;
+  useEffect(() => {
+    setScrollLeft(scrollRef.current?.scrollLeft ?? 0);
+  }, [scrollRef]);
+  const lastAppliedScrollRequestRef = useRef<string | null>(null);
+  const controlledScrollTopRef = useRef<number | null>(null);
+  const scrollTop = virtualize ? (scrollRef.current?.scrollTop ?? 0) : 0;
+  const measuredViewportHeight = scrollRef.current?.viewport?.height;
+  const tableWindow = useMemo(
+    () => measurePerf(
+      "data-table.visible-rows",
+      () => resolveDataTableVisibleWindow({
+        appViewportHeight: appViewport.height,
+        items,
+        measuredViewportHeight,
+        overscan,
+        scrollTop,
+        virtualize,
+      }),
+      {
+        itemCount: items.length,
+        measuredViewportHeight,
+        overscan,
+        scrollTop,
+        virtualize,
+      },
+    ),
+    [
+      appViewport.height,
+      items,
+      items.length,
+      measuredViewportHeight,
+      overscan,
+      scrollTop,
+      scrollVersion,
+      virtualize,
+    ],
+  );
+  const { endIndex, startIndex, viewportHeight, visibleItems } = tableWindow;
+  const setTableWidth = useMemo(
+    () => getTableWidth(columns, columnGap, horizontalPadding),
+    [columnGap, columns, horizontalPadding],
+  );
+  const {
+    viewportWidth: measuredViewportWidth,
+    measureContentWidth,
+  } = useMeasuredTableContentWidth(setTableWidth, headerScrollRef, scrollRef);
+  // The widest text each column holds in the rows drawn so far, kept while the columns, the rows and the
+  // pane's width stay the same, so a column never narrows as the rows under it scroll by; new rows or a new
+  // width start it over from the rows in view. Each row reports its cells' widths as it draws them (a drawn
+  // cell, `content`, gives its `contentWidth` or keeps its column's width), so no cell is made twice.
+  const columnsKey = columns.map((column) => `${column.id}:${column.width}:${column.label}`).join("\u0000");
+  const rowCellWidths = useRef(new Map<string, RowCellWidths>()).current;
+  const [measuredWidths, setMeasuredWidths] = useState<{ key: string; widths: (number | null)[] } | null>(null);
+  const measuredFrom = useRef<{ items: readonly T[]; viewportWidth: number } | null>(null);
+  const contentWidths = measuredWidths?.key === columnsKey ? measuredWidths.widths : null;
+  useLayoutEffect(() => {
+    const from = measuredFrom.current;
+    const fresh = !from || from.items !== items || from.viewportWidth !== measuredViewportWidth;
+    measuredFrom.current = { items, viewportWidth: measuredViewportWidth };
+    const previous = measuredWidths?.key === columnsKey ? measuredWidths.widths : null;
+    const kept = fresh ? null : previous;
+    const widths: (number | null)[] = columns.map((_, index) => kept?.[index] ?? 0);
+    if (kept) kept.forEach((width, index) => { if (width === null) widths[index] = null; });
+    visibleItems.forEach((item, offset) => {
+      const row = rowCellWidths.get(getItemKey(item, startIndex + offset));
+      if (!row || row.columnsKey !== columnsKey) return;
+      row.widths.forEach((width, index) => {
+        const known = widths[index];
+        widths[index] = known === null || width === null ? null : Math.max(known ?? 0, width);
+      });
+    });
+    if (rowCellWidths.size > visibleItems.length * 4 + 64) rowCellWidths.clear();
+    if (previous && widths.every((width, index) => width === previous[index])) return;
+    setMeasuredWidths({ key: columnsKey, widths });
+  });
+  // A header as drawn, with its sort mark.
+  const sortedLabel = useCallback(
+    (column: { id: string; label: string }) => (sortColumnId === column.id ? `${column.label}${column.label ? " " : ""}▲` : column.label),
+    [sortColumnId],
+  );
+  // The header row has a blank cell past its scroll box, over the body's vertical scrollbar, which the
+  // "more ⇧→" hint takes first (resolveMoreColumnsHint).
+  const besideHeader = Math.max(0, Math.min(1, (scrollRef.current?.width ?? 0) - measuredViewportWidth));
+  // Fitted to the viewport and what the columns hold: blank past their text gives way before a column is
+  // cut or pushed out of view (fitTableColumns).
+  const fittedColumns = useMemo(
+    () => contentWidths
+      ? fitTableColumns(columns, contentWidths, measuredViewportWidth, columnGap, horizontalPadding, showHorizontalScrollbar ? {
+        ...MORE_COLUMNS_HINT_WIDTH,
+        shownWhole: (fitted) => columnsShownWhole({
+          columns: fitted.map((column) => ({ width: column.width, align: column.align, label: sortedLabel(column) })),
+          columnGap,
+          besideHeader,
+          horizontalPadding,
+          viewportWidth: measuredViewportWidth,
+        }),
+      } : undefined)
+      : columns,
+    [besideHeader, columnGap, columns, contentWidths, horizontalPadding, measuredViewportWidth, showHorizontalScrollbar, sortedLabel],
+  );
+  const tableWidth = useMemo(
+    () => getTableWidth(fittedColumns, columnGap, horizontalPadding),
+    [columnGap, fittedColumns, horizontalPadding],
+  );
+  const measuredContentWidth = Math.max(tableWidth, measuredViewportWidth);
+  const horizontalScrollbarVisible = showHorizontalScrollbar
+    && hasMeaningfulTableHorizontalOverflow(tableWidth, measuredViewportWidth, columnGap);
+  const freezeFirstColumn = tableFreezesFirstColumn({
+    freezeFirstColumn: freezeFirstColumnProp, columns: fittedColumns, columnGap, horizontalPadding, viewportWidth: measuredViewportWidth,
+    overflows: horizontalScrollbarVisible,
+  });
+  const contentWidth = fillAvailableWidth ? measuredContentWidth : tableWidth;
+  const sectionWidth = measuredViewportWidth > 0 ? Math.min(contentWidth, measuredViewportWidth) : contentWidth;
+  const displayColumns = useMemo(
+    () => expandTableColumns(fittedColumns, contentWidth, columnGap, horizontalPadding),
+    [columnGap, fittedColumns, contentWidth, horizontalPadding],
+  );
+  // What each cell's text is made for, and measured at: the columns as an unfitted table draws them, never the
+  // fit's. Text that fits itself to its column (a price's digits) does not shrink with the blank the fit took
+  // from it, nor, made for the room the fit gave it, measure wider and so take more on the next fit.
+  const cellColumns = useMemo(() => {
+    if (fittedColumns === columns) return displayColumns;
+    const unfitted = expandTableColumns(
+      columns,
+      fillAvailableWidth ? Math.max(setTableWidth, measuredViewportWidth) : setTableWidth,
+      columnGap,
+      horizontalPadding,
+    );
+    return displayColumns.map((column, index) => {
+      const width = unfitted[index]?.width ?? column.width;
+      return width === column.width ? column : { ...column, width };
+    });
+  }, [columnGap, columns, displayColumns, fillAvailableWidth, fittedColumns, horizontalPadding, measuredViewportWidth, setTableWidth]);
+  const columnStarts = useMemo(
+    () => tableColumnStarts(displayColumns, columnGap),
+    [columnGap, displayColumns],
+  );
+  // Sideways steps and the column a table opens on go by the widths drawn where the fit moved them.
+  useEffect(() => {
+    const body = scrollRef.current;
+    if (!body) return;
+    const moved = fittedColumns !== columns && fittedColumns.some((column, index) => column.width !== tableColumnWidth(columns[index]!));
+    if (moved) drawnTableColumns.set(body, fittedColumns);
+    else drawnTableColumns.delete(body);
+  }, [columns, fittedColumns, scrollRef]);
+  // A press on a movable header sorts on release, or drags its column once it moves two cells: the header row
+  // takes the drag (capturePointerDrag), marks the gap the column would drop into, and moves it on release.
+  const headerRowRef = useRef<BoxRenderable | null>(null);
+  const headerPressRef = useRef<HeaderPress | null>(null);
+  const [columnDrag, setColumnDrag] = useState<ColumnDrag | null>(null);
+  const columnSpans = useMemo(
+    () => displayColumns.map((column, index) => ({ start: columnStarts[index] ?? 0, end: (columnStarts[index] ?? 0) + column.width })),
+    [columnStarts, displayColumns],
+  );
+  // Scrolled sideways, a frozen first column covers the columns under it: it ends here, in the row's
+  // coordinates past its padding, and nothing drops among the columns it covers.
+  const frozenEnd = freezeFirstColumn ? frozenColumnOffset + (displayColumns[0]?.width ?? 0) + columnGap : undefined;
+  const dropBoundaryAt = useCallback((event?: { x?: number }) => {
+    const row = headerRowRef.current;
+    if (typeof event?.x !== "number" || !row) return null;
+    // row.x is where the scrolled row starts on screen, so this is the pointer's place among the columns.
+    return columnDropBoundary(columnSpans, event.x - (row.x ?? 0) - horizontalPadding, anchoredColumns, frozenEnd);
+  }, [anchoredColumns, columnSpans, frozenEnd, horizontalPadding]);
+  const dragHeader = useCallback((event?: HeaderDragEvent) => {
+    const press = headerPressRef.current;
+    if (!press || typeof event?.x !== "number") return;
+    if (!press.dragging && Math.abs(event.x - press.startX) < COLUMN_DRAG_THRESHOLD_CELLS) return;
+    press.dragging = true;
+    event.preventDefault?.();
+    event.stopPropagation?.();
+    const boundary = dropBoundaryAt(event);
+    const next = { from: press.from, boundary: boundary !== null && columnDropIndex(press.from, boundary) !== null ? boundary : null };
+    setColumnDrag((current) => current?.from === next.from && current.boundary === next.boundary ? current : next);
+  }, [dropBoundaryAt]);
+  // A press that never sees its release (let go outside the window) ends at the next move with no button
+  // held, the next press or the terminal losing focus: no move, no sort, and the header is put down.
+  const cancelHeaderPress = useCallback(() => {
+    if (!headerPressRef.current) return;
+    headerPressRef.current = null;
+    setColumnDrag(null);
+    releasePointerDrag(nativeRenderer);
+  }, [nativeRenderer]);
+  const dragging = columnDrag !== null;
+  useEffect(() => {
+    if (!dragging || typeof nativeRenderer?.on !== "function") return;
+    nativeRenderer.on("blur", cancelHeaderPress);
+    return () => nativeRenderer.off("blur", cancelHeaderPress);
+  }, [cancelHeaderPress, dragging, nativeRenderer]);
+  // Esc while a column drags puts it back; the release then does nothing.
+  useShortcut((event) => {
+    if (event.name !== "escape" || !headerPressRef.current?.dragging) return;
+    event.preventDefault?.();
+    event.stopPropagation?.();
+    headerPressRef.current = null;
+    setColumnDrag(null);
+  }, { enabled: dragging, phase: "capture" });
+  const releaseHeader = useCallback((event?: HeaderDragEvent) => {
+    const press = headerPressRef.current;
+    headerPressRef.current = null;
+    setColumnDrag(null);
+    if (!press) return;
+    event?.preventDefault?.();
+    event?.stopPropagation?.();
+    if (!press.dragging) {
+      onHeaderClick?.(press.columnId);
+      return;
+    }
+    const boundary = dropBoundaryAt(event);
+    const to = boundary === null ? null : columnDropIndex(press.from, boundary);
+    if (to !== null) onColumnMove?.(press.columnId, to);
+  }, [dropBoundaryAt, onColumnMove, onHeaderClick]);
+  // A frozen board's rows run on past the last column, blank, so scrolled to its far end it starts a column
+  // whole beside the frozen one, as each step does (tableScrollStep).
+  const scrollContentWidth = contentWidth + (freezeFirstColumn && horizontalScrollbarVisible
+    ? tableFarEdgePad({ columns: displayColumns, columnGap, horizontalPadding, contentWidth, viewportWidth: measuredViewportWidth })
+    : 0);
+  const lastColumn = displayColumns.length - 1;
+  // The gap's own blank cell, before the column it would land in front of or after the last one; never under a
+  // frozen first column, but in its trailing blank cell when the column it lands before is partly behind it, and
+  // at the viewport's last cell when the gap after the last column is past it.
+  const dropMarkerLeft = columnDrag?.boundary == null ? null : Math.min(
+    scrollContentWidth - 1,
+    measuredViewportWidth > 0 ? frozenColumnOffset + measuredViewportWidth - 1 : Number.POSITIVE_INFINITY,
+    horizontalPadding + Math.max(
+      frozenEnd === undefined ? Number.NEGATIVE_INFINITY : frozenEnd - 1,
+      columnDrag.boundary <= lastColumn
+        ? (columnStarts[columnDrag.boundary] ?? 0) - 1
+        : (columnStarts[lastColumn] ?? 0) + (displayColumns[lastColumn]?.width ?? 0),
+    ),
+  );
+  // Columns out of view past the right edge: the header row ends in "more ⇧→" there, a press on it scrolls to
+  // them, and the rows leave its cells blank, so a narrow pane says it has more than it shows. The header's
+  // scroll box is as wide as the body's viewport (measuredViewportWidth); the hint is laid over the row, not
+  // inside the scroll box, and takes the cell past it first (besideHeader).
+  // An empty table has nothing past the edge to scroll to.
+  const hintColumns = useMemo(() => displayColumns.map((column) => ({
+    width: column.width,
+    align: column.align,
+    label: sortedLabel(column),
+  })), [displayColumns, sortedLabel]);
+  const moreColumns = horizontalScrollbarVisible && items.length > 0 ? resolveMoreColumnsHint({
+    columns: hintColumns,
+    columnGap,
+    columnStarts,
+    frozenFirstColumn: freezeFirstColumn,
+    besideHeader,
+    horizontalPadding,
+    scrollLeft,
+    viewportWidth: measuredViewportWidth,
+  }) : null;
+  const moreColumnsReserve = moreColumns?.reserve ?? 0;
+  const hiddenColumns = items.length ? hiddenTableColumnText(columns) : null;
+  // A scroll step that cuts the columns as the last one did keeps the same
+  // array, so the memoized rows skip the render.
+  const columnClipsRef = useRef<readonly (DataTableColumnClip | null)[] | null>(null);
+  const columnClips = useMemo(
+    () => columnClipsRef.current = reuseDataTableColumnClips(columnClipsRef.current, resolveDataTableColumnClips({
+      columnGap,
+      columnStarts,
+      frozenFirstColumn: freezeFirstColumn,
+      horizontalPadding,
+      rightReserve: moreColumnsReserve,
+      scrollLeft,
+      // A table that cannot scroll sideways fits its own columns; one it cut could never be scrolled to.
+      viewportWidth: showHorizontalScrollbar ? measuredViewportWidth : 0,
+      widths: displayColumns.map((column) => column.width),
+      labels: hintColumns,
+    })),
+    [columnGap, columnStarts, displayColumns, freezeFirstColumn, hintColumns, horizontalPadding, measuredViewportWidth, moreColumnsReserve, scrollLeft, showHorizontalScrollbar],
+  );
+  const reportVisibleRange = useVisibleRangeEmitter({
+    itemCount: items.length,
+    visibleRangeKey,
+    visibleRangeBuffer,
+    onVisibleRangeChange,
+  });
+  const emitVisibleRange = useCallback(() => {
+    const scrollBox = scrollRef.current;
+    reportVisibleRange({
+      rowSize: 1,
+      scrollOffset: scrollBox?.scrollTop ?? scrollTop,
+      viewportSize: scrollBox?.viewport?.height ?? viewportHeight,
+    });
+  }, [reportVisibleRange, scrollRef, scrollTop, viewportHeight]);
+  const handleRowMouseDown =
+    useDoubleClickActivation<DataTableRowPointerTarget<T>>({
+      onSelect: ({ item, index }) => {
+        onSelect(item, index);
+      },
+      onActivate: onActivate
+        ? ({ item, index }) => {
+            onActivate(item, index);
+          }
+        : undefined,
+    });
+
+  const handleBodyScrollActivity = useCallback(() => {
+    if (virtualize) {
+      setScrollVersion((current) => current + 1);
+    }
+    const controlledTop = controlledScrollTopRef.current;
+    controlledScrollTopRef.current = null;
+    const source = controlledTop !== null && scrollRef.current?.scrollTop === controlledTop
+      ? "programmatic"
+      : "user";
+    onBodyScrollActivity(source);
+    emitVisibleRange();
+    nativeRenderer.requestRender();
+  }, [emitVisibleRange, nativeRenderer, onBodyScrollActivity, scrollRef, virtualize]);
+  const syncHorizontalScroll = useCallback(() => {
+    syncHeaderScroll();
+    setScrollLeft(scrollRef.current?.scrollLeft ?? 0);
+  }, [scrollRef, syncHeaderScroll]);
+  useScrollBoxScrollActivity({
+    scrollRef,
+    onVerticalScroll: handleBodyScrollActivity,
+    onHorizontalScroll: syncHorizontalScroll,
+  });
+  const syncBodyScroll = useCallback(() => {
+    const header = headerScrollRef.current;
+    const body = scrollRef.current;
+    if (!header || !body || body.scrollLeft === header.scrollLeft) return;
+    body.scrollLeft = header.scrollLeft;
+    setScrollLeft(body.scrollLeft ?? 0);
+    nativeRenderer.requestRender();
+  }, [headerScrollRef, nativeRenderer, scrollRef]);
+  useScrollBoxScrollActivity({
+    scrollRef: headerScrollRef,
+    onHorizontalScroll: syncBodyScroll,
+  });
+  // "more ⇧→" steps right as Shift+Right does: half the viewport (beside a frozen column, to a column's edge).
+  const scrollToMoreColumns = useCallback(() => {
+    const body = scrollRef.current;
+    const viewportWidth = body?.viewport?.width ?? 0;
+    if (!body || viewportWidth <= 0) return;
+    const maxLeft = Math.max(0, (body.scrollWidth ?? 0) - viewportWidth);
+    body.scrollLeft = tableScrollStep({
+      columns: displayColumns, columnGap, horizontalPadding, frozenFirstColumn: freezeFirstColumn,
+      scrollLeft: body.scrollLeft ?? 0, direction: 1, viewportWidth, maxLeft,
+    });
+    syncHeaderScroll();
+    setScrollLeft(body.scrollLeft ?? 0);
+    nativeRenderer.requestRender();
+  }, [columnGap, displayColumns, freezeFirstColumn, horizontalPadding, nativeRenderer, scrollRef, syncHeaderScroll]);
+  const handleBodySizeChange = useCallback(() => {
+    measureContentWidth();
+    setScrollVersion((current) => current + 1);
+    queueMicrotask(emitVisibleRange);
+  }, [emitVisibleRange, measureContentWidth]);
+
+  useEffect(() => observeScrollBoxContentSize(scrollRef.current, handleBodySizeChange), [handleBodySizeChange, scrollRef]);
+  useEffect(() => observeScrollBoxViewportSize(scrollRef.current, handleBodySizeChange), [handleBodySizeChange, scrollRef]);
+
+  useEffect(() => {
+    emitVisibleRange();
+    queueMicrotask(emitVisibleRange);
+  }, [emitVisibleRange]);
+
+  const applyScrollToIndex = useCallback(() => {
+    if (scrollToIndex == null) return true;
+    if (items.length === 0) return false;
+    const scrollBox = scrollRef.current;
+    // An empty or unmeasured body clamps scrollTo to zero. Keep the request
+    // pending until the rows and viewport have completed native layout.
+    if (!scrollBox?.viewport
+      || scrollBox.viewport.height <= 0
+      || scrollBox.scrollHeight < items.length) return false;
+
+    const targetIndex = Math.max(0, Math.min(scrollToIndex, items.length - 1));
+    const visibleHeight = Math.max(
+      1,
+      Math.min(scrollBox.viewport.height, Math.ceil(appViewport.height)),
+    );
+    const currentTop = scrollBox.scrollTop;
+    const nextTop = resolveDataTableScrollTop(
+      targetIndex,
+      currentTop,
+      visibleHeight,
+      items.length,
+      scrollToIndexAlign,
+      scrollToIndexFrom,
+    );
+
+    if (nextTop === currentTop) return true;
+    scrollBox.scrollTo(nextTop);
+    controlledScrollTopRef.current = scrollBox.scrollTop;
+    return scrollBox.scrollTop === nextTop;
+  }, [
+    appViewport.height,
+    items.length,
+    scrollRef,
+    scrollToIndex,
+    scrollToIndexAlign,
+    scrollToIndexFrom,
+  ]);
+
+  useEffect(() => {
+    const header = headerScrollRef.current;
+    if (header) {
+      if (header.horizontalScrollBar) {
+        header.horizontalScrollBar.visible = false;
+      }
+      if (!horizontalScrollbarVisible) {
+        header.scrollLeft = 0;
+      }
+    }
+    const body = scrollRef.current;
+    if (body) {
+      // Forcing a bar visible latches manual visibility, and the scroll box then
+      // paints a full-length solid thumb whenever there is nothing to scroll.
+      // Only the hidden side is forced; otherwise the scroll box decides from
+      // its own content size.
+      setScrollBarVisible(body.horizontalScrollBar, horizontalScrollbarVisible);
+      if (body.viewport) {
+        setScrollBarVisible(body.verticalScrollBar, items.length > body.viewport.height);
+      }
+      if (!horizontalScrollbarVisible) {
+        body.scrollLeft = 0;
+        setScrollLeft(0);
+      }
+    }
+  }, [columns.length, headerScrollRef, horizontalScrollbarVisible, items.length, measuredViewportHeight, scrollRef]);
+
+  useEffect(() => {
+    if (items.length === 0) {
+      lastAppliedScrollRequestRef.current = null;
+      const body = scrollRef.current;
+      if (body && body.scrollTop !== 0) {
+        // Removing a scrolled dataset is a layout reset, not user navigation.
+        // Reveal its loading state and let the next dataset center normally.
+        body.scrollTo(0);
+        controlledScrollTopRef.current = body.scrollTop;
+      }
+      return;
+    }
+    if (scrollToIndex == null) {
+      lastAppliedScrollRequestRef.current = null;
+      return;
+    }
+
+    const scrollRequestKey = [
+      scrollToIndex,
+      scrollToIndexFrom ?? "",
+      scrollToIndexVersion,
+      scrollToIndexAlign,
+      measuredViewportHeight ?? "pending",
+    ].join(":");
+    if (lastAppliedScrollRequestRef.current === scrollRequestKey) return;
+
+    if (applyScrollToIndex()) {
+      lastAppliedScrollRequestRef.current = scrollRequestKey;
+      return;
+    }
+    // Body/content size events retry a pending request after measurement;
+    // completed requests remain consumed while users scroll or rows append.
+  }, [
+    applyScrollToIndex,
+    items.length,
+    measuredViewportHeight,
+    scrollRef,
+    scrollToIndex,
+    scrollToIndexAlign,
+    scrollToIndexFrom,
+    scrollToIndexVersion,
+    scrollVersion,
+  ]);
+
+  return (
+    <Box
+      flexDirection="column"
+      flexGrow={1}
+      flexBasis={0}
+      width="100%"
+      backgroundColor={colors.bg}
+      overflow="hidden"
+    >
+      <ScrollBox
+        id={headerScrollId}
+        ref={headerScrollRef}
+        width={measuredViewportWidth || "100%"}
+        height={1}
+        backgroundColor={colors.panel}
+        scrollX={showHorizontalScrollbar}
+        scrollY={false}
+        verticalScrollbarOptions={{ visible: false }}
+        focusable={false}
+        onSizeChange={measureContentWidth}
+      >
+        <Box
+          ref={headerRowRef}
+          flexDirection="row"
+          height={1}
+          {...tableContentWidthProps(scrollContentWidth)}
+          paddingX={horizontalPadding}
+          backgroundColor={colors.panel}
+          onMouseDrag={onColumnMove ? dragHeader : undefined}
+          onMouseDragEnd={onColumnMove ? releaseHeader : undefined}
+          // While the row holds a press, every other mouse event comes here: one with no button held, or a
+          // new press (sent to the row itself, not bubbled up from a header), means the release went missing.
+          onMouseMove={onColumnMove ? cancelHeaderPress : undefined}
+          onMouseDown={onColumnMove ? (event: any) => {
+            if (event?.target === headerRowRef.current) cancelHeaderPress();
+          } : undefined}
+        >
+          {displayColumns.map((column, columnIndex) => {
+            const frozen = freezeFirstColumn && columnIndex === 0;
+            const movable = !!onColumnMove && columnIndex >= anchoredColumns;
+            const dragged = columnDrag?.from === columnIndex;
+            const columnStart = columnStarts[columnIndex] ?? 0;
+            const clip = columnClips?.[columnIndex] ?? null;
+            const inset = clip ? clip.inset : freezeFirstColumn && !frozen
+              ? Math.min(column.width, Math.max(0, frozenColumnOffset + (displayColumns[0]?.width ?? 0) + columnGap - columnStart)) : 0;
+            const shownWidth = clip ? clip.width : column.width - inset;
+            const isSorted = sortColumnId === column.id;
+            const marker = sortDirection === "asc" ? "▲" : "▼";
+            // An unlabeled column shows the bare marker, not a stray space before it.
+            const indicator = isSorted ? column.label ? ` ${marker}` : marker : "";
+            // A lead gap already separates this label from the next one, so a
+            // right-aligned label keeps no blank of its own and sits flush
+            // over its numbers.
+            const hasNextLabel = columnIndex < displayColumns.length - 1
+              && tableColumnLeadGap(displayColumns, columnIndex + 1, columnGap) === 0;
+            const label = column.label + indicator;
+            // A figure the right edge cuts is blank in every row (cutColumnText), so its label is too.
+            const figuresCut = clip !== null && column.align === "right" && clip.inset + clip.width < column.width;
+            const labelText = figuresCut ? " ".repeat(inset + Math.max(0, clip.width)) : " ".repeat(inset) + (clip
+              // Cut on the right, the label's last cell is the edge.
+              ? cutColumnText(label, column.align, column.width, clip, (text, width, cutRight) => (
+                fitTableHeaderText(text, width, column.align, hasNextLabel && !cutRight)
+              ))
+              : shownWidth > 0 ? fitTableHeaderText(label, shownWidth, column.align, hasNextLabel) : "");
+            return (
+              <Box
+                key={column.id}
+                width={column.width + columnGap + (frozen ? horizontalPadding : 0)}
+                marginLeft={frozen ? -horizontalPadding : tableColumnLeadGap(displayColumns, columnIndex, columnGap)}
+                position="relative"
+                left={frozen ? frozenColumnOffset : undefined}
+                zIndex={frozen ? 1 : undefined}
+                backgroundColor={dragged ? hoverBg(colors) : column.headerBackgroundColor ?? colors.panel}
+                onMouseDown={(event: any) => {
+                  focusPane();
+                  onTableMouseDown?.(event);
+                  if (movable && (event.button ?? 0) === 0) {
+                    // Sorted on release, unless the press drags the column first.
+                    event.preventDefault();
+                    headerPressRef.current = { columnId: column.id, from: columnIndex, startX: event.x, dragging: false };
+                    capturePointerDrag(nativeRenderer, headerRowRef.current);
+                    return;
+                  }
+                  if (!onHeaderClick) return;
+                  event.preventDefault();
+                  onHeaderClick(column.id);
+                }}
+              >
+                <Text
+                  attributes={TextAttributes.BOLD}
+                  fg={dragged ? colors.textBright : isSorted ? colors.text : column.headerColor ?? colors.textDim}
+                  // A press here may drag the column, which a text selection would take over.
+                  selectable={onColumnMove ? false : undefined}
+                >
+                  {frozen ? `${" ".repeat(horizontalPadding)}${labelText}${" ".repeat(columnGap)}` : labelText}
+                </Text>
+              </Box>
+            );
+          })}
+          {dropMarkerLeft !== null ? (
+            <Box position="absolute" left={dropMarkerLeft} top={0} width={1} height={1} zIndex={3}>
+              <Text fg={colors.borderFocused}>│</Text>
+            </Box>
+          ) : null}
+        </Box>
+      </ScrollBox>
+      {moreColumns ? (
+        <Box
+          position="absolute"
+          top={0}
+          left={moreColumns.left}
+          width={displayWidth(moreColumns.text)}
+          height={1}
+          zIndex={2}
+          backgroundColor={colors.panel}
+          hoverBackgroundColor={hoverBg(colors)}
+          cursor="pointer"
+          onMouseDown={(event: any) => {
+            event.preventDefault?.();
+            event.stopPropagation?.();
+            focusPane();
+            onTableMouseDown?.(event);
+            scrollToMoreColumns();
+          }}
+        >
+          <Text fg={colors.textDim}>{moreColumns.text}</Text>
+        </Box>
+      ) : null}
+      {hiddenColumns ? (
+        <Box height={1} paddingX={horizontalPadding} backgroundColor={colors.panel}>
+          <Text fg={colors.textDim}>{hiddenColumns}</Text>
+        </Box>
+      ) : null}
+
+      <ScrollBox
+        id={bodyScrollId}
+        ref={scrollRef}
+        width="100%"
+        flexGrow={1}
+        flexBasis={0}
+        backgroundColor={colors.bg}
+        scrollX={showHorizontalScrollbar}
+        scrollY
+        focusable={false}
+        onMouseDown={() => {
+          focusPane();
+          onTableMouseDown?.({});
+        }}
+        onSizeChange={handleBodySizeChange}
+      >
+        {items.length === 0 ? (
+          emptyContent ?? (
+            <Box width="100%" paddingX={1} paddingY={1}>
+              <EmptyState title={emptyStateTitle} hint={emptyStateHint} actions={emptyStateActions} />
+            </Box>
+          )
+        ) : (
+          <>
+            {virtualize && startIndex > 0 && <Box height={startIndex} />}
+            {measurePerf(
+              "data-table.render-visible-rows",
+              () => visibleItems.map((item, visibleIndex) => {
+                const index = startIndex + visibleIndex;
+                const itemKey = getItemKey(item, index);
+                const renderRow = (item: T) => (
+                  <OpenTuiDataTableRow<T, C>
+                    key={itemKey}
+                    colors={colors}
+                    columnGap={columnGap}
+                    columnStarts={columnStarts}
+                    contentWidth={scrollContentWidth}
+                    cellColumns={cellColumns}
+                    displayColumns={displayColumns}
+                    focusPane={focusPane}
+                    frozenColumnOffset={freezeFirstColumn ? frozenColumnOffset : undefined}
+                    getRowBackgroundColor={getRowBackgroundColor}
+                    handleRowMouseDown={handleRowMouseDown}
+                    horizontalPadding={horizontalPadding}
+                    index={index}
+                    item={item}
+                    itemKey={itemKey}
+                    onRowContextMenu={onRowContextMenu}
+                    onRowMouseDown={onRowMouseDown}
+                    onTableMouseDown={onTableMouseDown}
+                    renderCell={renderCell}
+                    renderSectionHeader={renderSectionHeader}
+                    rowContextMenuSurface={rowContextMenuSurface}
+                    rowVersion={getRowVersion?.(item, index)}
+                    sectionWidth={sectionWidth}
+                    selected={isSelected(item, index)}
+                    selectionBg={selectionFill.bg}
+                    selectionLit={selectionFill.lit}
+                    selectedTextOverridesCellColor={selectedTextOverridesCellColor}
+                    columnClips={columnClips}
+                    cellWidths={rowCellWidths}
+                    columnsKey={columnsKey}
+                  />
+                );
+                return rowSource ? <ObservedTableRow key={itemKey} item={item} source={rowSource}>{renderRow}</ObservedTableRow> : renderRow(item);
+              }),
+              {
+                columnCount: displayColumns.length,
+                endIndex,
+                itemCount: items.length,
+                measuredViewportHeight,
+                paneId: paneInstanceId,
+                startIndex,
+                viewportHeight,
+                visibleCount: visibleItems.length,
+                virtualize,
+              },
+            )}
+            {virtualize && endIndex < items.length && (
+              <Box height={Math.max(items.length - endIndex, 0)} />
+            )}
+            {bodyAfter}
+          </>
+        )}
+      </ScrollBox>
+    </Box>
+  );
+}

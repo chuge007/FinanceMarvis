@@ -1,0 +1,58 @@
+namespace ccxt;
+
+public partial class BaseExchange
+{
+    public string getTempDir()
+    {
+        var tmp = Path.GetFullPath(Path.GetTempPath());
+        return tmp.EndsWith(Path.DirectorySeparatorChar.ToString()) ? tmp : tmp + Path.DirectorySeparatorChar;
+    }
+
+    // no-op: file io is synchronous in c#, nothing to load before the first readFile call
+    public virtual Task<object> initFileSystem()
+    {
+        return Task.FromResult<object>(null);
+    }
+
+    public void ensureWhitelistedFile(object filePath)
+    {
+        var sanitized = Path.GetFullPath(filePath as string);
+        var exts = new[] { "ccxtfile", "pem", "wasm" };
+        foreach (var ext in exts)
+        {
+            if (sanitized.EndsWith("." + ext))
+            {
+                return;
+            }
+        }
+        throw new InvalidOperationException($"invalid file path: {filePath as string}, allowed extensions are: {string.Join(" | ", exts)}");
+    }
+
+    public string readFile(object filePath)
+    {
+        ensureWhitelistedFile(filePath);
+        if (!File.Exists(filePath as string))
+        {
+            throw new Exception("File not found: " + (filePath as string));
+        }
+        return File.ReadAllText(filePath as string);
+    }
+
+    public bool writeFile(object filePath, object data)
+    {
+        ensureWhitelistedFile(filePath);
+        var directory = Path.GetDirectoryName(filePath as string);
+        if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
+        {
+            Directory.CreateDirectory(directory);
+        }
+        File.WriteAllText(filePath as string, data as string);
+        return true;
+    }
+
+    public bool existsFile(object filePath)
+    {
+        ensureWhitelistedFile(filePath);
+        return File.Exists(filePath as string);
+    }
+}

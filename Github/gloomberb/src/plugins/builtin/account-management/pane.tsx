@@ -1,0 +1,1290 @@
+import { logFailure } from "../../../utils/log-failure";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Button,
+  confirmDialog,
+  DataTableView,
+  FieldLabel,
+  StatGrid,
+  TextField,
+  usePaneTabs,
+  type DataTableCell,
+  type DataTableColumn,
+  type MultiSelectDialogButtonHandle,
+  type StatItem,
+} from "../../../components";
+import { useAppSelector, usePaneAppConfig } from "../../../state/app/context";
+import { useViewport } from "../../../react/input";
+import { displayWidth } from "../../../utils/format";
+import { formatShortDate } from "../../../utils/datetime-format";
+import { useChartQueries, useFxRatesMap } from "../../../market-data/hooks";
+import { buildPortfolioFinancialsMap } from "../../../market-data/portfolio-financials";
+import { useLiveTickerFinancialsMap, useSampledValue } from "../../../state/hooks/live-ticker-financials";
+import { blendHex, colors, placeholderText } from "../../../theme/colors";
+import type { PaneProps } from "../../../types/plugin";
+import {
+  Box,
+  ScrollBox,
+  Textarea,
+  TextAttributes,
+  useRendererHost,
+  useUiCapabilities,
+  type ScrollBoxRenderable,
+  type TextareaRenderable,
+} from "../../../ui";
+import { useDialog, type AlertContext } from "../../../ui/dialog";
+import type { SelectControl } from "../../../components/ui/select-button";
+import { FRAMED_TEXTAREA_DESKTOP_STYLE, fieldFrameStyle } from "../../../components/ui/fields";
+import { apiClient, type AccountProfile, type CloudPricing, type ReferralInvite } from "../../../api-client";
+import { chatController } from "../chat/controller";
+import { SignInWall } from "../cloud/auth-actions";
+import { loadUpgradeOffer } from "../../../account/upgrade-dialog";
+import { changeAccountPassword } from "../../../account/auth-model";
+import { openMcpConnectDialog } from "../cloud/mcp-connect/dialog";
+import { TeamsAccountTab } from "../cloud/team/acm-tab";
+import { AgentsAccountTab } from "../cloud/terminal-relay/acm-tab";
+import {
+  CheckboxRow,
+  DeskChoiceRow,
+  FieldRow,
+  PublicAnalyticsGroup,
+  accountFieldLabelWidth,
+} from "./form-components";
+import {
+  NO_PORTFOLIO_VALUE,
+  buildPublishedProfileAnalyticsPreview,
+  buildProfileAnalyticsPreview,
+  buildPortfolioChoices,
+  chatCardUpdate,
+  computeCumulativeReturn,
+  countPortfolioHoldings,
+  emptyToNull,
+  formatPlan,
+  portfolioOptionIds,
+  profileToDraft,
+  type AccountDraft,
+  type AccountFieldKey,
+} from "./model";
+import {
+  formatCloudMonthlyPrice,
+  formatTrialEnd,
+  formatTrialOffer,
+} from "../../../account/billing";
+import { DeleteAccountPasswordDialog, PasswordChangeDialog } from "./password-dialog";
+import { deleteAccountConfirmingSession } from "./delete-account";
+import { endTrialAfterWarning } from "./trial-cancel";
+import { cancelProAfterSteps } from "./pro-cancel";
+import { CalendarAccountTab } from "./calendar-tab";
+import { InviteRow } from "./invite-row";
+import { PaymentRecoveryRow, usePaymentRecovery } from "./payment-recovery-row";
+import { YearlyPlanRow, useYearlyPlan } from "./yearly-plan-row";
+import { useAccountManagementFooter } from "./footer";
+import { useAccountManagementKeyboard } from "./keyboard";
+import {
+  buildBenchmarkReturnSeries,
+  buildPortfolioChartTargets,
+  buildPortfolioReturnSeries,
+} from "../analytics/pane-model";
+import { computeDatedBeta, hasPortfolioPosition } from "../../../portfolio/return-metrics";
+import { buildTrackedCurrencies } from "../portfolio-list/pane/data";
+import { accountDailyReturns } from "../analytics/account-returns";
+import { useBrokerPortfolioPerformance } from "../analytics/broker-performance";
+import { useCloudSyncStatus } from "../../../sync/react";
+import { cloudSyncController } from "../../../sync/controller";
+import { setSyncedProfileAnalytics } from "../../../sync/profile-analytics";
+import { t, tf } from "../../../i18n";
+import { useAppLanguage } from "../../../i18n/react";
+import { subscribeRequestedAccountManagementTab, type AccountManagementTab } from "./navigation";
+import { useCloudUpgradeAction } from "../shared/cloud-upgrade";
+import { resolvePlanAccess } from "../../../api-client/plan-access";
+import { usePluginPaneState } from "../../runtime";
+
+type AccountBusy = "profile" | "password" | "alerts" | "billing" | "trial" | "cancel" | "delete" | null;
+const ACCOUNT_TAB_DEFS: Array<{ label: string; value: AccountManagementTab }> = [
+  { label: "Profile", value: "profile" },
+  { label: "Emails", value: "emails" },
+  { label: "Calendar", value: "calendar" },
+  { label: "Pro", value: "pro" },
+  { label: "Teams", value: "teams" },
+  { label: "Agents", value: "agents" },
+  { label: "Advanced", value: "advanced" },
+];
+
+const ACCOUNT_TAB_FIELD_ORDER: Record<AccountManagementTab, AccountFieldKey[]> = {
+  profile: [
+    "profilePublic",
+    "acceptUnknownDms",
+    "showLocalTime",
+    "showDesks",
+    "desks",
+    "username",
+    "name",
+    "company",
+    "title",
+    "publicEmail",
+    "xAccount",
+    "bio",
+    "sharedPortfolioId",
+  ],
+  emails: [
+    "chatEmailNotificationsEnabled",
+    "weeklyRoundupEnabled",
+    "positionAlertsEnabled",
+    "emailAlertsOffAction",
+  ],
+  // Its actions are footer hints; the tab owns its footer.
+  calendar: [],
+  // Cancel Trial shows only while a trial runs, Cancel Pro while a paid plan
+  // renews, the yearly row while it has an action, Not Now while its review
+  // is open, the invite once it loaded.
+  pro: ["upgradeAction", "cancelTrialAction", "cancelProAction", "yearlyPlanAction", "yearlyPlanDismissAction", "inviteCopyAction"],
+  // The Teams tab owns its own keyboard handling (a list, not form fields).
+  teams: [],
+  // Remote assistants allowed to drive this terminal; a list with its own footer.
+  agents: [],
+  advanced: ["assistantsAction", "passwordAction", "deleteAccountAction"],
+};
+
+const PROFILE_PREVIEW_SAMPLE_MS = 10_000;
+
+const PLAN_COMPARISON_ROWS = [
+  { capability: "US equities", free: "15m delay", pro: "Real-time", proTone: "positive" },
+  { capability: "Options data", free: "15m delay", pro: "Real-time", proTone: "positive" },
+  { capability: "News", free: "12h delay", pro: "Real-time wire", proTone: "positive" },
+  { capability: "AI command bar", free: "Included", pro: "Included", proTone: "neutral" },
+  { capability: "Cloud sync", free: "Included", pro: "Included", proTone: "neutral" },
+  { capability: "X data", free: "No", pro: "Included", proTone: "positive" },
+  { capability: "AI Screener", free: "No", pro: "Soon", proTone: "muted" },
+] as const;
+
+type PlanColumn = DataTableColumn & { id: "capability" | "free" | "pro" };
+type PlanRow = typeof PLAN_COMPARISON_ROWS[number];
+
+/** Free against Pro, one row per capability, with the Pro column tinted. */
+function PlanComparison({
+  width,
+  activePlan,
+}: {
+  width: number;
+  activePlan: "free" | "pro";
+}) {
+  const valueWidth = Math.max(10, Math.min(16, Math.floor((width - 16) / 2)));
+  const columns = useMemo<PlanColumn[]>(() => [
+    { id: "capability", label: t("Capability"), width: 14, align: "left", flexGrow: 1 },
+    { id: "free", label: t("Free"), width: valueWidth, align: "left" },
+    { id: "pro", label: t("Pro"), width: valueWidth, align: "left" },
+  ], [valueWidth]);
+  const proCellBg = blendHex(colors.panel, colors.selected, activePlan === "pro" ? 0.42 : 0.26);
+  const renderCell = useCallback((row: PlanRow, column: PlanColumn): DataTableCell => {
+    if (column.id === "capability") return { text: t(row.capability), color: colors.textDim };
+    if (column.id === "free") return { text: t(row.free), color: activePlan === "free" ? colors.text : colors.textDim };
+    return {
+      text: t(row.pro),
+      backgroundColor: proCellBg,
+      color: row.proTone === "positive" ? colors.positive : row.proTone === "muted" ? colors.textMuted : colors.text,
+      attributes: row.proTone === "positive" ? TextAttributes.BOLD : 0,
+    };
+  }, [activePlan, proCellBg]);
+  const height = PLAN_COMPARISON_ROWS.length + 1;
+  const { nativePaneChrome } = useUiCapabilities();
+
+  return (
+    <Box flexDirection="column" width={width} height={nativePaneChrome ? undefined : height}>
+      <DataTableView<PlanRow, PlanColumn>
+        columns={columns}
+        items={[...PLAN_COMPARISON_ROWS]}
+        selection={{ kind: "none" }}
+        rootWidth={width}
+        rootHeight={height}
+        virtualize={false}
+        fitRows
+        sortColumnId={null}
+        sortDirection="asc"
+        getItemKey={(row) => row.capability}
+        renderCell={renderCell}
+        emptyStateTitle=""
+      />
+    </Box>
+  );
+}
+
+/**
+ * Reloads the profile whenever the account identity *or* its entitlement changes,
+ * so a completed checkout shows the new plan as soon as the session refreshes.
+ */
+function buildAccountSessionMarker(): string {
+  const snapshot = chatController.getSnapshot();
+  const user = apiClient.getCurrentUser();
+  return [
+    apiClient.getSessionToken() ?? "",
+    snapshot.user?.id ?? "",
+    snapshot.user?.username ?? "",
+    user?.effectivePlan ?? user?.plan ?? "",
+    user?.trialEndsAt ?? "",
+  ].join(":");
+}
+
+export function AccountManagementPane({ focused, width, height }: PaneProps) {
+  const language = useAppLanguage();
+  const dialog = useDialog();
+  const config = usePaneAppConfig();
+  const portfolios = config.portfolios;
+  const baseCurrency = config.baseCurrency;
+  const tickers = useAppSelector((state) => state.tickers);
+  const cachedFinancials = useAppSelector((state) => state.financials);
+  const [sessionMarker, setSessionMarker] = useState(() => buildAccountSessionMarker());
+  const [hasSession, setHasSession] = useState(() => apiClient.isSignedIn());
+  const [profile, setProfile] = useState<AccountProfile | null>(null);
+  const [pricing, setPricing] = useState<CloudPricing | null>(null);
+  // Null until the server says; only a confirmed trial is offered.
+  const [trialAvailable, setTrialAvailable] = useState<boolean | null>(null);
+  // The Pro tab's invite link; null until it loads, and when it cannot.
+  const [invite, setInvite] = useState<ReferralInvite | null>(null);
+  const [draft, setDraft] = useState<AccountDraft>(() => profileToDraft(null));
+  const [activeTab, setActiveTab] = usePluginPaneState<AccountManagementTab>("activeTab", "profile");
+  const [activeField, setActiveField] = useState<AccountFieldKey>(
+    () => ACCOUNT_TAB_FIELD_ORDER[activeTab][0] ?? "username",
+  );
+  const [message, setMessage] = useState<{ tone: "info" | "success" | "error"; text: string } | null>(null);
+  const [busy, setBusy] = useState<AccountBusy>(null);
+  const paymentRecovery = usePaymentRecovery(hasSession && activeTab === "pro", sessionMarker);
+
+  // A requested tab switches the open pane; one requested before it mounted wins over the restored tab once.
+  useEffect(() => subscribeRequestedAccountManagementTab((tab) => {
+    setActiveTab(tab);
+    setActiveField(ACCOUNT_TAB_FIELD_ORDER[tab][0] ?? "username");
+  }), []);
+  const syncStatus = useCloudSyncStatus();
+  const { nativePaneChrome } = useUiCapabilities();
+  const bioRef = useRef<TextareaRenderable | null>(null);
+  const portfolioSelectRef = useRef<SelectControl | null>(null);
+  const deskPickerRef = useRef<MultiSelectDialogButtonHandle | null>(null);
+  const refreshedSyncRevisionRef = useRef<number | null>(null);
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+  const profileRef = useRef(profile);
+  profileRef.current = profile;
+
+  const formWidth = Math.max(24, Math.min(70, width - 2));
+  const contentWidth = formWidth;
+  const twoColumns = formWidth >= 60;
+  const fieldWidth = twoColumns ? Math.max(22, Math.floor((formWidth - 3) / 2)) : Math.max(18, Math.min(46, formWidth - 2));
+  const formLabelWidth = accountFieldLabelWidth(formWidth);
+  const fieldLabelWidth = accountFieldLabelWidth(fieldWidth);
+  const bodyHeight = Math.max(5, height);
+  // Chat's card settings show once the server keeps them; the desks only while showing them is on.
+  const chatCardSupported = profile?.showLocalTime !== undefined;
+  const planAccess = useMemo(() => resolvePlanAccess(profile), [profile]);
+  // A paid switch changes the plan on the server: the session and the tab follow it.
+  const refreshAfterYearlySwitch = useCallback(() => {
+    void chatController.refreshSession().catch(logFailure("account-management.pane", "Refresh yearly account session failed"));
+    void apiClient.getAccountProfile().then(
+      (nextProfile) => { if (nextProfile) setProfile(nextProfile); },
+      logFailure("account-management.pane", "Refresh yearly account profile failed"),
+    );
+  }, []);
+  // An opened review lands on Not Now, in the same update that draws it: no
+  // render ever has Pay active on open, so a held Enter never pays.
+  const focusYearlyDismiss = useCallback(() => setActiveField("yearlyPlanDismissAction"), []);
+  // Only a paying Pro subscriber is asked; the server decides who may switch.
+  const yearlyPlan = useYearlyPlan(
+    hasSession && activeTab === "pro" && planAccess.isPayingPro && !paymentRecovery.visible && !paymentRecovery.checking,
+    sessionMarker,
+    refreshAfterYearlySwitch,
+    focusYearlyDismiss,
+  );
+  // The account's own paid plan, renewing: gloom.sh's cancel window shows then
+  // too. A trial has Cancel Trial, Pro through a team is the team's to cancel,
+  // and a failed payment shows Pay Invoice in this place.
+  const ownSubscription = paymentRecovery.plan?.subscription;
+  const canCancelPro = planAccess.isPayingPro
+    && ownSubscription?.active === true
+    && ownSubscription.status !== "trialing"
+    && ownSubscription.cancelAtPeriodEnd !== true
+    && !paymentRecovery.visible;
+  const fieldOrder = useMemo(() => ACCOUNT_TAB_FIELD_ORDER[activeTab].filter((field) => {
+    if (field === "showLocalTime" || field === "showDesks") return chatCardSupported;
+    if (field === "desks") return chatCardSupported && draft.showDesks;
+    if (field === "cancelTrialAction") return planAccess.isTrialActive;
+    if (field === "cancelProAction") return canCancelPro;
+    if (field === "yearlyPlanAction") return yearlyPlan.primary !== null;
+    if (field === "yearlyPlanDismissAction") return yearlyPlan.reviewing;
+    if (field === "inviteCopyAction") return invite !== null;
+    return true;
+  }), [activeTab, canCancelPro, chatCardSupported, draft.showDesks, invite, planAccess.isTrialActive, yearlyPlan.primary, yearlyPlan.reviewing]);
+  const accountTabs = ACCOUNT_TAB_DEFS.map((tab) => ({ ...tab, label: t(tab.label) }));
+
+  const planPrice = useMemo(() => formatCloudMonthlyPrice(pricing), [language, pricing]);
+  const trialOffer = useMemo(() => formatTrialOffer(pricing), [language, pricing]);
+  const cancelsOn = ownSubscription?.cancelAtPeriodEnd === true && ownSubscription.currentPeriodEnd
+    ? formatShortDate(ownSubscription.currentPeriodEnd, { fallback: "" })
+    : "";
+  const planStatusLabel = useMemo(() => {
+    const trialEnd = planAccess.isTrialActive ? formatTrialEnd(planAccess.trialEndsAt) : null;
+    if (trialEnd) return tf("Pro trial — ends {date}", { date: trialEnd });
+    // A cancelled paid plan says when Pro stops, where Cancel Pro was.
+    if (planAccess.isPayingPro && cancelsOn) return tf("Pro until {date}", { date: cancelsOn });
+    return formatPlan(profile?.plan);
+  }, [cancelsOn, language, planAccess.isPayingPro, planAccess.isTrialActive, planAccess.trialEndsAt, profile?.plan]);
+
+  const planStats = useMemo<StatItem[]>(() => {
+    return [
+      {
+        id: "plan",
+        label: "Plan",
+        value: planStatusLabel,
+        tone: planAccess.hasProAccess ? "positive" : "neutral",
+        detail: profile?.email ?? undefined,
+      },
+      { id: "price", label: "Price", value: planPrice },
+      ...(!planAccess.hasProAccess && trialAvailable === true ? [{ id: "trial", label: "Trial", value: trialOffer }] : []),
+    ];
+  }, [planAccess.hasProAccess, planPrice, planStatusLabel, profile?.email, trialAvailable, trialOffer]);
+
+  const portfolioHoldingCounts = useMemo(() => countPortfolioHoldings(tickers), [tickers]);
+  const portfolioChoices = useMemo(
+    () => buildPortfolioChoices(portfolios, portfolioHoldingCounts),
+    [language, portfolioHoldingCounts, portfolios],
+  );
+  const selectedAnalyticsPortfolio = useMemo(
+    () => portfolios.find((portfolio) => portfolio.id === draft.sharedPortfolioId) ?? null,
+    [draft.sharedPortfolioId, portfolios],
+  );
+  // Only the Profile tab renders the shared-portfolio preview, so the quote,
+  // FX, and chart requests below stay off on every other tab.
+  const portfolioTickers = useMemo(
+    () => activeTab === "profile" && draft.sharedPortfolioId
+      ? [...tickers.values()].filter((ticker) => hasPortfolioPosition(ticker, draft.sharedPortfolioId))
+      : [],
+    [activeTab, draft.sharedPortfolioId, tickers],
+  );
+  const instrumentOptions = useMemo(() => ({
+    portfolioId: draft.sharedPortfolioId || undefined,
+  }), [draft.sharedPortfolioId]);
+  // The positions stream in the background (about once a second each) and
+  // merge with the portfolio pane's own subscriptions.
+  const marketFinancials = useLiveTickerFinancialsMap(portfolioTickers, {
+    surface: "portfolio",
+    visible: false,
+    weight: 10,
+    instrumentOptions,
+  });
+  const liveFinancials = useMemo(
+    () => buildPortfolioFinancialsMap(portfolioTickers, cachedFinancials, marketFinancials, instrumentOptions),
+    [portfolioTickers, cachedFinancials, marketFinancials, instrumentOptions],
+  );
+  // The preview is a 1Y return and a beta: position values only weight daily
+  // returns, so price ticks need not recompute them.
+  const financials = useSampledValue(
+    liveFinancials,
+    PROFILE_PREVIEW_SAMPLE_MS,
+    `${draft.sharedPortfolioId ?? ""}\u001f${[...liveFinancials.keys()].join(",")}`,
+  );
+  const trackedCurrencies = useMemo(
+    () => buildTrackedCurrencies(portfolioTickers, financials, null, baseCurrency),
+    [baseCurrency, financials, portfolioTickers],
+  );
+  const exchangeRates = useFxRatesMap(trackedCurrencies);
+  const chartTargets = useMemo(
+    () => buildPortfolioChartTargets(portfolioTickers, instrumentOptions),
+    [portfolioTickers, instrumentOptions],
+  );
+  const chartRequests = useMemo(
+    () => chartTargets.flatMap((target) => target.request ? [target.request] : []),
+    [chartTargets],
+  );
+  const chartEntries = useChartQueries(chartRequests);
+  const spyRequest = useMemo(
+    () => ({
+      instrument: { symbol: "SPY", exchange: "" },
+      bufferRange: "1Y" as const,
+      granularity: "range" as const,
+    }),
+    [],
+  );
+  const spyChartRequests = useMemo(
+    () => portfolioTickers.length > 0 ? [spyRequest] : [],
+    [portfolioTickers.length, spyRequest],
+  );
+  const spyChartEntries = useChartQueries(spyChartRequests);
+  const columnContext = useMemo(() => ({
+    activeTab: draft.sharedPortfolioId || undefined,
+    baseCurrency,
+    exchangeRates,
+    now: Date.now(),
+  }), [baseCurrency, draft.sharedPortfolioId, exchangeRates]);
+  const portfolioReturnSeries = useMemo(
+    () => buildPortfolioReturnSeries({
+      chartTargets,
+      chartEntries,
+      financials,
+      columnContext,
+    }).returns,
+    [chartEntries, chartTargets, columnContext, financials],
+  );
+  const spyReturnSeries = useMemo(
+    () => buildBenchmarkReturnSeries(spyRequest, spyChartEntries),
+    [spyChartEntries, spyRequest],
+  );
+  // The account's own returns over the last year, when the broker has them, instead of today's holdings.
+  const brokerPerformance = useBrokerPortfolioPerformance(selectedAnalyticsPortfolio ?? null, config);
+  const accountReturns = useMemo(() => {
+    const returns = accountDailyReturns(brokerPerformance.performance);
+    const since = new Date(Date.now() - 365 * 86_400_000).toISOString().slice(0, 10);
+    const lastYear = returns?.filter((point) => point.startDateKey >= since) ?? [];
+    return lastYear.length >= 10 ? lastYear : null;
+  }, [brokerPerformance.performance]);
+  const analyticsReturns = accountReturns ?? portfolioReturnSeries;
+  const oneYearReturn = useMemo(
+    () => analyticsReturns ? computeCumulativeReturn(analyticsReturns) : null,
+    [analyticsReturns],
+  );
+  const beta = useMemo(
+    () => (analyticsReturns ? computeDatedBeta(analyticsReturns, spyReturnSeries.returns) : null),
+    [analyticsReturns, spyReturnSeries],
+  );
+  const localAnalyticsPreview = useMemo(
+    () => buildProfileAnalyticsPreview({
+      beta,
+      portfolio: selectedAnalyticsPortfolio,
+      portfolioTickers,
+      selectedPortfolioId: draft.sharedPortfolioId,
+      oneYearReturn,
+      basis: accountReturns ? "account" : "holdings",
+    }),
+    [
+      accountReturns,
+      beta,
+      draft.sharedPortfolioId,
+      language,
+      portfolioTickers,
+      selectedAnalyticsPortfolio,
+      oneYearReturn,
+    ],
+  );
+  useEffect(() => {
+    const portfolioId = selectedAnalyticsPortfolio?.id;
+    // Off the Profile tab the preview is computed from no holdings, so publishing
+    // it would overwrite real analytics with blanks.
+    if (!portfolioId || activeTab !== "profile") return;
+    const changed = setSyncedProfileAnalytics(portfolioId, localAnalyticsPreview.publicAnalytics);
+    if (changed) cloudSyncController.schedulePush("profile-analytics");
+  }, [
+    activeTab,
+    localAnalyticsPreview.publicAnalytics?.oneYearReturn,
+    localAnalyticsPreview.publicAnalytics?.spyBeta,
+    localAnalyticsPreview.publicAnalytics?.basis,
+    selectedAnalyticsPortfolio?.id,
+  ]);
+  const publicAnalyticsPreview = useMemo(
+    () => buildPublishedProfileAnalyticsPreview({
+      analytics: profile?.portfolioAnalytics ?? null,
+      draftProfilePublic: draft.profilePublic,
+      portfolio: selectedAnalyticsPortfolio,
+      profileLoaded: !!profile,
+      savedProfilePublic: profile?.profilePublic === true,
+      savedSharedPortfolioId: profile?.sharedPortfolioId ?? "",
+      selectedPortfolioId: draft.sharedPortfolioId,
+      syncing: syncStatus.phase === "syncing",
+    }),
+    [
+      draft.profilePublic,
+      draft.sharedPortfolioId,
+      language,
+      profile,
+      selectedAnalyticsPortfolio,
+      syncStatus.phase,
+    ],
+  );
+  const profileAnalyticsDetail = useMemo(() => {
+    if (!draft.sharedPortfolioId) return t("No public portfolio analytics");
+    if (!profile) return t("Loading published metrics");
+    if (
+      draft.profilePublic !== profile.profilePublic
+      || draft.sharedPortfolioId !== (profile.sharedPortfolioId ?? "")
+    ) {
+      return t("Save profile to update published metrics");
+    }
+    if (profile.profilePublic !== true) return t("Public profile is off");
+    if (syncStatus.phase === "syncing") return t("Syncing published metrics");
+    if (!profile.portfolioAnalytics) return t("Waiting for published metrics");
+    return t("Published public metrics");
+  }, [
+    draft.profilePublic,
+    draft.sharedPortfolioId,
+    language,
+    profile,
+    syncStatus.phase,
+  ]);
+
+  useEffect(() => {
+    const unsubscribe = chatController.subscribe((snapshot) => {
+      setHasSession(apiClient.isSignedIn() || snapshot.hasSavedSession);
+      setSessionMarker(buildAccountSessionMarker());
+    });
+    void chatController.refreshSession().catch(logFailure("account-management.pane", "Refresh account session failed"));
+    return unsubscribe;
+  }, []);
+
+  // A load nobody waits on: a failure shows in the pane's message line.
+  const loadProfile = useCallback(() => {
+    if (!apiClient.isSignedIn()) {
+      setProfile(null);
+      setDraft(profileToDraft(null));
+      return;
+    }
+
+    setMessage({ tone: "info", text: t("Loading account profile...") });
+    apiClient.getAccountProfile().then((nextProfile) => {
+      setProfile(nextProfile);
+      setDraft(profileToDraft(nextProfile));
+      setMessage(null);
+    }).catch((error: unknown) => {
+      setMessage({
+        tone: "error",
+        text: error instanceof Error ? error.message : t("Failed to load account profile."),
+      });
+    });
+  }, []);
+
+  useEffect(() => {
+    loadProfile();
+  }, [loadProfile, sessionMarker]);
+
+  // Pricing is decoration (the table falls back to list prices), but whether
+  // the trial is still available belongs to the account, so both follow the session.
+  useEffect(() => {
+    // Signed out, the pane is the sign-in wall.
+    if (!apiClient.isSignedIn()) return;
+    let cancelled = false;
+    // A failed request answers an offer without prices; anything else is logged.
+    loadUpgradeOffer().then((offer) => {
+      if (cancelled) return;
+      if (offer.pricing) setPricing(offer.pricing);
+      setTrialAvailable(offer.trialAvailable);
+    }, logFailure("account-management.pane", "Load upgrade offer failed"));
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionMarker]);
+
+  // The invite link is read when the Pro tab opens, and again for another
+  // account: one account's link must never show under another's.
+  const proTabOpen = activeTab === "pro";
+  useEffect(() => {
+    setInvite(null);
+    if (!proTabOpen || !apiClient.isSignedIn()) return;
+    let cancelled = false;
+    void apiClient.getReferralInvite()
+      .then((next) => {
+        if (!cancelled) setInvite(next);
+      })
+      // A server without invites, or a failed read, leaves the row out.
+      .catch(logFailure("account-management.pane", "Load invite link failed"));
+    return () => {
+      cancelled = true;
+    };
+  }, [proTabOpen, sessionMarker]);
+
+  useEffect(() => {
+    if (!hasSession || !apiClient.isSignedIn()) return;
+    if (syncStatus.phase !== "synced" || syncStatus.revision == null) return;
+    if (refreshedSyncRevisionRef.current === syncStatus.revision) return;
+    refreshedSyncRevisionRef.current = syncStatus.revision;
+    let cancelled = false;
+    void (async () => {
+      const nextProfile = await apiClient.getAccountProfile().catch(logFailure("account-management.pane", "Refresh synced account profile failed", null));
+      if (cancelled || !nextProfile) return;
+      setProfile(nextProfile);
+      await chatController.refreshSession().catch(logFailure("account-management.pane", "Refresh synced account session failed"));
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [hasSession, syncStatus.phase, syncStatus.revision]);
+
+  useEffect(() => {
+    if (!fieldOrder.includes(activeField)) {
+      setActiveField(fieldOrder[0] ?? "username");
+    }
+  }, [activeField, fieldOrder]);
+
+  const setDraftValue = useCallback(<K extends keyof AccountDraft>(key: K, value: AccountDraft[K]) => {
+    setDraft((current) => ({ ...current, [key]: value }));
+  }, []);
+
+  const selectTab = useCallback((tab: string) => {
+    const nextTab = tab as AccountManagementTab;
+    setActiveTab(nextTab);
+    setActiveField(ACCOUNT_TAB_FIELD_ORDER[nextTab][0] ?? "username");
+  }, []);
+  // Signed out, every tab is the same sign-in wall, so the strip stays away.
+  // h/l and the arrows switch tabs; the portfolio picker keeps them while it is
+  // the active field, and text fields keep them for the cursor.
+  const { strip: tabStrip, rows: stripRows } = usePaneTabs(hasSession || apiClient.isSignedIn() ? {
+    tabs: accountTabs,
+    activeValue: activeTab,
+    onSelect: selectTab,
+    focused,
+    variant: "pill",
+    compact: true,
+  } : null);
+  // The strip and the gap the column puts under it.
+  const tabRows = stripRows * 2;
+
+  const openPasswordDialog = useCallback(() => {
+    if (busy) return;
+    setActiveField("passwordAction");
+    void dialog.alert({
+      closeOnClickOutside: false,
+      content: (context: AlertContext) => (
+        <PasswordChangeDialog
+          {...context}
+          onChangePassword={async (currentPassword, newPassword) => {
+            setBusy("password");
+            setMessage({ tone: "info", text: t("Changing password...") });
+            try {
+              await changeAccountPassword(currentPassword, newPassword);
+              setMessage({ tone: "success", text: t("Password changed.") });
+            } catch (error) {
+              setMessage({
+                tone: "error",
+                text: error instanceof Error ? error.message : t("Failed to change password."),
+              });
+              throw error;
+            } finally {
+              setBusy(null);
+            }
+          }}
+        />
+      ),
+    }).catch(logFailure("account-management.pane", "Open password dialog failed"));
+  }, [busy, dialog]);
+
+  const viewport = useViewport();
+  const openAssistants = useCallback(() => {
+    setActiveField("assistantsAction");
+    void openMcpConnectDialog(dialog, { viewportWidth: viewport.width });
+  }, [dialog, viewport.width]);
+
+  const openDeskPicker = useCallback(() => {
+    setActiveField("desks");
+    deskPickerRef.current?.open();
+  }, []);
+
+  const openPortfolioPicker = useCallback(async () => {
+    setActiveField("sharedPortfolioId");
+    portfolioSelectRef.current?.open();
+  }, []);
+
+  // A field the keyboard moves to can sit below the fold in a short pane.
+  const scrollRef = useRef<ScrollBoxRenderable | null>(null);
+
+  const cyclePortfolio = useCallback((delta: number) => {
+    const optionIds = portfolioOptionIds(portfolios);
+    const currentValue = draftRef.current.sharedPortfolioId || NO_PORTFOLIO_VALUE;
+    const currentIndex = Math.max(0, optionIds.indexOf(currentValue));
+    const nextIndex = (currentIndex + delta + optionIds.length) % optionIds.length;
+    const nextValue = optionIds[nextIndex] ?? NO_PORTFOLIO_VALUE;
+    setDraftValue("sharedPortfolioId", nextValue === NO_PORTFOLIO_VALUE ? "" : nextValue);
+  }, [portfolios, setDraftValue]);
+
+  const saveProfile = useCallback(async () => {
+    const current = draftRef.current;
+    const bio = bioRef.current?.editBuffer.getText() ?? current.bio;
+    if (!current.username.trim() || !current.name.trim()) {
+      setMessage({ tone: "error", text: t("Username and full name are required.") });
+      return;
+    }
+
+    setBusy("profile");
+    setMessage({ tone: "info", text: t("Saving account profile...") });
+    try {
+      const nextProfile = await apiClient.updateAccountProfile({
+        username: current.username,
+        name: current.name,
+        company: emptyToNull(current.company),
+        title: emptyToNull(current.title),
+        bio: emptyToNull(bio),
+        profilePublic: current.profilePublic,
+        publicEmail: emptyToNull(current.publicEmail),
+        xAccount: emptyToNull(current.xAccount),
+        sharedPortfolioId: emptyToNull(current.sharedPortfolioId),
+        acceptUnknownDms: current.acceptUnknownDms,
+        chatEmailNotificationsEnabled: current.chatEmailNotificationsEnabled,
+        weeklyRoundupEnabled: current.weeklyRoundupEnabled,
+        positionAlertsEnabled: current.positionAlertsEnabled,
+        ...chatCardUpdate(profileRef.current, current),
+      });
+      setProfile(nextProfile);
+      setDraft(profileToDraft(nextProfile));
+      await chatController.refreshSession().catch(logFailure("account-management.pane", "Refresh saved account session failed"));
+      setMessage({ tone: "success", text: t("Account profile saved.") });
+    } catch (error) {
+      setMessage({
+        tone: "error",
+        text: error instanceof Error ? error.message : t("Failed to save account profile."),
+      });
+    } finally {
+      setBusy(null);
+    }
+  }, []);
+
+  const turnOffEmailAlerts = useCallback(async () => {
+    setActiveField("emailAlertsOffAction");
+    setBusy("alerts");
+    setMessage({ tone: "info", text: t("Turning off email alerts...") });
+    try {
+      const nextProfile = await apiClient.updateAccountProfile({
+        chatEmailNotificationsEnabled: false,
+        weeklyRoundupEnabled: false,
+        positionAlertsEnabled: false,
+      });
+      setDraft((current) => ({
+        ...current,
+        chatEmailNotificationsEnabled: nextProfile.chatEmailNotificationsEnabled,
+        weeklyRoundupEnabled: nextProfile.weeklyRoundupEnabled,
+        positionAlertsEnabled: nextProfile.positionAlertsEnabled,
+      }));
+      setProfile(nextProfile);
+      setMessage({ tone: "success", text: t("Email alerts are off.") });
+    } catch (error) {
+      setMessage({
+        tone: "error",
+        text: error instanceof Error ? error.message : t("Failed to update alert settings."),
+      });
+    } finally {
+      setBusy(null);
+    }
+  }, []);
+
+  // Through the upgrade sheet like every other prompt, so the interval is
+  // chosen and "$0 today" is said only when it is true. The button waits only
+  // while checkout opens; a checkout that cannot be created falls back to the
+  // Cloud page.
+  const startUpgrade = useCloudUpgradeAction("acm");
+  const openUpgrade = useCallback(() => {
+    setActiveField("upgradeAction");
+    if (paymentRecovery.checking) return;
+    if (paymentRecovery.visible) {
+      paymentRecovery.pay();
+      return;
+    }
+    if (busy) return;
+    let opening = false;
+    void startUpgrade({
+      onOpening: () => {
+        opening = true;
+        setBusy("billing");
+        setMessage({ tone: "info", text: t("Opening Pro upgrade...") });
+      },
+    }).finally(() => {
+      if (!opening) return;
+      setBusy(null);
+      setMessage(null);
+    });
+  }, [busy, startUpgrade, paymentRecovery.visible, paymentRecovery.pay, paymentRecovery.checking]);
+
+  const deleteAccount = useCallback(async () => {
+    setActiveField("deleteAccountAction");
+    if (busy) return;
+    const confirmed = await confirmDialog(dialog, {
+      closeOnClickOutside: false,
+      title: t("Delete Account"),
+      body: [
+        t("Delete your Gloom Cloud account?"),
+        t("This removes cloud profile, chat, sync, and billing-linked account data."),
+      ],
+      confirmLabel: t("Delete Account"),
+      confirmVariant: "danger",
+    });
+    if (!confirmed) return;
+
+    await deleteAccountConfirmingSession({
+      remove: (password) => apiClient.deleteAccount(password),
+      askPassword: (submit) => {
+        void dialog.alert({
+          closeOnClickOutside: false,
+          content: (context: AlertContext) => <DeleteAccountPasswordDialog {...context} onDelete={submit} />,
+        }).catch(logFailure("account-management.pane", "Open delete account password dialog failed"));
+      },
+      deleted: async () => {
+        setProfile(null);
+        setDraft(profileToDraft(null));
+        setHasSession(false);
+        await chatController.refreshSession().catch(logFailure("account-management.pane", "Refresh deleted account session failed"));
+        setMessage({ tone: "success", text: t("Account deleted.") });
+      },
+      setBusy: (deleting) => setBusy(deleting ? "delete" : null),
+      setMessage,
+    });
+  }, [busy, dialog]);
+
+  // Only after the warning that it ends the trial and Pro now (trial-cancel.ts).
+  const endTrial = useCallback(async () => {
+    setActiveField("cancelTrialAction");
+    if (busy) return;
+    try {
+      // Asks nothing unless a trial is running.
+      const result = await endTrialAfterWarning(
+        dialog,
+        planAccess,
+        (feedback) => apiClient.endCloudTrial(feedback),
+        () => {
+          setBusy("trial");
+          setMessage({ tone: "info", text: t("Ending trial...") });
+        },
+      );
+      if (!result) return;
+      // The plan changed on the server: the session, the status bar and the tab follow it.
+      await chatController.refreshSession().catch(logFailure("account-management.pane", "Refresh trial account session failed"));
+      const nextProfile = await apiClient.getAccountProfile().catch(logFailure("account-management.pane", "Refresh trial account profile failed", null));
+      if (nextProfile) setProfile(nextProfile);
+      setMessage({
+        tone: "success",
+        text: result.endedNow
+          ? t("Trial ended. Pro is off and you won't be charged.")
+          : t("Cancelled. Pro stays on until the end of the billing period."),
+      });
+    } catch (error) {
+      setMessage({
+        tone: "error",
+        text: error instanceof Error ? error.message : t("Failed to cancel the trial."),
+      });
+    } finally {
+      setBusy(null);
+    }
+  }, [busy, dialog, planAccess]);
+
+  // gloom.sh's cancel window, step for step (pro-cancel.tsx): why, the offer
+  // the server has, then the confirmation with the date Pro stays on to.
+  const cancelPro = useCallback(async () => {
+    setActiveField("cancelProAction");
+    if (busy || !canCancelPro) return;
+    try {
+      const outcome = await cancelProAfterSteps(
+        dialog,
+        { currentPeriodEnd: ownSubscription?.currentPeriodEnd },
+        {
+          retentionOffer: (signal) => apiClient.getCloudRetentionOffer({ signal }),
+          acceptOffer: (feedback) => apiClient.acceptCloudRetentionOffer(feedback),
+          cancel: (feedback) => apiClient.cancelCloudSubscription(feedback),
+        },
+        {
+          onWorking: (text) => {
+            setBusy("cancel");
+            setMessage({ tone: "info", text });
+          },
+        },
+      );
+      if (!outcome) return;
+      setMessage({ tone: "success", text: outcome.message });
+      // The plan changed on the server: Cancel Pro and the plan line follow it.
+      await paymentRecovery.reload();
+      const nextProfile = await apiClient.getAccountProfile().catch(logFailure("account-management.pane", "Refresh cancelled account profile failed", null));
+      if (nextProfile) setProfile(nextProfile);
+    } catch (error) {
+      setMessage({
+        tone: "error",
+        text: error instanceof Error ? error.message : t("Cancel failed."),
+      });
+    } finally {
+      setBusy(null);
+    }
+  }, [busy, canCancelPro, dialog, ownSubscription?.currentPeriodEnd, paymentRecovery.reload]);
+
+  const renderer = useRendererHost();
+  const copyInvite = useCallback(() => {
+    setActiveField("inviteCopyAction");
+    if (!invite) return;
+    void renderer.copyText(invite.url).then(
+      () => setMessage({ tone: "success", text: t("Link copied.") }),
+      // A terminal without clipboard access: the link is selectable on the row.
+      () => setMessage({ tone: "info", text: t("Copy failed. Select the link instead.") }),
+    );
+  }, [invite, renderer]);
+
+  useAccountManagementFooter({
+    busy,
+    // The Calendar and Agents tabs save nothing and show their own status.
+    enabled: activeTab !== "calendar" && activeTab !== "agents",
+    hasSession,
+    message,
+    saveProfile,
+  });
+
+  const { nodeRef: fieldNodeRef } = useAccountManagementKeyboard({
+    activeField,
+    cyclePortfolio,
+    deleteAccount,
+    draftRef,
+    endTrial,
+    cancelPro,
+    copyInvite,
+    fieldOrder,
+    // Behind the sign-in wall the fields are not there, and Enter is the wall's.
+    focused: focused && activeTab !== "teams" && activeTab !== "calendar" && activeTab !== "agents" && (hasSession || apiClient.isSignedIn()),
+    openAssistants,
+    openDeskPicker,
+    openPasswordDialog,
+    openPortfolioDialog: openPortfolioPicker,
+    openUpgrade,
+    saveProfile,
+    scrollRef,
+    setActiveField,
+    setDraftValue,
+    turnOffEmailAlerts,
+    yearlyPlanAction: () => {
+      setActiveField("yearlyPlanAction");
+      yearlyPlan.primary?.();
+    },
+    dismissYearlyReview: yearlyPlan.reviewing
+      ? () => {
+        yearlyPlan.dismiss();
+        setActiveField("yearlyPlanAction");
+      }
+      : null,
+  });
+
+  const textField = (key: "username" | "name" | "company" | "title" | "publicEmail" | "xAccount", label: string, placeholder: string) => (
+    <Box ref={fieldNodeRef(key)}>
+      <TextField
+        label={label}
+        labelWidth={fieldLabelWidth}
+        active={activeField === key}
+        value={draft[key]}
+        placeholder={placeholder}
+        focused={focused && activeField === key}
+        width={fieldWidth}
+        onMouseDown={() => setActiveField(key)}
+        onChange={(value) => setDraftValue(key, value)}
+        onSubmit={() => { void saveProfile(); }}
+      />
+    </Box>
+  );
+
+  if (!hasSession && !apiClient.isSignedIn()) {
+    return <SignInWall placement="account-signin" action="manage your Gloom Cloud account" />;
+  }
+
+  return (
+    <Box flexDirection="column" width={width} height={height} paddingX={1} gap={1}>
+      {tabStrip}
+      <ScrollBox ref={scrollRef} height={Math.max(3, bodyHeight - tabRows)} scrollY focusable={false}>
+        <Box flexDirection="column" width={contentWidth} gap={1}>
+          {activeTab === "profile" ? (
+            <>
+              <FieldRow twoColumns={twoColumns}>
+                <CheckboxRow
+                  label={t("Public Profile")}
+                  checked={draft.profilePublic}
+                  active={activeField === "profilePublic"}
+                  nodeRef={fieldNodeRef("profilePublic")}
+                  width={fieldWidth}
+                  onFocus={() => setActiveField("profilePublic")}
+                  onChange={(checked) => setDraftValue("profilePublic", checked)}
+                />
+                <CheckboxRow
+                  label={t("Incoming DMs")}
+                  checked={draft.acceptUnknownDms}
+                  active={activeField === "acceptUnknownDms"}
+                  nodeRef={fieldNodeRef("acceptUnknownDms")}
+                  width={fieldWidth}
+                  onFocus={() => setActiveField("acceptUnknownDms")}
+                  onChange={(checked) => setDraftValue("acceptUnknownDms", checked)}
+                />
+              </FieldRow>
+
+              {chatCardSupported ? (
+                <>
+                  <FieldRow twoColumns={twoColumns}>
+                    <CheckboxRow
+                      label={t("Local Time")}
+                      checked={draft.showLocalTime}
+                      active={activeField === "showLocalTime"}
+                      nodeRef={fieldNodeRef("showLocalTime")}
+                      width={fieldWidth}
+                      onFocus={() => setActiveField("showLocalTime")}
+                      onChange={(checked) => setDraftValue("showLocalTime", checked)}
+                    />
+                    <CheckboxRow
+                      label={t("What I Trade")}
+                      checked={draft.showDesks}
+                      active={activeField === "showDesks"}
+                      nodeRef={fieldNodeRef("showDesks")}
+                      width={fieldWidth}
+                      onFocus={() => setActiveField("showDesks")}
+                      onChange={(checked) => setDraftValue("showDesks", checked)}
+                    />
+                  </FieldRow>
+                  {draft.showDesks ? (
+                    <DeskChoiceRow
+                      desks={draft.desks}
+                      active={activeField === "desks"}
+                      width={formWidth}
+                      controlRef={deskPickerRef}
+                      nodeRef={fieldNodeRef("desks")}
+                      onFocus={() => setActiveField("desks")}
+                      onChange={(desks) => setDraftValue("desks", desks)}
+                    />
+                  ) : null}
+                </>
+              ) : null}
+
+              <FieldRow twoColumns={twoColumns}>
+                {textField("username", t("Username"), t("username"))}
+                {textField("name", t("Full Name"), t("Full name"))}
+              </FieldRow>
+
+              <FieldRow twoColumns={twoColumns}>
+                {textField("company", t("Company"), t("Company"))}
+                {textField("title", t("Title"), t("Title"))}
+              </FieldRow>
+
+              <FieldRow twoColumns={twoColumns}>
+                {textField("publicEmail", t("Public Email"), "public@example.com")}
+                {textField("xAccount", t("X Account"), t("handle"))}
+              </FieldRow>
+
+              <Box
+                ref={fieldNodeRef("bio")}
+                flexDirection="row"
+                width={formWidth}
+                gap={1}
+                onMouseDown={() => setActiveField("bio")}
+              >
+                <FieldLabel label={t("Bio")} active={activeField === "bio"} width={formLabelWidth} />
+                <Box
+                  height={3}
+                  width={Math.max(18, formWidth - formLabelWidth - 1)}
+                  border={!nativePaneChrome}
+                  borderColor={activeField === "bio" ? colors.borderFocused : colors.border}
+                  backgroundColor={colors.panel}
+                  // The field look, as every other field of the form has it. OpenTUI applies `style`
+                  // too: the terminal keeps the clip it always had.
+                  style={nativePaneChrome ? { ...fieldFrameStyle(activeField === "bio"), overflow: "hidden" } : { overflow: "hidden" }}
+                >
+                  <Textarea
+                    key={`bio:${profile?.updatedAt ?? "empty"}`}
+                    ref={bioRef}
+                    initialValue={draft.bio}
+                    placeholder={t("Short profile bio")}
+                    focused={focused && activeField === "bio"}
+                    textColor={colors.text}
+                    placeholderColor={placeholderText()}
+                    backgroundColor={nativePaneChrome ? "transparent" : colors.panel}
+                    flexGrow={1}
+                    wrapText
+                    {...(nativePaneChrome ? { style: FRAMED_TEXTAREA_DESKTOP_STYLE } : {})}
+                    onInput={(value: string) => setDraftValue("bio", value)}
+                  />
+                </Box>
+              </Box>
+
+              <PublicAnalyticsGroup
+                preview={publicAnalyticsPreview}
+                choices={portfolioChoices}
+                value={draft.sharedPortfolioId || NO_PORTFOLIO_VALUE}
+                detail={profileAnalyticsDetail}
+                active={activeField === "sharedPortfolioId"}
+                width={formWidth}
+                disclaimer={draft.sharedPortfolioId ? t("Only 1Y return and SPY Beta are shared. Positions are not shared.") : null}
+                controlRef={portfolioSelectRef}
+                nodeRef={fieldNodeRef("sharedPortfolioId")}
+                onFocus={() => setActiveField("sharedPortfolioId")}
+                onSelect={(selected) => {
+                  setActiveField("sharedPortfolioId");
+                  setDraftValue("sharedPortfolioId", selected === NO_PORTFOLIO_VALUE ? "" : selected);
+                }}
+              />
+
+              <Box flexDirection="row" gap={1}>
+                <Button label={busy === "profile" ? t("Saving...") : t("Save Profile")} variant="primary" onPress={() => { void saveProfile(); }} disabled={!!busy} />
+              </Box>
+            </>
+          ) : null}
+
+          {activeTab === "emails" ? (
+            <>
+              <CheckboxRow
+                label={t("Offline Chat")}
+                checked={draft.chatEmailNotificationsEnabled}
+                active={activeField === "chatEmailNotificationsEnabled"}
+                nodeRef={fieldNodeRef("chatEmailNotificationsEnabled")}
+                description={t("Replies and private messages while offline.")}
+                width={formWidth}
+                onFocus={() => setActiveField("chatEmailNotificationsEnabled")}
+                onChange={(checked) => setDraftValue("chatEmailNotificationsEnabled", checked)}
+              />
+              <CheckboxRow
+                label={t("Weekly Roundup")}
+                checked={draft.weeklyRoundupEnabled}
+                active={activeField === "weeklyRoundupEnabled"}
+                nodeRef={fieldNodeRef("weeklyRoundupEnabled")}
+                description={t("Friday after market close.")}
+                width={formWidth}
+                onFocus={() => setActiveField("weeklyRoundupEnabled")}
+                onChange={(checked) => setDraftValue("weeklyRoundupEnabled", checked)}
+              />
+              <CheckboxRow
+                label={t("Smart Alerts")}
+                checked={draft.positionAlertsEnabled}
+                active={activeField === "positionAlertsEnabled"}
+                nodeRef={fieldNodeRef("positionAlertsEnabled")}
+                description={t("Unusual portfolio or watchlist moves.")}
+                width={formWidth}
+                onFocus={() => setActiveField("positionAlertsEnabled")}
+                onChange={(checked) => setDraftValue("positionAlertsEnabled", checked)}
+              />
+              <Box ref={fieldNodeRef("emailAlertsOffAction")} flexDirection="row" gap={1} style={{ marginTop: 8 }}>
+                <Button
+                  label={busy === "alerts" ? t("Turning Off...") : t("Turn Off All")}
+                  active={activeField === "emailAlertsOffAction"}
+                  onPress={() => { void turnOffEmailAlerts(); }}
+                  disabled={!!busy || (
+                    !draft.chatEmailNotificationsEnabled
+                    && !draft.weeklyRoundupEnabled
+                    && !draft.positionAlertsEnabled
+                  )}
+                />
+                <Button label={busy === "profile" ? t("Saving...") : t("Save")} variant="primary" onPress={() => { void saveProfile(); }} disabled={!!busy} />
+              </Box>
+            </>
+          ) : null}
+
+          {activeTab === "calendar" ? (
+            <CalendarAccountTab width={contentWidth} sessionMarker={sessionMarker} />
+          ) : null}
+
+          {activeTab === "pro" ? (
+            <>
+              <StatGrid items={planStats} width={contentWidth} />
+              <PlanComparison
+                width={contentWidth}
+                activePlan={planAccess.hasProAccess ? "pro" : "free"}
+              />
+              {paymentRecovery.visible ? (
+                <PaymentRecoveryRow
+                  active={activeField === "upgradeAction"}
+                  busy={paymentRecovery.busy}
+                  message={paymentRecovery.message}
+                  labelWidth={formLabelWidth}
+                  nodeRef={fieldNodeRef("upgradeAction")}
+                  onPay={openUpgrade}
+                  onFocus={() => setActiveField("upgradeAction")}
+                />
+              ) : <Box flexDirection="row" gap={1}>
+                <Box ref={fieldNodeRef("upgradeAction")} flexDirection="row">
+                  <Button
+                    label={planAccess.isPayingPro ? t("Manage Pro") : busy === "billing" ? t("Opening...") : t("Upgrade to Pro")}
+                    variant={planAccess.isPayingPro ? "secondary" : "primary"}
+                    active={activeField === "upgradeAction"}
+                    onPress={openUpgrade}
+                    disabled={!!busy || paymentRecovery.checking}
+                  />
+                </Box>
+                {planAccess.isTrialActive ? (
+                  <Box ref={fieldNodeRef("cancelTrialAction")} flexDirection="row">
+                    <Button
+                      label={busy === "trial" ? t("Ending...") : t("Cancel Trial")}
+                      variant="danger"
+                      active={activeField === "cancelTrialAction"}
+                      onPress={() => { void endTrial(); }}
+                      disabled={!!busy}
+                    />
+                  </Box>
+                ) : null}
+                {canCancelPro || busy === "cancel" ? (
+                  <Box ref={fieldNodeRef("cancelProAction")} flexDirection="row">
+                    <Button
+                      label={busy === "cancel" ? t("Cancelling...") : t("Cancel Pro")}
+                      variant="danger"
+                      active={activeField === "cancelProAction"}
+                      onPress={() => { cancelPro().catch(logFailure("account-management.pane", "Cancel Pro failed")); }}
+                      disabled={!!busy}
+                    />
+                  </Box>
+                ) : null}
+              </Box>}
+              {paymentRecovery.visible ? null : (
+                <YearlyPlanRow
+                  view={yearlyPlan.view}
+                  busy={yearlyPlan.busy}
+                  message={yearlyPlan.message}
+                  width={contentWidth}
+                  labelWidth={formLabelWidth}
+                  primaryActive={activeField === "yearlyPlanAction"}
+                  dismissActive={activeField === "yearlyPlanDismissAction"}
+                  primaryRef={fieldNodeRef("yearlyPlanAction")}
+                  dismissRef={fieldNodeRef("yearlyPlanDismissAction")}
+                  onPrimary={yearlyPlan.primary ? () => {
+                    setActiveField("yearlyPlanAction");
+                    yearlyPlan.primary?.();
+                  } : null}
+                  onDismiss={() => {
+                    yearlyPlan.dismiss();
+                    setActiveField("yearlyPlanAction");
+                  }}
+                  onFocusPrimary={() => setActiveField("yearlyPlanAction")}
+                  onFocusDismiss={() => setActiveField("yearlyPlanDismissAction")}
+                />
+              )}
+              {invite ? (
+                <InviteRow
+                  invite={invite}
+                  active={activeField === "inviteCopyAction"}
+                  width={contentWidth}
+                  labelWidth={formLabelWidth}
+                  nodeRef={fieldNodeRef("inviteCopyAction")}
+                  onCopy={copyInvite}
+                  onFocus={() => setActiveField("inviteCopyAction")}
+                />
+              ) : null}
+            </>
+          ) : null}
+
+          {activeTab === "teams" ? (
+            <TeamsAccountTab focused={focused} width={contentWidth} />
+          ) : null}
+          {activeTab === "agents" ? (
+            <AgentsAccountTab focused={focused} width={contentWidth} />
+          ) : null}
+          {activeTab === "advanced" ? (
+            <>
+              <Box ref={fieldNodeRef("assistantsAction")} flexDirection="row" gap={1} alignItems="center">
+                {/* The only label on the tab, so it takes the room it needs, with the terminal's "> " marker. */}
+                <FieldLabel label={t("Assistants (MCP)")} active={activeField === "assistantsAction"} width={displayWidth(t("Assistants (MCP)")) + 3} />
+                <Button
+                  label={t("Connect an AI Assistant")}
+                  active={activeField === "assistantsAction"}
+                  onPress={openAssistants}
+                  disabled={!!busy}
+                />
+              </Box>
+              <Box flexDirection="row" gap={1}>
+                <Box ref={fieldNodeRef("passwordAction")} flexDirection="row">
+                  <Button
+                    label={t("Change Password")}
+                    active={activeField === "passwordAction"}
+                    onPress={openPasswordDialog}
+                    disabled={!!busy}
+                  />
+                </Box>
+                <Box ref={fieldNodeRef("deleteAccountAction")} flexDirection="row">
+                  <Button
+                    label={busy === "delete" ? t("Deleting...") : t("Delete Account")}
+                    variant="danger"
+                    active={activeField === "deleteAccountAction"}
+                    onPress={() => { void deleteAccount(); }}
+                    disabled={!!busy}
+                  />
+                </Box>
+              </Box>
+            </>
+          ) : null}
+          <Box height={1} />
+        </Box>
+      </ScrollBox>
+    </Box>
+  );
+}

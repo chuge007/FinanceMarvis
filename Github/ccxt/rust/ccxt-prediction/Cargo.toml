@@ -1,0 +1,39 @@
+[package]
+name = "ccxt-prediction"
+version = "4.5.94"
+edition = "2021"
+description = "CCXT – CryptoCurrency eXchange Trading Library (Rust) – typed prediction-market API"
+license = "MIT"
+repository = "https://github.com/ccxt/ccxt"
+homepage = "https://ccxt.com"
+documentation = "https://docs.rs/ccxt-prediction"
+readme = "README.md"
+keywords = ["cryptocurrency", "prediction-market", "trading", "ccxt", "kalshi"]
+categories = ["api-bindings", "asynchronous", "finance"]
+
+[lib]
+name = "ccxt_prediction"
+path = "src/lib.rs"
+
+[features]
+# `all` (the default) keeps today's behaviour: every prediction venue compiles.
+# Pick venues instead to cut build time and memory by two orders of magnitude:
+#   ccxt-prediction = { version = "…", default-features = false, features = ["polymarket", "kalshi"] }
+default = ["all"]
+# BEGIN GENERATED FEATURES (emitted by build/rustTranspiler.ts)
+binance = ["ccxt-base/prediction-binance"]
+hyperliquid = ["ccxt-base/prediction-hyperliquid"]
+kalshi = ["ccxt-base/prediction-kalshi"]
+limitless = ["ccxt-base/prediction-limitless"]
+myriad = ["ccxt-base/prediction-myriad"]
+opinion = ["ccxt-base/prediction-opinion"]
+polymarket = ["ccxt-base/prediction-polymarket"]
+predictfun = ["ccxt-base/prediction-predictfun"]
+sxbet = ["ccxt-base/prediction-sxbet"]
+all = ["binance", "hyperliquid", "kalshi", "limitless", "myriad", "opinion", "polymarket", "predictfun", "sxbet"]
+# END GENERATED FEATURES
+
+[dependencies]
+# The engine holding the prediction exchanges (ccxt_base::prediction::<id>); this
+# crate re-exports it at its root (`ccxt_prediction::Kalshi`, `::types::…`).
+ccxt-base = { path = "../ccxt-base", version = "4.5.94", features = ["engine"] }

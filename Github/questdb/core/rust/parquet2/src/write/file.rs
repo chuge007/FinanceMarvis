@@ -1,0 +1,2016 @@
+use std::collections::HashSet;
+use std::io::Write;
+use std::sync::{Arc, Mutex};
+
+use parquet_format_safe::thrift::protocol::TCompactOutputProtocol;
+use parquet_format_safe::{BoundaryOrder, RowGroup, SortingColumn};
+
+use crate::metadata::ThriftFileMetaData;
+use crate::{
+    error::{Error, Result},
+    metadata::SchemaDescriptor,
+    FOOTER_SIZE, PARQUET_MAGIC,
+};
+
+use super::footer_cache::FooterCache;
+use super::indexes::{pages_support_column_index, write_column_index, write_offset_index};
+use super::page::PageWriteSpec;
+use super::{row_group::write_row_group, type_defined_column_orders, RowGroupIter, WriteOptions};
+
+pub use crate::metadata::KeyValue;
+use crate::write::State;
+
+pub fn start_file<W: Write>(writer: &mut W) -> Result<u64> {
+    writer.write_all(&PARQUET_MAGIC)?;
+    Ok(PARQUET_MAGIC.len() as u64)
+}
+
+/// Picks the `ColumnIndex` `boundary_order` for the leaf column at `column_idx`.
+///
+/// Only the primary (first) `sorting_columns` entry has its rows globally ordered
+/// across the row group, so only its data pages carry monotonic min/max bounds;
+/// declaring `ASCENDING`/`DESCENDING` (per the column's `descending` flag) lets
+/// readers binary-search those bounds. A secondary sort column is ordered only
+/// within runs of equal primary key, so its per-page bounds are not monotonic
+/// across the row group -- it must stay `UNORDERED` like every other column,
+/// otherwise a reader binary-searching its bounds would prune pages that hold
+/// matches. `UNORDERED` is always safe.
+fn boundary_order_for_column(
+    sorting_columns: &Option<Vec<SortingColumn>>,
+    column_idx: usize,
+) -> BoundaryOrder {
+    match sorting_columns.as_deref() {
+        Some([primary, ..]) if primary.column_idx == column_idx as i32 => {
+            if primary.descending {
+                BoundaryOrder::DESCENDING
+            } else {
+                BoundaryOrder::ASCENDING
+            }
+        }
+        _ => BoundaryOrder::UNORDERED,
+    }
+}
+
+/// Where a row group in the footer written by [`ParquetFile::end`] came from.
+///
+/// The final row-group list mixes two index spaces: original groups carried
+/// over from the source footer, and groups written in this session. Callers
+/// that keep per-row-group side data (the `_pm` sidecar's bloom filters) must
+/// resolve it through the origin, never through the final position: after a
+/// split or a mid-file insert the final position matches neither.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowGroupOrigin {
+    /// An original row group carried over with its data unchanged, at
+    /// `orig_idx` in the source footer. Its footer entry may still be
+    /// re-serialized (e.g. with its ColumnIndex stripped).
+    Existing { orig_idx: usize },
+    /// The `k`-th row group written in this session, in write order. `k`
+    /// indexes [`ParquetFile::bloom_bitsets`].
+    Written(usize),
+}
+
+/// Describes where a row group in the final list came from.
+enum RowGroupSource {
+    /// Unchanged original row group — use cached raw bytes if available.
+    Cached(usize),
+    /// Modified original row group — must be freshly serialized.
+    Fresh,
+    /// Newly inserted row group — must be freshly serialized.
+    Inserted,
+}
+
+/// A streaming writer wrapper that supports both protocol-driven writes (via
+/// the `Write` trait) and direct raw byte injection. Uses `RefCell` for
+/// interior mutability so a `TCompactOutputProtocol` can hold a shared
+/// reference while we also inject cached row group bytes. Streams directly
+/// to the underlying writer, avoiding an intermediate buffer.
+struct SharedWriter<'a, W: Write>(std::cell::RefCell<(&'a mut W, u64)>);
+
+impl<'a, W: Write> SharedWriter<'a, W> {
+    fn new(writer: &'a mut W) -> Self {
+        SharedWriter(std::cell::RefCell::new((writer, 0)))
+    }
+
+    fn write_raw(&self, data: &[u8]) -> Result<()> {
+        let mut guard = self.0.borrow_mut();
+        guard.0.write_all(data)?;
+        guard.1 += data.len() as u64;
+        Ok(())
+    }
+
+    fn bytes_written(&self) -> u64 {
+        self.0.borrow().1
+    }
+
+    fn flush(&self) -> std::io::Result<()> {
+        self.0.borrow_mut().0.flush()
+    }
+}
+
+impl<W: Write> std::io::Write for &SharedWriter<'_, W> {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        let mut guard = self.0.borrow_mut();
+        guard.0.write_all(data)?;
+        guard.1 += data.len() as u64;
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.borrow_mut().0.flush()
+    }
+}
+
+/// Writes the Parquet footer incrementally. Unchanged row groups are written as
+/// raw pre-serialized bytes from the `FooterCache`, while modified/inserted row
+/// groups are serialized fresh. Falls back to full serialization when no cache
+/// is available. Streams directly to the writer without an intermediate buffer.
+fn end_file_incremental<W: Write>(
+    writer: &mut W,
+    metadata: &ThriftFileMetaData,
+    footer_cache: &Option<FooterCache>,
+    sources: &[RowGroupSource],
+) -> Result<u64> {
+    let cache = match footer_cache.as_ref() {
+        Some(c) if sources.len() == metadata.row_groups.len() => c,
+        _ => return end_file(writer, metadata),
+    };
+
+    use parquet_format_safe::thrift::protocol::{TCompactOutputProtocol, TOutputProtocol, TType};
+    use parquet_format_safe::thrift::protocol::{
+        TFieldIdentifier, TListIdentifier, TStructIdentifier,
+    };
+
+    // Use SharedWriter so a single protocol instance stays alive for the
+    // entire serialization while we can also inject cached row group bytes.
+    let shared = SharedWriter::new(writer);
+    let mut prot = TCompactOutputProtocol::new(&shared);
+
+    prot.write_struct_begin(&TStructIdentifier::new("FileMetaData"))?;
+
+    // Field 1: version
+    prot.write_field_begin(&TFieldIdentifier::new("version", TType::I32, 1))?;
+    prot.write_i32(metadata.version)?;
+    prot.write_field_end()?;
+
+    // Field 2: schema
+    prot.write_field_begin(&TFieldIdentifier::new("schema", TType::List, 2))?;
+    prot.write_list_begin(&TListIdentifier::new(
+        TType::Struct,
+        metadata.schema.len() as u32,
+    ))?;
+    for elem in &metadata.schema {
+        elem.write_to_out_protocol(&mut prot)?;
+    }
+    prot.write_list_end()?;
+    prot.write_field_end()?;
+
+    // Field 3: num_rows
+    prot.write_field_begin(&TFieldIdentifier::new("num_rows", TType::I64, 3))?;
+    prot.write_i64(metadata.num_rows)?;
+    prot.write_field_end()?;
+
+    // Field 4: row_groups
+    prot.write_field_begin(&TFieldIdentifier::new("row_groups", TType::List, 4))?;
+    prot.write_list_begin(&TListIdentifier::new(
+        TType::Struct,
+        metadata.row_groups.len() as u32,
+    ))?;
+
+    // Write row groups: cached raw bytes or freshly serialized.
+    // Cached row group bytes are self-contained Thrift structs whose
+    // serialization is independent of the outer protocol state, so injecting
+    // them directly is safe. The protocol's field-delta tracking is unaffected
+    // because struct_begin/struct_end (which would push/pop the stack) write
+    // zero bytes and the push/pop is balanced.
+    for (i, source) in sources.iter().enumerate() {
+        match source {
+            RowGroupSource::Cached(orig_idx) if *orig_idx < cache.row_group_count() => {
+                shared.write_raw(cache.row_group_bytes(*orig_idx))?;
+            }
+            _ => {
+                metadata.row_groups[i].write_to_out_protocol(&mut prot)?;
+            }
+        }
+    }
+
+    prot.write_list_end()?;
+    prot.write_field_end()?;
+
+    // Field 5: key_value_metadata (optional)
+    if let Some(ref kv) = metadata.key_value_metadata {
+        prot.write_field_begin(&TFieldIdentifier::new("key_value_metadata", TType::List, 5))?;
+        prot.write_list_begin(&TListIdentifier::new(TType::Struct, kv.len() as u32))?;
+        for entry in kv {
+            entry.write_to_out_protocol(&mut prot)?;
+        }
+        prot.write_list_end()?;
+        prot.write_field_end()?;
+    }
+
+    // Field 6: created_by (optional)
+    if let Some(ref created_by) = metadata.created_by {
+        prot.write_field_begin(&TFieldIdentifier::new("created_by", TType::String, 6))?;
+        prot.write_string(created_by)?;
+        prot.write_field_end()?;
+    }
+
+    // Field 7: column_orders (optional)
+    if let Some(ref orders) = metadata.column_orders {
+        prot.write_field_begin(&TFieldIdentifier::new("column_orders", TType::List, 7))?;
+        prot.write_list_begin(&TListIdentifier::new(TType::Struct, orders.len() as u32))?;
+        for order in orders {
+            order.write_to_out_protocol(&mut prot)?;
+        }
+        prot.write_list_end()?;
+        prot.write_field_end()?;
+    }
+
+    // Field 8: encryption_algorithm (optional)
+    if let Some(ref algo) = metadata.encryption_algorithm {
+        prot.write_field_begin(&TFieldIdentifier::new(
+            "encryption_algorithm",
+            TType::Struct,
+            8,
+        ))?;
+        algo.write_to_out_protocol(&mut prot)?;
+        prot.write_field_end()?;
+    }
+
+    // Field 9: footer_signing_key_metadata (optional)
+    if let Some(ref key_meta) = metadata.footer_signing_key_metadata {
+        prot.write_field_begin(&TFieldIdentifier::new(
+            "footer_signing_key_metadata",
+            TType::String,
+            9,
+        ))?;
+        prot.write_bytes(key_meta)?;
+        prot.write_field_end()?;
+    }
+
+    prot.write_field_stop()?;
+    prot.write_struct_end()?;
+
+    let bytes_written = shared.bytes_written();
+    drop(prot);
+
+    // Write footer (metadata length + PAR1 magic)
+    let mut footer_buffer = [0u8; FOOTER_SIZE as usize];
+    footer_buffer[..4].copy_from_slice(&(bytes_written as i32).to_le_bytes());
+    footer_buffer[4..].copy_from_slice(&PARQUET_MAGIC);
+    // Write footer through the raw writer (protocol is dropped, RefCell is
+    // no longer borrowed).
+    shared.write_raw(&footer_buffer)?;
+    // No-op for unbuffered writers (e.g. File), but needed for consistency
+    // with end_file() if the writer is ever wrapped in a BufWriter.
+    shared.flush()?;
+
+    Ok(bytes_written + FOOTER_SIZE)
+}
+
+pub fn end_file<W: Write>(mut writer: &mut W, metadata: &ThriftFileMetaData) -> Result<u64> {
+    // Write metadata
+    let mut protocol = TCompactOutputProtocol::new(&mut writer);
+    let metadata_len = metadata.write_to_out_protocol(&mut protocol)? as i32;
+
+    // Write footer
+    let metadata_bytes = metadata_len.to_le_bytes();
+    let mut footer_buffer = [0u8; FOOTER_SIZE as usize];
+    (0..4).for_each(|i| {
+        footer_buffer[i] = metadata_bytes[i];
+    });
+
+    (&mut footer_buffer[4..]).write_all(&PARQUET_MAGIC)?;
+    writer.write_all(&footer_buffer)?;
+    writer.flush()?;
+    Ok(metadata_len as u64 + FOOTER_SIZE)
+}
+
+/// A raw-copied row group's per-column page index, rebased for the output file:
+/// `offset_index` has its page offsets shifted to the new position, `column_index`
+/// (statistics only, no offsets) is verbatim, or `None` if the source had none.
+pub struct CopiedColumnIndex {
+    pub column_index: Option<Vec<u8>>,
+    pub offset_index: Vec<u8>,
+}
+
+fn row_group_page_indexable(
+    column_count: usize,
+    page_specs: &[Vec<PageWriteSpec>],
+    copied_columns: Option<&[Option<CopiedColumnIndex>]>,
+) -> bool {
+    (0..column_count).all(|column_idx| {
+        copied_columns
+            .and_then(|columns| columns.get(column_idx))
+            .and_then(Option::as_ref)
+            .is_some()
+            || page_specs
+                .get(column_idx)
+                .is_some_and(|pages| !pages.is_empty())
+    })
+}
+
+/// Removes the elements whose index `removed` marks, in one in-place pass,
+/// and keeps the rest in order; elements past the end of `removed` stay.
+/// `Vec::retain` visits every element once, in order, so the n-th visit
+/// takes the n-th mark.
+fn remove_marked<T>(values: &mut Vec<T>, removed: &[bool]) {
+    let mut marks = removed.iter();
+    values.retain(|_| {
+        #[cfg(test)]
+        REMOVE_MARKED_VISITS.set(REMOVE_MARKED_VISITS.get() + 1);
+        !marks.next().copied().unwrap_or(false)
+    });
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test hook, absent outside this crate's unit tests: the retain-predicate
+    /// calls of `remove_marked` on this thread, one per element visited, so a
+    /// test can count the passes `ParquetFile::end` makes over its vectors.
+    static REMOVE_MARKED_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Writes the page index for `row_groups`, recording each column's index
+/// offset/length in place and advancing `offset`. Fresh groups derive it from
+/// `page_specs` (`boundary_order` from `sorting_columns`); copied groups (an
+/// entry in `copied_page_index`) replay their rebased bytes. All ColumnIndexes
+/// first, then all OffsetIndexes.
+///
+/// Call only when every row group is indexable, so the OffsetIndex stays
+/// uniform. The ColumnIndex is emitted all-or-nothing on top of that: only when
+/// `allow_column_index` is set AND every group in `row_groups` can supply one
+/// (a copied group carried a source ColumnIndex; a fresh group has no opaque-Binary
+/// page with an unbounded max). Returns whether the ColumnIndex was emitted, so an
+/// append caller that passes only the new groups here can reconcile the cached
+/// source groups it re-emits separately (strip their ColumnIndex when this returns
+/// false) and keep the file from advertising a ColumnIndex on some row groups but
+/// not others. The caller must have written all page data first.
+fn write_page_index<W: Write>(
+    writer: &mut W,
+    offset: &mut u64,
+    row_groups: &mut [RowGroup],
+    page_specs: &[Vec<Vec<PageWriteSpec>>],
+    copied_page_index: &[Option<Vec<Option<CopiedColumnIndex>>>],
+    sorting_columns: &Option<Vec<SortingColumn>>,
+    allow_column_index: bool,
+) -> Result<bool> {
+    let copied_for = |rg_idx: usize, column_idx: usize| {
+        copied_page_index
+            .get(rg_idx)
+            .and_then(Option::as_ref)
+            .and_then(|columns| columns.get(column_idx))
+            .and_then(Option::as_ref)
+    };
+
+    // A fresh group can supply a ColumnIndex from its page stats when
+    // allow_column_index is set, unless a column carries an opaque-Binary page with an
+    // unbounded (max-less) max, which the ColumnIndex cannot represent. A copied group
+    // can only supply one if its source carried it. If any group cannot supply one,
+    // emit none: a copied group whose source predates statistics, or a fresh group
+    // with an unbounded-max page, would otherwise leave the output with a ColumnIndex
+    // on some row groups but not others.
+    let emit_column_index =
+        allow_column_index
+            && (0..row_groups.len()).all(|rg_idx| {
+                row_groups[rg_idx].columns.iter().enumerate().all(
+                    |(column_idx, _)| match copied_for(rg_idx, column_idx) {
+                        Some(copied) => copied.column_index.is_some(),
+                        None => page_specs
+                            .get(rg_idx)
+                            .and_then(|columns| columns.get(column_idx))
+                            .is_some_and(|pages| pages_support_column_index(pages)),
+                    },
+                )
+            });
+
+    if emit_column_index {
+        for (rg_idx, group) in row_groups.iter_mut().enumerate() {
+            for (column_idx, column) in group.columns.iter_mut().enumerate() {
+                if let Some(copied) = copied_for(rg_idx, column_idx) {
+                    let start = *offset;
+                    column.column_index_offset = Some(start as i64);
+                    let bytes = copied.column_index.as_ref().unwrap();
+                    writer.write_all(bytes)?;
+                    *offset += bytes.len() as u64;
+                    column.column_index_length = Some((*offset - start) as i32);
+                } else {
+                    let pages = page_specs
+                        .get(rg_idx)
+                        .and_then(|columns| columns.get(column_idx))
+                        .ok_or_else(|| {
+                            Error::InvalidParameter(format!(
+                                "missing encoded page specs for row group {rg_idx}, column {column_idx}"
+                            ))
+                        })?;
+                    let start = *offset;
+                    column.column_index_offset = Some(start as i64);
+                    let boundary_order = boundary_order_for_column(sorting_columns, column_idx);
+                    *offset += write_column_index(writer, pages, boundary_order)?;
+                    column.column_index_length = Some((*offset - start) as i32);
+                }
+            }
+        }
+    }
+
+    for (rg_idx, group) in row_groups.iter_mut().enumerate() {
+        for (column_idx, column) in group.columns.iter_mut().enumerate() {
+            if let Some(copied) = copied_for(rg_idx, column_idx) {
+                let start = *offset;
+                column.offset_index_offset = Some(start as i64);
+                writer.write_all(&copied.offset_index)?;
+                *offset += copied.offset_index.len() as u64;
+                column.offset_index_length = Some((*offset - start) as i32);
+            } else {
+                let pages = page_specs
+                    .get(rg_idx)
+                    .and_then(|columns| columns.get(column_idx))
+                    .ok_or_else(|| {
+                        Error::InvalidParameter(format!(
+                            "missing encoded page specs for row group {rg_idx}, column {column_idx}"
+                        ))
+                    })?;
+                let start = *offset;
+                column.offset_index_offset = Some(start as i64);
+                *offset += write_offset_index(writer, pages)?;
+                column.offset_index_length = Some((*offset - start) as i32);
+            }
+        }
+    }
+
+    Ok(emit_column_index)
+}
+
+/// An interface to write a parquet file.
+/// Use `start` to write the header, `write` to write a row group,
+/// and `end` to write the footer.
+pub struct FileWriter<W: Write> {
+    writer: W,
+    schema: SchemaDescriptor,
+    options: WriteOptions,
+    created_by: Option<String>,
+    sorting_columns: Option<Vec<SortingColumn>>,
+    offset: u64,
+    row_groups: Vec<RowGroup>,
+    page_specs: Vec<Vec<Vec<PageWriteSpec>>>,
+    /// Bloom filter bitsets captured during write, per row group per column.
+    bloom_bitsets: Vec<Vec<Option<Vec<u8>>>>,
+    /// Used to store the current state for writing the file
+    state: State,
+    // when the file is written, metadata becomes available
+    metadata: Option<ThriftFileMetaData>,
+    parquet_footer_offset: u64,
+}
+
+/// Writes a parquet file containing only the header and footer
+///
+/// This is used to write the metadata as a separate Parquet file, usually when data
+/// is partitioned across multiple files.
+///
+/// Note: Recall that when combining row groups from [`ThriftFileMetaData`], the `file_path` on each
+/// of their column chunks must be updated with their path relative to where they are written to.
+pub fn write_metadata_sidecar<W: Write>(
+    writer: &mut W,
+    metadata: &ThriftFileMetaData,
+) -> Result<u64> {
+    let mut len = start_file(writer)?;
+    len += end_file(writer, metadata)?;
+    Ok(len)
+}
+
+// Accessors
+impl<W: Write> FileWriter<W> {
+    /// The options assigned to the file
+    pub fn options(&self) -> &WriteOptions {
+        &self.options
+    }
+
+    /// The [`SchemaDescriptor`] assigned to this file
+    pub fn schema(&self) -> &SchemaDescriptor {
+        &self.schema
+    }
+
+    /// Returns the [`ThriftFileMetaData`]. This is Some iff the [`Self::end`] has been called.
+    ///
+    /// This is used to write the metadata as a separate Parquet file, usually when data
+    /// is partitioned across multiple files
+    pub fn metadata(&self) -> Option<&ThriftFileMetaData> {
+        self.metadata.as_ref()
+    }
+}
+
+impl<W: Write> FileWriter<W> {
+    /// Returns a new [`FileWriter`].
+    pub fn new(
+        writer: W,
+        schema: SchemaDescriptor,
+        options: WriteOptions,
+        created_by: Option<String>,
+    ) -> Self {
+        Self {
+            writer,
+            schema,
+            options,
+            created_by,
+            sorting_columns: None,
+            offset: 0,
+            row_groups: vec![],
+            page_specs: vec![],
+            bloom_bitsets: vec![],
+            state: State::Initialised,
+            metadata: None,
+            parquet_footer_offset: 0,
+        }
+    }
+
+    pub fn with_sorting_columns(
+        writer: W,
+        schema: SchemaDescriptor,
+        options: WriteOptions,
+        created_by: Option<String>,
+        sorting_columns: Option<Vec<SortingColumn>>,
+    ) -> Self {
+        Self {
+            writer,
+            schema,
+            options,
+            created_by,
+            sorting_columns,
+            offset: 0,
+            row_groups: vec![],
+            page_specs: vec![],
+            bloom_bitsets: vec![],
+            state: State::Initialised,
+            metadata: None,
+            parquet_footer_offset: 0,
+        }
+    }
+
+    /// Writes the header of the file.
+    ///
+    /// This is automatically called by [`Self::write`] if not called following [`Self::new`].
+    ///
+    /// # Errors
+    /// Returns an error if data has been written to the file.
+    fn start(&mut self) -> Result<()> {
+        if self.offset == 0 {
+            self.offset = start_file(&mut self.writer)?;
+            self.state = State::Started;
+            Ok(())
+        } else {
+            Err(Error::InvalidParameter(
+                "Start cannot be called twice".to_string(),
+            ))
+        }
+    }
+
+    /// Writes a row group to the file.
+    ///
+    /// This call is IO-bounded
+    pub fn write<E>(
+        &mut self,
+        row_group: RowGroupIter<'_, E>,
+        bloom_hashes: &[Option<Arc<Mutex<HashSet<u64>>>>],
+    ) -> std::result::Result<(), E>
+    where
+        E: std::error::Error + From<Error>,
+    {
+        if self.offset == 0 {
+            self.start()?;
+        }
+        let ordinal = self.row_groups.len();
+        let expected_cols = self.schema.columns().len();
+        debug_assert!(
+            bloom_hashes.is_empty() || bloom_hashes.len() == expected_cols,
+            "bloom_hashes length mismatch: expected {}, got {}",
+            expected_cols,
+            bloom_hashes.len()
+        );
+        let default_bloom: Vec<Option<Arc<Mutex<HashSet<u64>>>>>;
+        let bloom_hashes = if bloom_hashes.is_empty() {
+            default_bloom = vec![None; expected_cols];
+            &default_bloom
+        } else {
+            bloom_hashes
+        };
+        let (group, specs, size, bf_bitsets) = write_row_group(
+            &mut self.writer,
+            self.offset,
+            self.schema.columns(),
+            row_group,
+            &self.sorting_columns,
+            ordinal,
+            self.options.bloom_filter_fpp,
+            bloom_hashes,
+        )?;
+        self.offset += size;
+        self.row_groups.push(group);
+        self.page_specs.push(specs);
+        self.bloom_bitsets.push(bf_bitsets);
+        Ok(())
+    }
+
+    /// Writes the footer of the parquet file. Returns the total size of the file and the
+    /// underlying writer.
+    pub fn end(&mut self, additional_meta: Option<Vec<KeyValue>>) -> Result<u64> {
+        if self.offset == 0 {
+            self.start()?;
+        }
+
+        if self.state != State::Started {
+            return Err(Error::InvalidParameter(
+                "End cannot be called twice".to_string(),
+            ));
+        }
+        // compute file stats
+        let num_rows = self.row_groups.iter().map(|group| group.num_rows).sum();
+
+        // The primary writer encodes every row group, so all are indexable.
+        write_page_index(
+            &mut self.writer,
+            &mut self.offset,
+            &mut self.row_groups,
+            &self.page_specs,
+            &[],
+            &self.sorting_columns,
+            self.options.write_statistics,
+        )?;
+
+        let metadata = ThriftFileMetaData::new(
+            self.options.version.into(),
+            self.schema.clone().into_thrift(),
+            num_rows,
+            self.row_groups.clone(),
+            additional_meta,
+            self.created_by.clone(),
+            Some(type_defined_column_orders(self.schema.columns().len())),
+            None,
+            None,
+        );
+
+        self.parquet_footer_offset = self.offset;
+        let len = end_file(&mut self.writer, &metadata)?;
+        self.state = State::Finished;
+        self.metadata = Some(metadata);
+        Ok(self.offset + len)
+    }
+
+    pub fn parquet_footer_offset(&self) -> u64 {
+        self.parquet_footer_offset
+    }
+
+    pub fn row_groups(&self) -> &[RowGroup] {
+        if let Some(meta) = &self.metadata {
+            return &meta.row_groups;
+        }
+        &self.row_groups
+    }
+
+    /// Returns bloom filter bitsets captured during write, per row group per column.
+    pub fn bloom_bitsets(&self) -> &[Vec<Option<Vec<u8>>>] {
+        &self.bloom_bitsets
+    }
+
+    /// Takes the bloom bitsets captured since the previous call.
+    pub fn take_bloom_bitsets(&mut self) -> Vec<Vec<Option<Vec<u8>>>> {
+        std::mem::take(&mut self.bloom_bitsets)
+    }
+
+    /// Returns the underlying writer.
+    pub fn into_inner(self) -> W {
+        self.writer
+    }
+
+    /// Returns the underlying writer and [`ThriftFileMetaData`]
+    /// # Panics
+    /// This function panics if [`Self::end`] has not yet been called
+    pub fn into_inner_and_metadata(self) -> (W, ThriftFileMetaData) {
+        (self.writer, self.metadata.expect("File to have ended"))
+    }
+}
+
+// TODO: replace `FileWriter` with `ParquetFile` and deprecate `FileWriter`
+pub struct ParquetFile<W: Write> {
+    writer: W,
+    schema: SchemaDescriptor,
+    options: WriteOptions,
+    created_by: Option<String>,
+    sorting_columns: Option<Vec<SortingColumn>>,
+    offset: u64,
+    row_groups: Vec<RowGroup>,
+    page_specs: Vec<Vec<Vec<PageWriteSpec>>>,
+    bloom_bitsets: Vec<Vec<Option<Vec<u8>>>>,
+    state: State,
+    metadata: Option<ThriftFileMetaData>,
+    mode: Mode,
+    is_insert: Vec<bool>,
+    /// Pre-rebased page indexes for raw-copied columns, parallel to
+    /// `row_groups` and each row group's columns. A per-column `None` means
+    /// that column was freshly encoded and is indexed from `page_specs`.
+    /// An outer `None` marks a wholly fresh group or an unindexable copied one.
+    copied_page_index: Vec<Option<Vec<Option<CopiedColumnIndex>>>>,
+    parquet_footer_offset: u64,
+    /// Origin of each final row group, parallel to the footer's row groups.
+    /// Empty until [`Self::end`] runs.
+    row_group_origins: Vec<RowGroupOrigin>,
+    /// Update mode: original row groups [`Self::remove`] dropped from the
+    /// footer, indexed by original ordinal. Empty until the first removal.
+    removed: Vec<bool>,
+}
+
+#[allow(clippy::large_enum_variant)]
+pub enum Mode {
+    Write,
+    Update(ThriftFileMetaData, Option<FooterCache>),
+}
+
+impl<W: Write> ParquetFile<W> {
+    pub fn new(
+        writer: W,
+        schema: SchemaDescriptor,
+        options: WriteOptions,
+        created_by: Option<String>,
+    ) -> Self {
+        Self {
+            writer,
+            schema,
+            options,
+            created_by,
+            sorting_columns: None,
+            offset: 0,
+            row_groups: vec![],
+            page_specs: vec![],
+            state: State::Initialised,
+            metadata: None,
+            mode: Mode::Write,
+            bloom_bitsets: vec![],
+            is_insert: vec![],
+            copied_page_index: vec![],
+            parquet_footer_offset: 0,
+            row_group_origins: vec![],
+            removed: vec![],
+        }
+    }
+
+    pub fn with_sorting_columns(
+        writer: W,
+        schema: SchemaDescriptor,
+        options: WriteOptions,
+        created_by: Option<String>,
+        sorting_columns: Option<Vec<SortingColumn>>,
+    ) -> Self {
+        Self {
+            writer,
+            schema,
+            options,
+            created_by,
+            sorting_columns,
+            offset: 0,
+            row_groups: vec![],
+            page_specs: vec![],
+            state: State::Initialised,
+            metadata: None,
+            mode: Mode::Write,
+            bloom_bitsets: vec![],
+            is_insert: vec![],
+            copied_page_index: vec![],
+            parquet_footer_offset: 0,
+            row_group_origins: vec![],
+            removed: vec![],
+        }
+    }
+
+    pub fn new_updater(
+        writer: W,
+        offset: u64,
+        schema: SchemaDescriptor,
+        options: WriteOptions,
+        created_by: Option<String>,
+        sorting_columns: Option<Vec<SortingColumn>>,
+        metadata: ThriftFileMetaData,
+        footer_cache: Option<FooterCache>,
+    ) -> Self {
+        Self {
+            writer,
+            schema,
+            options,
+            created_by,
+            sorting_columns,
+            offset,
+            row_groups: vec![],
+            page_specs: vec![],
+            state: State::Initialised,
+            metadata: None, // Set by end() after merging row groups.
+            mode: Mode::Update(metadata, footer_cache),
+            bloom_bitsets: vec![],
+            is_insert: vec![],
+            copied_page_index: vec![],
+            parquet_footer_offset: 0,
+            row_group_origins: vec![],
+            removed: vec![],
+        }
+    }
+
+    pub fn options(&self) -> &WriteOptions {
+        &self.options
+    }
+
+    pub fn schema(&self) -> &SchemaDescriptor {
+        &self.schema
+    }
+
+    pub fn set_schema(&mut self, schema: SchemaDescriptor) {
+        self.schema = schema;
+    }
+
+    pub fn set_sorting_columns(&mut self, sorting_columns: Option<Vec<SortingColumn>>) {
+        self.sorting_columns = sorting_columns;
+    }
+
+    pub fn sorting_columns(&self) -> Option<&[SortingColumn]> {
+        self.sorting_columns.as_deref()
+    }
+
+    pub fn metadata(&self) -> Option<&ThriftFileMetaData> {
+        self.metadata.as_ref()
+    }
+
+    pub fn writer_mut(&mut self) -> &mut W {
+        &mut self.writer
+    }
+
+    fn start(&mut self) -> Result<()> {
+        if self.offset == 0 {
+            self.offset = start_file(&mut self.writer)?;
+            self.state = State::Started;
+            Ok(())
+        } else {
+            Err(Error::InvalidParameter(
+                "Start cannot be called twice".to_string(),
+            ))
+        }
+    }
+
+    pub fn write<E>(
+        &mut self,
+        row_group: RowGroupIter<'_, E>,
+        bloom_hashes: &[Option<Arc<Mutex<HashSet<u64>>>>],
+    ) -> std::result::Result<(), E>
+    where
+        E: std::error::Error + From<Error>,
+    {
+        if self.offset == 0 {
+            self.start()?;
+        }
+        let ordinal = self.row_groups.len();
+        self.add_row_group(row_group, ordinal, bloom_hashes)?;
+        self.is_insert.push(false);
+        Ok(())
+    }
+
+    fn add_row_group<E>(
+        &mut self,
+        row_group: RowGroupIter<E>,
+        ordinal: usize,
+        bloom_hashes: &[Option<Arc<Mutex<HashSet<u64>>>>],
+    ) -> std::result::Result<(), E>
+    where
+        E: std::error::Error + From<Error>,
+    {
+        let expected_cols = self.schema.columns().len();
+        debug_assert!(
+            bloom_hashes.is_empty() || bloom_hashes.len() == expected_cols,
+            "bloom_hashes length mismatch: expected {}, got {}",
+            expected_cols,
+            bloom_hashes.len()
+        );
+        let default_bloom: Vec<Option<Arc<Mutex<HashSet<u64>>>>>;
+        let bloom_hashes = if bloom_hashes.is_empty() {
+            default_bloom = vec![None; expected_cols];
+            &default_bloom
+        } else {
+            bloom_hashes
+        };
+        let (group, specs, size, bf_bitsets) = write_row_group(
+            &mut self.writer,
+            self.offset,
+            self.schema.columns(),
+            row_group,
+            &self.sorting_columns,
+            ordinal,
+            self.options.bloom_filter_fpp,
+            bloom_hashes,
+        )?;
+
+        self.offset += size;
+        self.row_groups.push(group);
+        self.page_specs.push(specs);
+        self.bloom_bitsets.push(bf_bitsets);
+        // Freshly encoded: end() derives the page index from page_specs.
+        self.copied_page_index.push(None);
+        Ok(())
+    }
+
+    pub fn replace<E>(
+        &mut self,
+        row_group: RowGroupIter<'_, E>,
+        ordinal: Option<i32>,
+        bloom_hashes: &[Option<Arc<Mutex<HashSet<u64>>>>],
+    ) -> std::result::Result<(), E>
+    where
+        E: std::error::Error + From<Error>,
+    {
+        match &self.mode {
+            Mode::Update(metadata, _) => {
+                let ordinal = if let Some(ordinal) = ordinal {
+                    if ordinal < 0 {
+                        return Err(Error::InvalidParameter(format!(
+                            "Row group ordinal must be non-negative, got {}",
+                            ordinal
+                        ))
+                        .into());
+                    }
+                    let num_row_groups = metadata.row_groups.len();
+                    let ordinal = ordinal as usize;
+                    if ordinal >= num_row_groups {
+                        return Err(Error::InvalidParameter(format!(
+                            "Row group ordinal must be less then {}, got {}",
+                            num_row_groups, ordinal
+                        ))
+                        .into());
+                    }
+                    if self.removed.get(ordinal).copied().unwrap_or(false) {
+                        return Err(Error::InvalidParameter(format!(
+                            "Row group {} was removed and cannot be replaced",
+                            ordinal
+                        ))
+                        .into());
+                    }
+                    ordinal
+                } else {
+                    metadata.row_groups.len() + self.row_groups.len()
+                };
+                self.add_row_group(row_group, ordinal, bloom_hashes)?;
+                self.is_insert.push(false);
+                Ok(())
+            }
+            _ => Err(Error::InvalidParameter(
+                "Replace can only be called in update mode".to_string(),
+            )
+            .into()),
+        }
+    }
+
+    pub fn insert<E>(
+        &mut self,
+        row_group: RowGroupIter<'_, E>,
+        position: i32,
+        bloom_hashes: &[Option<Arc<Mutex<HashSet<u64>>>>],
+    ) -> std::result::Result<(), E>
+    where
+        E: std::error::Error + From<Error>,
+    {
+        if position < 0 {
+            return Err(Error::InvalidParameter(format!(
+                "Insert position must be non-negative, got {}",
+                position
+            ))
+            .into());
+        }
+        match &self.mode {
+            Mode::Update(_, _) => {
+                self.add_row_group(row_group, position as usize, bloom_hashes)?;
+                self.is_insert.push(true);
+                Ok(())
+            }
+            _ => Err(Error::InvalidParameter(
+                "Insert can only be called in update mode".to_string(),
+            )
+            .into()),
+        }
+    }
+
+    /// Update mode only. Drops original row group `ordinal` from the footer
+    /// that [`Self::end`] writes. Its bytes stay in the file as dead space;
+    /// nothing below the original file size is touched. Indexed in ORIGINAL
+    /// space, like [`Self::replace`]; [`Self::insert`] positions are final
+    /// positions, which already exclude removed groups.
+    ///
+    /// Errors, never panics, on: a non-update mode, a negative or
+    /// out-of-range ordinal, an ordinal already removed, or an ordinal already
+    /// replaced in this session.
+    pub fn remove(&mut self, ordinal: i32) -> Result<()> {
+        let Mode::Update(metadata, _) = &self.mode else {
+            return Err(Error::InvalidParameter(
+                "Remove can only be called in update mode".to_string(),
+            ));
+        };
+        let num_row_groups = metadata.row_groups.len();
+        let index = usize::try_from(ordinal)
+            .ok()
+            .filter(|&i| i < num_row_groups)
+            .ok_or_else(|| {
+                Error::InvalidParameter(format!(
+                    "Row group ordinal to remove must be in [0, {}), got {}",
+                    num_row_groups, ordinal
+                ))
+            })?;
+        if self.removed.get(index).copied().unwrap_or(false) {
+            return Err(Error::InvalidParameter(format!(
+                "Row group {} is already removed",
+                index
+            )));
+        }
+        if self.is_replaced(index) {
+            return Err(Error::InvalidParameter(format!(
+                "Row group {} was replaced and cannot be removed",
+                index
+            )));
+        }
+        if self.removed.is_empty() {
+            self.removed = vec![false; num_row_groups];
+        }
+        self.removed[index] = true;
+        Ok(())
+    }
+
+    /// Whether original row group `index` was replaced in this session.
+    fn is_replaced(&self, index: usize) -> bool {
+        let Ok(ordinal) = i16::try_from(index) else {
+            // write_row_group rejects ordinals past i16::MAX, so no replacement
+            // can carry one.
+            return false;
+        };
+        self.row_groups
+            .iter()
+            .zip(&self.is_insert)
+            .any(|(group, is_insert)| !is_insert && group.ordinal == Some(ordinal))
+    }
+
+    pub fn append<E>(
+        &mut self,
+        row_group: RowGroupIter<'_, E>,
+        bloom_hashes: &[Option<Arc<Mutex<HashSet<u64>>>>],
+    ) -> std::result::Result<(), E>
+    where
+        E: std::error::Error + From<Error>,
+    {
+        self.replace(row_group, None, bloom_hashes)
+    }
+
+    /// Ensures the PAR1 file header has been written.
+    /// Must be called before computing offsets for raw row group copies.
+    pub fn ensure_started(&mut self) -> Result<()> {
+        if self.offset == 0 {
+            self.start()?;
+        }
+        Ok(())
+    }
+
+    /// Returns the current write offset in the file.
+    pub fn current_offset(&self) -> u64 {
+        self.offset
+    }
+
+    pub fn parquet_footer_offset(&self) -> u64 {
+        self.parquet_footer_offset
+    }
+
+    pub fn row_groups(&self) -> &[RowGroup] {
+        if let Some(meta) = &self.metadata {
+            return &meta.row_groups;
+        }
+        &self.row_groups
+    }
+
+    /// Bloom bitsets of the row groups written in this session, in write
+    /// order. Index with [`RowGroupOrigin::Written`], not a final position.
+    pub fn bloom_bitsets(&self) -> &[Vec<Option<Vec<u8>>>] {
+        &self.bloom_bitsets
+    }
+
+    /// Origin of each row group in the final footer, parallel to
+    /// [`Self::row_groups`] once [`Self::end`] has run; empty before.
+    pub fn row_group_origins(&self) -> &[RowGroupOrigin] {
+        &self.row_group_origins
+    }
+
+    /// Write raw (pre-encoded) row group bytes and register the row group metadata.
+    /// The `row_group` must have all offsets already adjusted for the new file.
+    /// Callers must call `ensure_started()` before computing those offsets,
+    /// otherwise the PAR1 header written here shifts data by 4 bytes.
+    pub fn write_raw_row_group(&mut self, raw_bytes: &[u8], row_group: RowGroup) -> Result<()> {
+        self.write_raw_row_group_with_bloom(raw_bytes, row_group, vec![])
+    }
+
+    /// Like `write_raw_row_group` but carries pre-extracted bloom filter bitsets
+    /// so they are preserved in the `_pm` sidecar file.
+    pub fn write_raw_row_group_with_bloom(
+        &mut self,
+        raw_bytes: &[u8],
+        row_group: RowGroup,
+        bloom_bitsets: Vec<Option<Vec<u8>>>,
+    ) -> Result<()> {
+        self.write_raw_row_group_with_index(raw_bytes, row_group, bloom_bitsets, None)
+    }
+
+    /// Like `write_raw_row_group_with_bloom` but also carries the row group's
+    /// rebased source page index for `end()` to re-emit. `None` if the source had
+    /// no OffsetIndex, which makes `end()` leave the whole file unindexed.
+    pub fn write_raw_row_group_with_index(
+        &mut self,
+        raw_bytes: &[u8],
+        row_group: RowGroup,
+        bloom_bitsets: Vec<Option<Vec<u8>>>,
+        copied_page_index: Option<Vec<CopiedColumnIndex>>,
+    ) -> Result<()> {
+        if self.offset == 0 {
+            self.start()?;
+        }
+        self.writer.write_all(raw_bytes)?;
+        self.offset += raw_bytes.len() as u64;
+        self.row_groups.push(row_group);
+        self.page_specs.push(vec![]);
+        self.bloom_bitsets.push(bloom_bitsets);
+        self.copied_page_index
+            .push(copied_page_index.map(|columns| columns.into_iter().map(Some).collect()));
+        self.is_insert.push(false);
+        Ok(())
+    }
+
+    /// Registers a hybrid row group whose copied and encoded bytes the caller
+    /// has already streamed to [`writer_mut`](Self::writer_mut). This is the
+    /// bounded-memory counterpart to
+    /// [`write_raw_row_group_with_bloom`](Self::write_raw_row_group_with_bloom):
+    /// callers can copy large column chunks directly instead of first collecting
+    /// the complete row group in a `Vec`, while retaining a mixed page index.
+    ///
+    /// The caller must call [`ensure_started`](Self::ensure_started) before it
+    /// writes the bytes and must pass their exact total length here.
+    pub fn register_streamed_hybrid_row_group(
+        &mut self,
+        bytes_written: u64,
+        row_group: RowGroup,
+        bloom_bitsets: Vec<Option<Vec<u8>>>,
+        page_specs: Vec<Vec<PageWriteSpec>>,
+        copied_page_index: Vec<Option<CopiedColumnIndex>>,
+    ) {
+        self.offset += bytes_written;
+        self.row_groups.push(row_group);
+        self.page_specs.push(page_specs);
+        self.bloom_bitsets.push(bloom_bitsets);
+        self.copied_page_index.push(Some(copied_page_index));
+        self.is_insert.push(false);
+    }
+
+    pub fn end(&mut self, key_value_metadata: Option<Vec<KeyValue>>) -> Result<u64> {
+        match &mut self.mode {
+            Mode::Write => {
+                if self.offset == 0 {
+                    self.start()?;
+                }
+
+                if self.state != State::Started {
+                    return Err(Error::InvalidParameter(
+                        "End cannot be called twice".to_string(),
+                    ));
+                }
+
+                // Re-emit the page index, but only when every group is indexable:
+                // a copied group whose source lacked an OffsetIndex keeps the
+                // whole file unindexed, since a mixed file is rejected by strict
+                // readers.
+                let all_indexable = self.row_groups.iter().enumerate().all(|(i, row_group)| {
+                    row_group_page_indexable(
+                        row_group.columns.len(),
+                        &self.page_specs[i],
+                        self.copied_page_index[i].as_deref(),
+                    )
+                });
+                if all_indexable {
+                    write_page_index(
+                        &mut self.writer,
+                        &mut self.offset,
+                        &mut self.row_groups,
+                        &self.page_specs,
+                        &self.copied_page_index,
+                        &self.sorting_columns,
+                        self.options.write_statistics,
+                    )?;
+                }
+
+                let num_rows = self.row_groups.iter().map(|group| group.num_rows).sum();
+                let metadata = ThriftFileMetaData::new(
+                    self.options.version.into(),
+                    self.schema.clone().into_thrift(),
+                    num_rows,
+                    self.row_groups.clone(),
+                    key_value_metadata,
+                    self.created_by.clone(),
+                    Some(type_defined_column_orders(self.schema.columns().len())),
+                    None,
+                    None,
+                );
+
+                self.parquet_footer_offset = self.offset;
+                let len = end_file(&mut self.writer, &metadata)?;
+                self.state = State::Finished;
+                self.row_group_origins = (0..metadata.row_groups.len())
+                    .map(RowGroupOrigin::Written)
+                    .collect();
+                self.metadata = Some(metadata);
+                Ok(self.offset + len)
+            }
+            Mode::Update(metadata, footer_cache) => {
+                let mut num_rows = metadata.num_rows;
+                let original_rg_count = metadata.row_groups.len();
+
+                // Track which original row groups have been replaced.
+                let mut modified = vec![false; original_rg_count];
+
+                // Cached groups keep their original page index. Index the new
+                // groups only when the source is fully offset-indexed, else the
+                // file would be mixed. An empty source is trivially indexed.
+                // Assumes a uniform source (every column indexed, or none): QuestDB's
+                // writer always emits one, so a per-column-mixed source means a corrupt
+                // file, in which case the all() below conservatively reports false.
+                let source_offset_indexed = metadata
+                    .row_groups
+                    .iter()
+                    .all(|rg| rg.columns.iter().all(|c| c.offset_index_offset.is_some()));
+
+                // ColumnIndex emission is gated independently of chunk statistics: a
+                // source can carry stats with no ColumnIndex (an ADD COLUMN raw-copy,
+                // or a group whose ColumnIndex was stripped below on a prior append).
+                // New groups emit a ColumnIndex only when the source is uniformly
+                // ColumnIndexed, else the file would advertise one on some groups but
+                // not others.
+                let source_column_indexed = !metadata.row_groups.is_empty()
+                    && metadata
+                        .row_groups
+                        .iter()
+                        .all(|rg| rg.columns.iter().all(|c| c.column_index_offset.is_some()));
+
+                // Drain row_groups and is_insert so we can move instead of clone.
+                let mut groups = std::mem::take(&mut self.row_groups);
+                let is_insert_flags = std::mem::take(&mut self.is_insert);
+                let page_specs = std::mem::take(&mut self.page_specs);
+                let copied_page_index = std::mem::take(&mut self.copied_page_index);
+
+                // Index the new groups before they merge into the footer, but
+                // only when every new group is itself indexable: a raw-copied
+                // group whose source lacked an OffsetIndex is not. Combined with
+                // source_offset_indexed, this keeps the file from mixing indexed
+                // and unindexed row groups (which strict readers reject), the
+                // same all-or-nothing rule the Mode::Write branch applies.
+                let new_groups_indexable = groups.iter().enumerate().all(|(i, row_group)| {
+                    row_group_page_indexable(
+                        row_group.columns.len(),
+                        &page_specs[i],
+                        copied_page_index[i].as_deref(),
+                    )
+                });
+                let new_groups_have_column_index = if source_offset_indexed && new_groups_indexable
+                {
+                    write_page_index(
+                        &mut self.writer,
+                        &mut self.offset,
+                        &mut groups,
+                        &page_specs,
+                        &copied_page_index,
+                        &self.sorting_columns,
+                        source_column_indexed && self.options.write_statistics,
+                    )?
+                } else {
+                    false
+                };
+
+                // Origin of each entry in metadata.row_groups, kept in lockstep
+                // with it through the replacements, appends and insertions below.
+                // `k` is the write order, which indexes bloom_bitsets.
+                let mut origins: Vec<RowGroupOrigin> = (0..original_rg_count)
+                    .map(|orig_idx| RowGroupOrigin::Existing { orig_idx })
+                    .collect();
+
+                let removed = std::mem::take(&mut self.removed);
+
+                // Partition into replacements/appends and insertions.
+                let mut insertion_groups = Vec::new();
+                for (k, (group, is_ins)) in
+                    groups.into_iter().zip(is_insert_flags.iter()).enumerate()
+                {
+                    if *is_ins {
+                        insertion_groups.push((k, group));
+                        continue;
+                    }
+                    let ordinal = group
+                        .ordinal
+                        .ok_or_else(|| Error::oos("Row group ordinal is missing"))?;
+                    let new_rows = group.num_rows;
+                    if removed.get(ordinal as usize).copied().unwrap_or(false) {
+                        return Err(Error::oos(format!(
+                            "Row group {} is both removed and replaced",
+                            ordinal
+                        )));
+                    }
+                    if (ordinal as usize) < original_rg_count {
+                        num_rows -= metadata.row_groups[ordinal as usize].num_rows;
+                        metadata.row_groups[ordinal as usize] = group;
+                        modified[ordinal as usize] = true;
+                        origins[ordinal as usize] = RowGroupOrigin::Written(k);
+                    } else {
+                        metadata.row_groups.push(group);
+                        origins.push(RowGroupOrigin::Written(k));
+                    }
+                    num_rows += new_rows;
+                }
+
+                // Build a mapping: for each position in the final row_groups list,
+                // record whether it came from an original (possibly cached) entry
+                // or is a freshly inserted/modified entry.
+                let mut sources: Vec<RowGroupSource> = (0..metadata.row_groups.len())
+                    .map(|i| {
+                        if i < original_rg_count && !modified[i] {
+                            RowGroupSource::Cached(i)
+                        } else {
+                            RowGroupSource::Fresh
+                        }
+                    })
+                    .collect();
+
+                // Phase 1b: removals, in original index space after the
+                // replacements and before the insertions. Insert positions are
+                // final positions that already exclude removed groups, so every
+                // removal must be applied before any insertion. Cached sources
+                // keep their original index, which is what the FooterCache is
+                // keyed by. remove() sized `removed` to the original count and
+                // rejected replaced groups; phase 1 rejected a replacement of a
+                // removed one.
+                debug_assert!(removed.len() <= original_rg_count);
+                for index in (0..removed.len()).rev() {
+                    if !removed[index] {
+                        continue;
+                    }
+                    debug_assert!(!modified[index]);
+                    // get(), not an index: a logic error must surface as an
+                    // Err, not a panic (a JNI abort).
+                    let row_group_num_rows = metadata
+                        .row_groups
+                        .get(index)
+                        .ok_or_else(|| {
+                            Error::oos(format!(
+                                "Row group removal index {} out of bounds for {} row groups",
+                                index,
+                                metadata.row_groups.len()
+                            ))
+                        })?
+                        .num_rows;
+                    num_rows = num_rows
+                        .checked_sub(row_group_num_rows)
+                        .filter(|&rows| rows >= 0)
+                        .ok_or_else(|| {
+                            Error::oos(format!(
+                                "Removing row group {} underflows the file row count {}",
+                                index, num_rows
+                            ))
+                        })?;
+                }
+                // One pass per lockstep vector: a Vec::remove per removed
+                // group would shift every later group each time.
+                if !removed.is_empty() {
+                    debug_assert_eq!(sources.len(), metadata.row_groups.len());
+                    debug_assert_eq!(origins.len(), metadata.row_groups.len());
+                    remove_marked(&mut metadata.row_groups, &removed);
+                    remove_marked(&mut sources, &removed);
+                    remove_marked(&mut origins, &removed);
+                }
+
+                // Phase 2: insertions in ascending ordinal order
+                // (stable sort: equal positions keep their write order)
+                let mut insertions: Vec<_> = insertion_groups
+                    .into_iter()
+                    .map(|(k, g)| {
+                        let pos = g.ordinal.unwrap_or(0) as usize;
+                        (pos, k, g)
+                    })
+                    .collect();
+                insertions.sort_by_key(|(pos, _, _)| *pos);
+
+                for (pos, k, group) in insertions {
+                    let adjusted_pos = pos.min(metadata.row_groups.len());
+                    num_rows += group.num_rows;
+                    metadata.row_groups.insert(adjusted_pos, group);
+                    sources.insert(adjusted_pos, RowGroupSource::Inserted);
+                    origins.insert(adjusted_pos, RowGroupOrigin::Written(k));
+                }
+                debug_assert_eq!(origins.len(), metadata.row_groups.len());
+
+                // Keep the ColumnIndex all-or-nothing across cached and new groups. A
+                // cached source group carries its ColumnIndex verbatim, but a newly
+                // written group with an opaque-Binary page that has an unbounded
+                // (max-less) max cannot supply one, so write_page_index emitted none for
+                // the new groups. Strip the cached groups' ColumnIndex too -- re-serialize
+                // them (Cached -> Fresh) with the pointer cleared -- so the footer never
+                // advertises a ColumnIndex on some row groups but not others. Their
+                // OffsetIndex and data offsets are untouched.
+                if source_column_indexed && !new_groups_have_column_index {
+                    for (i, source) in sources.iter_mut().enumerate() {
+                        if !matches!(source, RowGroupSource::Cached(_)) {
+                            continue;
+                        }
+                        let mut had_column_index = false;
+                        for column in &mut metadata.row_groups[i].columns {
+                            if column.column_index_offset.is_some() {
+                                column.column_index_offset = None;
+                                column.column_index_length = None;
+                                had_column_index = true;
+                            }
+                        }
+                        if had_column_index {
+                            *source = RowGroupSource::Fresh;
+                        }
+                    }
+                }
+
+                metadata.num_rows = num_rows;
+                match metadata.key_value_metadata.take() {
+                    None => metadata.key_value_metadata = key_value_metadata,
+                    Some(mut kv) => {
+                        if let Some(new_kv) = key_value_metadata {
+                            for new_entry in new_kv {
+                                if let Some(existing) =
+                                    kv.iter_mut().find(|e| e.key == new_entry.key)
+                                {
+                                    *existing = new_entry;
+                                } else {
+                                    kv.push(new_entry);
+                                }
+                            }
+                        }
+                        metadata.key_value_metadata = Some(kv);
+                    }
+                }
+
+                self.parquet_footer_offset = self.offset;
+                let len = end_file_incremental(&mut self.writer, metadata, footer_cache, &sources)?;
+                self.state = State::Finished;
+                self.row_group_origins = origins;
+                self.metadata = Some(metadata.clone());
+                Ok(self.offset + len)
+            }
+        }
+    }
+
+    pub fn into_inner(self) -> W {
+        self.writer
+    }
+
+    pub fn into_inner_and_metadata(self) -> (W, ThriftFileMetaData) {
+        (self.writer, self.metadata.expect("File to have ended"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs::File, io::Cursor};
+
+    use super::*;
+
+    use crate::error::Result;
+    use crate::read::read_metadata;
+    use crate::tests::get_path;
+
+    #[test]
+    fn empty_file() -> Result<()> {
+        let mut testdata = get_path();
+        testdata.push("alltypes_plain.parquet");
+        let mut file = File::open(testdata).unwrap();
+
+        let mut metadata = read_metadata(&mut file)?;
+
+        // take away all groups and rows
+        metadata.row_groups = vec![];
+        metadata.num_rows = 0;
+
+        let mut writer = Cursor::new(vec![]);
+
+        // write the file
+        start_file(&mut writer)?;
+        end_file(&mut writer, &metadata.into_thrift())?;
+
+        let a = writer.into_inner();
+
+        // read it again:
+        let result = read_metadata(&mut Cursor::new(a));
+        assert!(result.is_ok());
+
+        Ok(())
+    }
+
+    // ---------------------------------------------------------------
+    // Update-mode remove(): zero-column row groups keep the footer small;
+    // `total_byte_size` is a per-group marker.
+    // ---------------------------------------------------------------
+
+    use crate::schema::types::ParquetType;
+    use parquet_format_safe::thrift::protocol::TCompactInputProtocol;
+
+    type UpdResult<T> = std::result::Result<T, Error>;
+
+    fn marker_rg(marker: i64, rows: i64, ordinal: i16) -> RowGroup {
+        RowGroup::new(
+            vec![],
+            marker,
+            rows,
+            None::<Vec<SortingColumn>>,
+            None,
+            None,
+            ordinal,
+        )
+    }
+
+    fn marker_metadata(markers: &[i64], rows: &[i64]) -> ThriftFileMetaData {
+        let schema = SchemaDescriptor::new("m".to_string(), Vec::<ParquetType>::new());
+        ThriftFileMetaData::new(
+            2,
+            schema.into_thrift(),
+            rows.iter().sum(),
+            markers
+                .iter()
+                .zip(rows)
+                .enumerate()
+                .map(|(i, (&m, &r))| marker_rg(m, r, i as i16))
+                .collect(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+    }
+
+    fn serialize_footer(metadata: &ThriftFileMetaData) -> Vec<u8> {
+        let mut buf = Vec::new();
+        let mut prot = TCompactOutputProtocol::new(&mut buf);
+        metadata.write_to_out_protocol(&mut prot).unwrap();
+        buf
+    }
+
+    /// An updater over a zero-column source whose groups carry `markers` as
+    /// `total_byte_size` and `rows` as `num_rows`. The data region is `offset`
+    /// bytes of 0xAA, so end() output past it is only the page index + footer.
+    fn marker_updater(
+        markers: &[i64],
+        rows: &[i64],
+        cache: Option<FooterCache>,
+    ) -> ParquetFile<Cursor<Vec<u8>>> {
+        let offset = 64u64;
+        let mut cursor = Cursor::new(vec![0xAAu8; offset as usize]);
+        cursor.set_position(offset);
+        ParquetFile::new_updater(
+            cursor,
+            offset,
+            SchemaDescriptor::new("m".to_string(), Vec::<ParquetType>::new()),
+            WriteOptions {
+                write_statistics: false,
+                version: crate::write::Version::V2,
+                bloom_filter_fpp: 0.01,
+            },
+            None,
+            None,
+            marker_metadata(markers, rows),
+            cache,
+        )
+    }
+
+    /// Row group with no columns: only its ordinal / num_rows matter.
+    fn empty_group<'a>() -> RowGroupIter<'a, Error> {
+        crate::write::DynIter::new(std::iter::empty())
+    }
+
+    /// Reads back the footer end() wrote and returns (markers, num_rows).
+    fn read_back(file: ParquetFile<Cursor<Vec<u8>>>, end: u64) -> (Vec<i64>, i64, Vec<u8>) {
+        let footer_offset = file.parquet_footer_offset() as usize;
+        let bytes = file.into_inner().into_inner();
+        assert_eq!(bytes.len() as u64, end);
+        assert_eq!(&bytes[bytes.len() - 4..], b"PAR1");
+        let footer = &bytes[footer_offset..bytes.len() - 8];
+        let mut prot = TCompactInputProtocol::new(footer, usize::MAX);
+        let meta = ThriftFileMetaData::read_from_in_protocol(&mut prot).unwrap();
+        (
+            meta.row_groups
+                .iter()
+                .map(|rg| rg.total_byte_size)
+                .collect(),
+            meta.num_rows,
+            bytes,
+        )
+    }
+
+    /// Runs end() and returns its result with the number of elements that
+    /// `remove_marked` visited meanwhile, i.e. the length of each vector its
+    /// passes compacted, summed.
+    fn end_counting_remove_marked_visits(
+        file: &mut ParquetFile<Cursor<Vec<u8>>>,
+    ) -> UpdResult<(u64, usize)> {
+        // Drop counts left by earlier tests: libtest runs a test on its main
+        // thread, after others, when it cannot spawn a thread for it.
+        REMOVE_MARKED_VISITS.take();
+        let end = file.end(None)?;
+        Ok((end, REMOVE_MARKED_VISITS.take()))
+    }
+
+    #[test]
+    fn update_remove_middle_row_group() -> UpdResult<()> {
+        let mut file = marker_updater(&[10, 11, 12], &[5, 6, 7], None);
+        file.remove(1)?;
+        let end = file.end(None)?;
+        assert_eq!(
+            file.row_group_origins(),
+            &[
+                RowGroupOrigin::Existing { orig_idx: 0 },
+                RowGroupOrigin::Existing { orig_idx: 2 },
+            ]
+        );
+        let (markers, num_rows, bytes) = read_back(file, end);
+        assert_eq!(markers, vec![10, 12]);
+        assert_eq!(num_rows, 12);
+        // Nothing below the original size was written.
+        assert!(bytes[..64].iter().all(|&b| b == 0xAA));
+        Ok(())
+    }
+
+    #[test]
+    fn update_remove_first_and_last_row_groups() -> UpdResult<()> {
+        let mut file = marker_updater(&[10, 11, 12, 13], &[1, 2, 3, 4], None);
+        file.remove(3)?;
+        file.remove(0)?;
+        let end = file.end(None)?;
+        assert_eq!(
+            file.row_group_origins(),
+            &[
+                RowGroupOrigin::Existing { orig_idx: 1 },
+                RowGroupOrigin::Existing { orig_idx: 2 },
+            ]
+        );
+        let (markers, num_rows, _) = read_back(file, end);
+        assert_eq!(markers, vec![11, 12]);
+        assert_eq!(num_rows, 5);
+        Ok(())
+    }
+
+    #[test]
+    fn update_remove_then_insert_final_positions() -> UpdResult<()> {
+        // remove-rg-design.md 3.2 worked example over [A, B, C, D]:
+        // MERGE(A) -> replace(0) + insert(1); DROP(B) -> remove(1);
+        // COPY_O3 N -> insert(2); MERGE(C) -> replace(2); COPY(D).
+        let mut file = marker_updater(&[10, 11, 12, 13], &[1, 2, 3, 4], None);
+        file.write_raw_row_group(&[], marker_rg(20, 5, 0))?; // k=0: A1
+        file.insert(empty_group(), 1, &[])?; // k=1: A2
+        file.remove(1)?;
+        file.insert(empty_group(), 2, &[])?; // k=2: N
+        file.write_raw_row_group(&[], marker_rg(22, 7, 2))?; // k=3: C'
+        let end = file.end(None)?;
+        assert_eq!(
+            file.row_group_origins(),
+            &[
+                RowGroupOrigin::Written(0),
+                RowGroupOrigin::Written(1),
+                RowGroupOrigin::Written(2),
+                RowGroupOrigin::Written(3),
+                RowGroupOrigin::Existing { orig_idx: 3 },
+            ]
+        );
+        let (markers, num_rows, _) = read_back(file, end);
+        // Inserted zero-column groups have total_byte_size 0.
+        assert_eq!(markers, vec![20, 0, 0, 22, 13]);
+        // 10 - A(1) - B(2) - C(3) + A1(5) + C'(7) + inserts(0) = 16
+        assert_eq!(num_rows, 16);
+        Ok(())
+    }
+
+    #[test]
+    fn update_remove_with_append() -> UpdResult<()> {
+        let mut file = marker_updater(&[10, 11, 12], &[1, 2, 3], None);
+        file.remove(0)?;
+        file.append(empty_group(), &[])?; // k=0, ordinal None -> appended
+        let end = file.end(None)?;
+        assert_eq!(
+            file.row_group_origins(),
+            &[
+                RowGroupOrigin::Existing { orig_idx: 1 },
+                RowGroupOrigin::Existing { orig_idx: 2 },
+                RowGroupOrigin::Written(0),
+            ]
+        );
+        let (markers, num_rows, _) = read_back(file, end);
+        assert_eq!(markers, vec![11, 12, 0]);
+        assert_eq!(num_rows, 5);
+        Ok(())
+    }
+
+    #[test]
+    fn update_remove_all_but_insert() -> UpdResult<()> {
+        let mut file = marker_updater(&[10, 11], &[1, 2], None);
+        file.remove(0)?;
+        file.remove(1)?;
+        file.insert(empty_group(), 0, &[])?;
+        let end = file.end(None)?;
+        assert_eq!(file.row_group_origins(), &[RowGroupOrigin::Written(0)]);
+        let (markers, num_rows, _) = read_back(file, end);
+        assert_eq!(markers, vec![0]);
+        assert_eq!(num_rows, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn update_remove_preserves_cached_raw_bytes() -> UpdResult<()> {
+        // The cache holds different markers than the parsed metadata, so the
+        // output shows which one each surviving group was emitted from: a
+        // Cached source must still point at its ORIGINAL cache entry after
+        // the removal shifted it down.
+        let cache = FooterCache::from_footer_bytes(serialize_footer(&marker_metadata(
+            &[100, 101, 102, 103],
+            &[1, 2, 3, 4],
+        )))?;
+        let mut file = marker_updater(&[10, 11, 12, 13], &[1, 2, 3, 4], Some(cache));
+        file.remove(1)?;
+        file.write_raw_row_group(&[], marker_rg(22, 3, 2))?;
+        let end = file.end(None)?;
+        let (markers, num_rows, _) = read_back(file, end);
+        assert_eq!(markers, vec![100, 22, 103]);
+        assert_eq!(num_rows, 8);
+        Ok(())
+    }
+
+    #[test]
+    fn update_remove_rejects_invalid_calls() -> UpdResult<()> {
+        let mut file = marker_updater(&[10, 11, 12], &[1, 2, 3], None);
+        assert!(file.remove(-1).is_err());
+        assert!(file.remove(3).is_err());
+        assert!(file.remove(i32::MAX).is_err());
+        file.remove(1)?;
+        assert!(file.remove(1).is_err(), "double remove");
+        // replace-after-remove
+        let err = file.replace(empty_group(), Some(1), &[]).unwrap_err();
+        assert!(err.to_string().contains("removed"), "{err}");
+        // remove-after-replace
+        file.replace(empty_group(), Some(2), &[])?;
+        let err = file.remove(2).unwrap_err();
+        assert!(err.to_string().contains("replaced"), "{err}");
+        // an insert's position is not an original ordinal: remove(0) still
+        // works after an insert at final position 0.
+        file.insert(empty_group(), 0, &[])?;
+        file.remove(0)?;
+        let end = file.end(None)?;
+        let (markers, num_rows, _) = read_back(file, end);
+        assert_eq!(markers, vec![0, 0]);
+        assert_eq!(num_rows, 0);
+
+        let mut write_mode = ParquetFile::new(
+            Cursor::new(vec![]),
+            SchemaDescriptor::new("m".to_string(), Vec::<ParquetType>::new()),
+            WriteOptions {
+                write_statistics: false,
+                version: crate::write::Version::V2,
+                bloom_filter_fpp: 0.01,
+            },
+            None,
+        );
+        assert!(write_mode.remove(0).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn update_end_rejects_raw_replace_of_removed_group() -> UpdResult<()> {
+        // A raw row group carrying a removed ordinal bypasses replace()'s
+        // check; end() must still refuse the conflict.
+        let mut file = marker_updater(&[10, 11], &[1, 2], None);
+        file.remove(0)?;
+        file.write_raw_row_group(&[], marker_rg(20, 1, 0))?;
+        assert!(file.end(None).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn update_remove_rejects_row_count_underflow() -> UpdResult<()> {
+        let mut metadata = marker_metadata(&[10, 11], &[1, 2]);
+        metadata.num_rows = 1; // corrupt: less than the groups' sum
+        let offset = 64u64;
+        let mut cursor = Cursor::new(vec![0u8; offset as usize]);
+        cursor.set_position(offset);
+        let mut file = ParquetFile::new_updater(
+            cursor,
+            offset,
+            SchemaDescriptor::new("m".to_string(), Vec::<ParquetType>::new()),
+            WriteOptions {
+                write_statistics: false,
+                version: crate::write::Version::V2,
+                bloom_filter_fpp: 0.01,
+            },
+            None,
+            None,
+            metadata,
+            None,
+        );
+        file.remove(1)?;
+        let err = file.end(None).unwrap_err();
+        assert!(err.to_string().contains("underflows"), "{err}");
+        Ok(())
+    }
+
+    #[test]
+    fn update_remove_beyond_i16_ordinals() -> UpdResult<()> {
+        // Thrift ordinals are i16; a group past i16::MAX can still be removed.
+        let count = i16::MAX as usize + 2;
+        let markers: Vec<i64> = (0..count as i64).collect();
+        let rows = vec![1i64; count];
+        let mut file = marker_updater(&markers, &rows, None);
+        file.remove(count as i32 - 1)?;
+        file.end(None)?;
+        let meta = file.metadata().unwrap();
+        assert_eq!(meta.row_groups.len(), count - 1);
+        assert_eq!(meta.num_rows, count as i64 - 1);
+        Ok(())
+    }
+
+    #[test]
+    fn update_remove_head_half_of_max_row_groups() -> UpdResult<()> {
+        // The most row groups write_row_group lets a file have (i16 ordinals),
+        // the first half removed: every survivor moves to the head. The cache
+        // holds other markers than the parsed metadata, so the output shows
+        // that each survivor is emitted from its own original cache entry.
+        let count = i16::MAX as usize + 1;
+        let half = count / 2;
+        let markers: Vec<i64> = (0..count as i64).collect();
+        let cache_markers: Vec<i64> = (0..count as i64).map(|i| 100_000 + i).collect();
+        let rows = vec![1i64; count];
+        let cache = FooterCache::from_footer_bytes(serialize_footer(&marker_metadata(
+            &cache_markers,
+            &rows,
+        )))?;
+        let mut file = marker_updater(&markers, &rows, Some(cache));
+        for ordinal in 0..half {
+            file.remove(ordinal as i32)?;
+        }
+        let (end, visits) = end_counting_remove_marked_visits(&mut file)?;
+        // One pass over each lockstep vector (row groups, sources, origins),
+        // each visiting all 32,768 groups once: 3 x 32,768.
+        assert_eq!(visits, 98_304);
+        let expected_origins: Vec<RowGroupOrigin> = (half..count)
+            .map(|orig_idx| RowGroupOrigin::Existing { orig_idx })
+            .collect();
+        assert_eq!(file.row_group_origins(), expected_origins.as_slice());
+        let (markers, num_rows, _) = read_back(file, end);
+        let expected_markers: Vec<i64> = (half as i64..count as i64).map(|i| 100_000 + i).collect();
+        assert_eq!(markers, expected_markers);
+        assert_eq!(num_rows, half as i64);
+        Ok(())
+    }
+
+    #[test]
+    fn update_remove_scattered_groups_keeps_sources_aligned() -> UpdResult<()> {
+        // Removed groups at the head, in an adjacent run between survivors and
+        // at the tail, around a replaced group. The cache holds other markers
+        // than the parsed metadata: an unchanged survivor is emitted from its
+        // own original cache entry, the replaced group from its new metadata.
+        let cache = FooterCache::from_footer_bytes(serialize_footer(&marker_metadata(
+            &[100, 101, 102, 103, 104, 105, 106],
+            &[1, 2, 3, 4, 5, 6, 7],
+        )))?;
+        let mut file = marker_updater(
+            &[10, 11, 12, 13, 14, 15, 16],
+            &[1, 2, 3, 4, 5, 6, 7],
+            Some(cache),
+        );
+        file.remove(0)?;
+        file.remove(2)?;
+        file.remove(3)?;
+        file.remove(6)?;
+        file.write_raw_row_group(&[], marker_rg(24, 9, 4))?; // k=0 replaces group 4
+        let end = file.end(None)?;
+        assert_eq!(
+            file.row_group_origins(),
+            &[
+                RowGroupOrigin::Existing { orig_idx: 1 },
+                RowGroupOrigin::Written(0),
+                RowGroupOrigin::Existing { orig_idx: 5 },
+            ]
+        );
+        let (markers, num_rows, _) = read_back(file, end);
+        assert_eq!(markers, vec![101, 24, 105]);
+        // 28 - group 4 (5) + its replacement (9) - removed (1 + 3 + 4 + 7) = 17
+        assert_eq!(num_rows, 17);
+        Ok(())
+    }
+
+    #[test]
+    fn update_remove_nothing_keeps_every_row_group() -> UpdResult<()> {
+        // A replacement and an insertion, but no removal: every original
+        // group stays, in order, unchanged ones emitted from the cache.
+        let cache = FooterCache::from_footer_bytes(serialize_footer(&marker_metadata(
+            &[100, 101, 102],
+            &[1, 2, 3],
+        )))?;
+        let mut file = marker_updater(&[10, 11, 12], &[1, 2, 3], Some(cache));
+        file.write_raw_row_group(&[], marker_rg(21, 4, 1))?; // k=0 replaces group 1
+        file.insert(empty_group(), 0, &[])?; // k=1 at final position 0
+        let (end, visits) = end_counting_remove_marked_visits(&mut file)?;
+        // No compaction pass runs. The output cannot show that: a pass with
+        // no marks keeps every group.
+        assert_eq!(visits, 0);
+        assert_eq!(
+            file.row_group_origins(),
+            &[
+                RowGroupOrigin::Written(1),
+                RowGroupOrigin::Existing { orig_idx: 0 },
+                RowGroupOrigin::Written(0),
+                RowGroupOrigin::Existing { orig_idx: 2 },
+            ]
+        );
+        let (markers, num_rows, _) = read_back(file, end);
+        // Inserted zero-column groups have total_byte_size 0.
+        assert_eq!(markers, vec![0, 100, 21, 102]);
+        // 6 - group 1 (2) + its replacement (4) + the insert (0) = 8
+        assert_eq!(num_rows, 8);
+        Ok(())
+    }
+
+    #[test]
+    fn update_remove_only_row_group_leaves_no_row_groups() -> UpdResult<()> {
+        let mut file = marker_updater(&[10], &[5], None);
+        file.remove(0)?;
+        let end = file.end(None)?;
+        assert_eq!(file.row_group_origins(), &[] as &[RowGroupOrigin]);
+        let (markers, num_rows, _) = read_back(file, end);
+        assert_eq!(markers, Vec::<i64>::new());
+        assert_eq!(num_rows, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn row_group_origins_write_mode_is_identity() -> UpdResult<()> {
+        let mut file = ParquetFile::new(
+            Cursor::new(vec![]),
+            SchemaDescriptor::new("m".to_string(), Vec::<ParquetType>::new()),
+            WriteOptions {
+                write_statistics: false,
+                version: crate::write::Version::V2,
+                bloom_filter_fpp: 0.01,
+            },
+            None,
+        );
+        file.write(empty_group(), &[])?;
+        file.write(empty_group(), &[])?;
+        file.end(None)?;
+        assert_eq!(
+            file.row_group_origins(),
+            &[RowGroupOrigin::Written(0), RowGroupOrigin::Written(1)]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn boundary_order_follows_sorting_columns() {
+        // No sorting columns at all -> every column is UNORDERED.
+        assert_eq!(
+            boundary_order_for_column(&None, 0),
+            BoundaryOrder::UNORDERED
+        );
+
+        let ascending = Some(vec![SortingColumn::new(2, false, false)]);
+        // The declared sorting column gets ASCENDING.
+        assert_eq!(
+            boundary_order_for_column(&ascending, 2),
+            BoundaryOrder::ASCENDING
+        );
+        // Other columns in the same file stay UNORDERED.
+        assert_eq!(
+            boundary_order_for_column(&ascending, 0),
+            BoundaryOrder::UNORDERED
+        );
+
+        // A descending sorting column gets DESCENDING.
+        let descending = Some(vec![SortingColumn::new(0, true, false)]);
+        assert_eq!(
+            boundary_order_for_column(&descending, 0),
+            BoundaryOrder::DESCENDING
+        );
+
+        // Multi-column sort: only the primary (first) column has globally
+        // monotonic page bounds. The secondary column stays UNORDERED even
+        // though it is listed in sorting_columns, since its per-page bounds are
+        // not monotonic across the row group.
+        let multi = Some(vec![
+            SortingColumn::new(1, false, false),
+            SortingColumn::new(3, true, false),
+        ]);
+        assert_eq!(
+            boundary_order_for_column(&multi, 1),
+            BoundaryOrder::ASCENDING
+        );
+        assert_eq!(
+            boundary_order_for_column(&multi, 3),
+            BoundaryOrder::UNORDERED
+        );
+    }
+}

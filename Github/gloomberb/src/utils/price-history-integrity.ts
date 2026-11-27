@@ -1,0 +1,293 @@
+import { medianBarGap } from "../time-series/bar-spacing";
+import type { PricePoint } from "../types/financials";
+import { isFiniteNumber } from "./guards";
+
+type ReportedPricePoint = Readonly<Omit<PricePoint, "date" | "historySource"> & {
+  date: string;
+  historySource?: Readonly<NonNullable<PricePoint["historySource"]>>;
+}>;
+
+export interface PriceHistoryIntegrity {
+  readonly reason: "inconsistent-ohlc";
+  /** Original reported values, retained for inspection, never used as replacements. */
+  readonly sourcePoints: ReadonlyArray<ReportedPricePoint>;
+}
+
+function snapshotReportedPoint(point: ReportedPricePoint): ReportedPricePoint {
+  return Object.freeze({ ...point, ...(point.historySource ? { historySource: Object.freeze({ ...point.historySource }) } : {}) });
+}
+
+export function mergePriceHistoryIntegrity(...entries: readonly PriceHistoryIntegrity[]): PriceHistoryIntegrity {
+  return Object.freeze({
+    reason: "inconsistent-ohlc",
+    sourcePoints: Object.freeze(entries.flatMap((entry) => entry.sourcePoints.map(snapshotReportedPoint))),
+  });
+}
+
+function above(left: number, right: number): boolean {
+  return left - right > 8 * Number.EPSILON * Math.max(Math.abs(left), Math.abs(right));
+}
+
+/** Each way a bar's prices contradict each other, its open's included (pricePointIntegrityFlags). */
+function contradictionFlags(point: PricePoint): string[] {
+  const { open, high, low, close } = point;
+  const flags: string[] = [];
+  for (const [name, value] of [["open", open], ["close", close]] as const) {
+    if (isFiniteNumber(value) && isFiniteNumber(high) && above(value, high)) flags.push(`high<${name}`);
+  }
+  for (const [name, value] of [["open", open], ["close", close]] as const) {
+    if (isFiniteNumber(value) && isFiniteNumber(low) && above(low, value)) flags.push(`low>${name}`);
+  }
+  if (isFiniteNumber(high) && isFiniteNumber(low) && above(low, high)) flags.push("low>high");
+  return flags;
+}
+
+/** Whether a contradiction is the open's alone: above the high or under the low. */
+const isOpenContradiction = (code: string) => code === "high<open" || code === "low>open";
+
+/**
+ * Each way a bar's prices contradict each other, as short codes such as
+ * `high<open` or `low>close`, which blank the bar whole; empty when they
+ * agree. An open alone outside a range its high, low and close agree on
+ * does not blank the bar: only the open is withheld (pricePointOpenWithheld).
+ * Missing OHLC fields are not contradictory: close-only histories remain
+ * usable.
+ */
+export function pricePointIntegrityFlags(point: PricePoint): string[] {
+  const flags = contradictionFlags(point);
+  return flags.every(isOpenContradiction) ? [] : flags;
+}
+
+/** What a bar whose open alone contradicts its range is flagged with, in `history` and HP. */
+export const OPEN_WITHHELD_FLAG = "open withheld";
+
+/** A currency pair's bar whose close the server rebuilt from the next session's open: the source repeated its open as its close. */
+export const CLOSE_REBUILT_FLAG = "close rebuilt";
+/** A currency pair's bar whose source repeated its open as its close, which no next open in its week rebuilds. */
+export const CLOSE_COPIED_FLAG = "close copied";
+
+/**
+ * Whether a bar's close is its source's copy of its open, which no next open
+ * in its week rebuilds (a Friday's, or one the next open is outside the range
+ * of): no day's close. A return into or out of it is no day's move, so
+ * return-based functions leave the bar out.
+ */
+export function pricePointCloseCopied(point: Pick<PricePoint, "closeCopied">): boolean {
+  return point.closeCopied === true;
+}
+
+/**
+ * Whether a bar's open alone contradicts its range: above its high or under
+ * its low, while the high, low and close agree. MTN on the JSE, 30 Oct 2026:
+ * open 193.05 under a low of 194.86, high 204.65, close 198.41, the open of
+ * a session the source copied. Only the open is withheld; the high, low,
+ * close and volume stand, so closes, returns and ranges read the bar.
+ */
+export function pricePointOpenWithheld(point: PricePoint): boolean {
+  const flags = contradictionFlags(point);
+  return flags.length > 0 && flags.every(isOpenContradiction);
+}
+
+/**
+ * A wick too far from its bar's body to have traded: a low under half the lower
+ * of open and close, or a high over twice the higher, as `low<close/2` or
+ * `high>2*open` (IAG on LSE, 2021-11-29: a low of 0.0155 under a close of
+ * 1.316). Only that wick is withheld: the open and close stand, so closes,
+ * returns and drawdowns read the bar while lows, highs and ranges do not.
+ * Empty when the wicks are plausible, or when the bar's prices contradict
+ * each other, which blanks it whole (pricePointIntegrityFlags).
+ */
+export function pricePointWickFlags(point: PricePoint): string[] {
+  const { high, low, close } = point;
+  if (pricePointIntegrityFlags(point).length > 0) return [];
+  // A withheld open is no part of the body the wicks are held to.
+  const open = pricePointOpenWithheld(point) ? undefined : point.open;
+  const body = [["open", open], ["close", close]].filter((entry): entry is [string, number] => isFiniteNumber(entry[1]));
+  if (body.length === 0) return [];
+  // On a tie the close names the side, as the price the bar is read by.
+  const [bottomName, bottom] = body.reduce((least, entry) => entry[1] <= least[1] ? entry : least);
+  const [topName, top] = body.reduce((most, entry) => entry[1] >= most[1] ? entry : most);
+  const flags: string[] = [];
+  if (isFiniteNumber(low) && bottom > 0 && low < bottom / 2) flags.push(`low<${bottomName}/2`);
+  if (isFiniteNumber(high) && top > 0 && high > top * 2) flags.push(`high>2*${topName}`);
+  return flags;
+}
+
+/** Whether a flag code is a withheld wick (pricePointWickFlags), whose bar keeps its open and close. */
+export function isWickFlag(code: string): boolean {
+  return /^(low<(open|close)\/2|high>2\*(open|close))$/.test(code);
+}
+
+/** A bar's high and low with a wick too far from its body to have traded (pricePointWickFlags) left out. */
+export function pricePointWicks(point: PricePoint): { high: number | undefined; low: number | undefined } {
+  const flags = pricePointWickFlags(point);
+  return {
+    high: flags.some((flag) => flag.startsWith("high")) ? undefined : point.high,
+    low: flags.some((flag) => flag.startsWith("low")) ? undefined : point.low,
+  };
+}
+
+/**
+ * "2 bars came from the source at a tenth or a hundredth of their price; shown scaled back to the bars around them.",
+ * or undefined for none: the bars served in the wrong unit (`PricePoint.rescaled`), as `history` flags them rescaled.
+ */
+export function priceHistoryRescaleNotice(points: readonly Pick<PricePoint, "rescaled">[]): string | undefined {
+  const count = points.filter(({ rescaled }) => rescaled != null && Number.isFinite(rescaled) && rescaled > 0 && rescaled !== 1).length;
+  return count > 0
+    ? `${count === 1 ? "1 bar" : `${count} bars`} came from the source in the wrong unit; shown scaled back to the bars around ${count === 1 ? "it" : "them"}.`
+    : undefined;
+}
+
+/** "1 bar has an open outside its high and low; the open is withheld, the rest of the bar kept.", or undefined for none. */
+export function priceHistoryOpenNotice(count: number): string | undefined {
+  return count > 0
+    ? `${count === 1 ? "1 bar has an open" : `${count} bars have opens`} outside ${count === 1 ? "its" : "their"} high and low; ${count === 1 ? "the open is" : "those opens are"} withheld, the rest of ${count === 1 ? "the bar" : "each bar"} kept.`
+    : undefined;
+}
+
+/** "1 bar has a low or high too far from its open and close to have traded; left out of ranges.", or undefined for none. */
+export function priceHistoryWickNotice(count: number): string | undefined {
+  return count > 0
+    ? `${count === 1 ? "1 bar has a low or high" : `${count} bars have lows or highs`} too far from ${count === 1 ? "its" : "their"} open and close to have traded; left out of ranges.`
+    : undefined;
+}
+
+export function pricePointIntegrity(point: PricePoint): PriceHistoryIntegrity | undefined {
+  if (pricePointIntegrityFlags(point).length === 0) return undefined;
+  const date = new Date(point.date);
+  return Object.freeze({
+    reason: "inconsistent-ohlc",
+    sourcePoints: Object.freeze([snapshotReportedPoint({ ...point, date: Number.isFinite(date.getTime()) ? date.toISOString() : String(point.date) })]),
+  });
+}
+
+/** Calculation/display fields deliberately exclude the contradictory source row. */
+export function pricePointValues(point: PricePoint, integrity = pricePointIntegrity(point)) {
+  const value = (number: number | undefined) => !integrity && isFiniteNumber(number) ? number : null;
+  // A wick too far from the body to have traded is left out; the rest of the bar stands.
+  const wicks = pricePointWicks(point);
+  return {
+    // An open alone outside the bar's range is withheld; the rest of the bar stands (pricePointOpenWithheld).
+    open: pricePointOpenWithheld(point) ? null : value(point.open), high: value(wicks.high), low: value(wicks.low),
+    close: value(point.close), volume: value(point.volume),
+    ...(integrity ? { integrity } : {}),
+  };
+}
+
+/** What every price view says of the bars it shows whose prices contradict each other. */
+export const CONTRADICTORY_PRICES = "contradictory prices";
+
+/**
+ * "2 bars have contradictory prices; left blank.", or undefined for none: the bars a view shows blank because their
+ * high, low, open and close contradict each other. Only views that show those bars say it; a figure read across them
+ * names itself instead (priceReturnIntegrityNotice).
+ */
+export function priceHistoryIntegrityNotice(count: number): string | undefined {
+  return count > 0
+    ? `${count === 1 ? "1 bar has" : `${count} bars have`} ${CONTRADICTORY_PRICES}; left blank.`
+    : undefined;
+}
+
+/** What a bar without volume shows in a history that reports volume: missing, never 0. */
+export const MISSING_VOLUME_TEXT = "\u2014";
+
+/**
+ * "2 of 178 bars have no reported volume (\u2014)": the bars of a history that reports volume whose own is missing,
+ * such as a coin's hours its trading venues did not report, which are never read as 0. `missing` counts only bars
+ * without a reason of their own (still forming, rebuilt, prices left blank as contradictory, the latest trade).
+ * Undefined when there are none.
+ */
+export function missingVolumeNotice(missing: number, total: number): string | undefined {
+  if (missing <= 0) return undefined;
+  return `${missing} of ${total} ${missing === 1 && total === 1 ? "bar" : "bars"} ${missing === 1 ? "has" : "have"} no reported volume (${MISSING_VOLUME_TEXT})`;
+}
+
+/** Bars spaced less than this apart are intraday; daily bars can be stamped at a session open, hours from midnight. */
+const INTRADAY_BAR_MAX_MS = 20 * 60 * 60 * 1000;
+
+/**
+ * Where a history's newest point is the latest trade instead of a bar, else -1. Some sources end an intraday history
+ * with the latest trade stamped at its own time, inside the bar before it (15:57:53 after the 15:00 bar of hourly
+ * bars): less than a bar after it, off the bars' grid. It belongs to that bar, as charts fold it in (live-bars.ts), so
+ * it has no volume of its own and is never a bar without reported volume. `times` may be in any order.
+ */
+export function latestTradeIndex(times: readonly number[]): number {
+  const order = times.map((time, index) => ({ time, index }))
+    .filter(({ time }) => Number.isFinite(time))
+    .sort((left, right) => left.time - right.time);
+  if (order.length < 3) return -1;
+  const last = order.at(-1)!;
+  const gap = last.time - order.at(-2)!.time;
+  const step = medianBarGap(order.slice(0, -1).map(({ time }) => time));
+  return step != null && step < INTRADAY_BAR_MAX_MS && gap > 0 && gap < step ? last.index : -1;
+}
+
+/** A bar's time, whether it carries a Date, an ISO date or a timestamp; NaN without one. */
+function barTime(date: Date | string | number | undefined): number {
+  if (date instanceof Date) return date.getTime();
+  if (typeof date === "number") return date;
+  return typeof date === "string" ? Date.parse(date) : Number.NaN;
+}
+
+/** The fields priceOnlyPoint reads of a bar, as a price point, a history row or a chart point carries them. */
+export interface PriceOnlyCandidate {
+  date?: Date | string | number;
+  open?: number | null;
+  high?: number | null;
+  low?: number | null;
+  close?: number | null;
+  volume?: number | null;
+}
+
+/**
+ * Where an intraday history's newest point is a price on its own rather than a bar, or null. Either the latest trade
+ * off the bars' grid, inside the bar before it (latestTradeIndex), or a price some sources stamp as a bar after the
+ * last one: one price for its open, high, low and close, with a volume of 0 or none, after a bar that traded, at a
+ * price of its own or a bar's time or more after it. That one is a session's closing auction price at several venues
+ * (15:30 in Tokyo after the 15:20 bar), whose shares are in the day's bar and not in this point. Neither has volume of
+ * its own: a 0 there is no bar that traded nothing, and no view shows or counts it as one. A thin listing's bar that
+ * traded nothing repeats the close before it on the grid and keeps its 0, as does a day's flat bar without volume.
+ * `bars` may be in any order.
+ */
+export function priceOnlyPoint(bars: readonly PriceOnlyCandidate[]): { index: number; insideBar: boolean } | null {
+  const times = bars.map((bar) => barTime(bar.date));
+  const latestTrade = latestTradeIndex(times);
+  if (latestTrade >= 0) return { index: latestTrade, insideBar: true };
+  const order = times.map((time, index) => ({ time, index }))
+    .filter(({ time }) => Number.isFinite(time))
+    .sort((left, right) => left.time - right.time);
+  if (order.length < 3) return null;
+  const step = medianBarGap(order.slice(0, -1).map(({ time }) => time));
+  if (step == null || step >= INTRADAY_BAR_MAX_MS) return null;
+  const last = bars[order.at(-1)!.index]!;
+  const before = bars[order.at(-2)!.index]!;
+  const price = last.close;
+  const flat = isFiniteNumber(price) && last.open === price && last.high === price && last.low === price;
+  const traded = isFiniteNumber(before.volume) && before.volume > 0;
+  const apart = price !== before.close || order.at(-1)!.time - order.at(-2)!.time > step;
+  return flat && !last.volume && traded && apart ? { index: order.at(-1)!.index, insideBar: false } : null;
+}
+
+/**
+ * The bars with a price-only point's volume (priceOnlyPoint) of 0 read as none, so no table prints 0 for it and no
+ * chart draws or reads a column of it. The same array when there is none to clear.
+ */
+export function withoutPriceOnlyVolume<T extends PriceOnlyCandidate>(bars: T[]): T[] {
+  const point = priceOnlyPoint(bars);
+  if (!point || bars[point.index]!.volume !== 0) return bars;
+  return bars.map((bar, index) => index === point.index ? { ...bar, volume: null } as T : bar);
+}
+
+/**
+ * The bars of a history that reports volume left without it for no reason of their own: not still forming, not
+ * rebuilt from hourly bars, not blank for contradictory prices and not a price on its own (priceOnlyPoint), as
+ * `history` counts them. 0 for a history that reports no volume at all, such as an index or a currency pair.
+ */
+export function missingVolumeCount(bars: readonly (PriceOnlyCandidate & {
+  volume: number | null; integrity?: unknown; partial?: boolean; filled?: boolean;
+})[]): number {
+  if (!bars.some((bar) => bar.volume != null)) return 0;
+  const priceOnly = priceOnlyPoint(bars)?.index;
+  return bars.filter((bar, index) => bar.volume == null && !bar.integrity && !bar.partial && !bar.filled
+    && index !== priceOnly).length;
+}

@@ -1,0 +1,231 @@
+import { rollAdjustedHistory } from "../../../../market-data/futures-roll-returns";
+import { pricePointIntegrity, type PriceHistoryIntegrity } from "../../../../utils/price-history-integrity";
+import type { QueryEntry } from "../../../../market-data/result-types";
+import { colors } from "../../../../theme/colors";
+import type { PricePoint } from "../../../../types/financials";
+import { dailyCloses, correlateDailyCloses, type ChangeBasis, type CorrelationResult, type DailyClose } from "../compute";
+import { geoSeriesToken } from "../geo";
+import type { CorrelationRangePreset } from "../settings";
+import { clipPriceHistoryToRange } from "../../../../time-series/history-window";
+
+export const ROW_HEADER_WIDTH = 7;
+/** Cells grow with the pane up to this, so a small matrix still reads at a comfortable size. */
+export const MATRIX_CELL_WIDTH = 15;
+export const MIN_MATRIX_CELL_WIDTH = 7;
+const MIN_CORRELATION_OBSERVATIONS = 5;
+
+export type SeriesStatus = "loading" | "ready" | "insufficient" | "empty" | "error";
+
+export interface CorrelationSeries {
+  symbol: string;
+  prices: DailyClose[];
+  /** Prices correlate returns; a map series correlates its daily change. */
+  basis?: ChangeBasis;
+  status: SeriesStatus;
+  observationCount: number;
+  /** Bars left out because their prices contradict each other, kept as the source reported them. */
+  integrity?: PriceHistoryIntegrity[];
+  /** A continuous future's returns, read within one contract at each roll: "rolls back-adjusted" (rollAdjustedHistory). */
+  rollNote?: string;
+  loading?: boolean;
+  refreshError?: string;
+  fetchedAt?: number | null;
+}
+
+/** A map series shows its alias (HORMUZ, SUEZ.TANKER): the GEO prefix would leave no room for the name. */
+export function displaySymbol(symbol: string): string {
+  const geo = geoSeriesToken(symbol);
+  if (geo) return geo.length > 10 ? geo.slice(0, 10) : geo;
+  return symbol.length > 5 ? symbol.slice(0, 5) : symbol;
+}
+
+export function pairKey(left: string, right: string): string {
+  return `${left}\u0000${right}`;
+}
+
+function formatSymbolList(symbols: string[]): string {
+  if (symbols.length <= 3) return symbols.join(", ");
+  return `${symbols.slice(0, 3).join(", ")} +${symbols.length - 3}`;
+}
+
+function formatSeriesSymbolList(symbols: string[], seriesBySymbol: Map<string, CorrelationSeries>, includeCounts = false): string {
+  return formatSymbolList(symbols.map((symbol) => {
+    const series = seriesBySymbol.get(symbol);
+    return includeCounts && series ? `${symbol}(${series.observationCount})` : symbol;
+  }));
+}
+
+export function getSeriesForEntry(
+  symbol: string,
+  entry: QueryEntry<PricePoint[]> | undefined,
+  range?: CorrelationRangePreset,
+): CorrelationSeries {
+  const priceHistory = entry?.data ?? entry?.lastGoodData ?? null;
+
+  if (!priceHistory || priceHistory.length === 0) {
+    if (entry?.error?.reasonCode === "NO_DATA") {
+      return { symbol, prices: [], status: "empty", observationCount: 0 };
+    }
+    if (entry?.phase === "error" || entry?.error) {
+      return {
+        symbol,
+        prices: [],
+        status: "error",
+        observationCount: 0,
+        refreshError: entry.error?.message,
+      };
+    }
+    return { symbol, prices: [], status: "loading", observationCount: 0 };
+  }
+
+  return {
+    ...buildCorrelationSeries(symbol, range ? clipPriceHistoryToRange(priceHistory, range) : priceHistory),
+    loading: entry?.phase === "loading" || entry?.phase === "refreshing",
+    refreshError: entry?.error?.message,
+    fetchedAt: entry?.fetchedAt,
+  };
+}
+
+/**
+ * A ticker's daily closes as `history` reads them: a bar whose prices
+ * contradict each other is a gap (dailyCloses), not a reason to drop the
+ * whole series, and is kept in `integrity` as the source reported it.
+ */
+export function buildCorrelationSeries(symbol: string, history: readonly PricePoint[]): CorrelationSeries {
+  const integrity = history.flatMap((point) => { const issue = pricePointIntegrity(point); return issue ? [issue] : []; });
+  // The closes are read for returns alone: a continuous future's are each one contract's.
+  const returns = rollAdjustedHistory(history, symbol);
+  const prices = dailyCloses(returns.points);
+  const observationCount = Math.max(0, prices.length - 1);
+  return {
+    symbol, prices, observationCount,
+    status: observationCount < MIN_CORRELATION_OBSERVATIONS ? "insufficient" : "ready",
+    ...(integrity.length ? { integrity } : {}),
+    ...(returns.note ? { rollNote: returns.note } : {}),
+  };
+}
+
+/** A map series' values as a matrix input: zero counts are kept, changes are level differences. */
+export function buildGeoCorrelationSeries(symbol: string, values: DailyClose[]): CorrelationSeries {
+  const observationCount = Math.max(0, values.length - 1);
+  return {
+    symbol, prices: values, basis: "difference", observationCount,
+    status: values.length === 0 ? "empty" : observationCount < MIN_CORRELATION_OBSERVATIONS ? "insufficient" : "ready",
+  };
+}
+
+export function rowHeaderColor(status: SeriesStatus): string {
+  switch (status) {
+    case "loading":
+      return colors.textDim;
+    case "error":
+    case "empty":
+      return colors.negative;
+    case "insufficient":
+      return colors.textMuted;
+    case "ready":
+      return colors.textBright;
+  }
+}
+
+export function buildCorrelationMatrix(
+  symbols: string[],
+  seriesBySymbol: Map<string, CorrelationSeries>,
+): {
+  results: Map<string, CorrelationResult>;
+  sampleMin: number | null;
+  sampleMax: number | null;
+  hasThinPair: boolean;
+} {
+  const results = new Map<string, CorrelationResult>();
+  const sampleSizes: number[] = [];
+  let hasThinPair = false;
+
+  for (let rowIndex = 0; rowIndex < symbols.length; rowIndex++) {
+    for (let colIndex = 0; colIndex < symbols.length; colIndex++) {
+      const rowSym = symbols[rowIndex]!;
+      const colSym = symbols[colIndex]!;
+      const rowSeries = seriesBySymbol.get(rowSym);
+      const colSeries = seriesBySymbol.get(colSym);
+      const result = rowSeries && colSeries
+        ? correlateDailyCloses(rowSeries.prices, colSeries.prices, MIN_CORRELATION_OBSERVATIONS, rowSeries.basis, colSeries.basis)
+        : { correlation: null, sampleSize: 0 };
+      results.set(pairKey(rowSym, colSym), result);
+      if (rowIndex < colIndex) {
+        if (result.sampleSize > 0) sampleSizes.push(result.sampleSize);
+        if (result.correlation == null && result.sampleSize < MIN_CORRELATION_OBSERVATIONS) hasThinPair = true;
+      }
+    }
+  }
+
+  return {
+    results,
+    sampleMin: sampleSizes.length > 0 ? Math.min(...sampleSizes) : null,
+    sampleMax: sampleSizes.length > 0 ? Math.max(...sampleSizes) : null,
+    hasThinPair,
+  };
+}
+
+export function buildStatusSummary(
+  symbols: string[],
+  seriesBySymbol: Map<string, CorrelationSeries>,
+  sampleMin: number | null,
+  sampleMax: number | null,
+  hasThinPair = false,
+): string {
+  const parts: string[] = [];
+  const byStatus = (status: SeriesStatus) => symbols.filter((symbol) => seriesBySymbol.get(symbol)?.status === status);
+
+  const loading = symbols.filter((symbol) => seriesBySymbol.get(symbol)?.status === "loading" || seriesBySymbol.get(symbol)?.loading);
+  const errors = [...byStatus("error"), ...byStatus("empty")];
+  const insufficient = byStatus("insufficient");
+
+  if (loading.length > 0) parts.push(`Loading: ${formatSeriesSymbolList(loading, seriesBySymbol)}`);
+  if (errors.length > 0) parts.push(`No data: ${formatSeriesSymbolList(errors, seriesBySymbol)}`);
+  if (insufficient.length > 0) parts.push(`Need history: ${formatSeriesSymbolList(insufficient, seriesBySymbol, true)}`);
+
+  if (sampleMin != null && sampleMax != null) {
+    parts.push(sampleMin === sampleMax ? `obs ${sampleMin}` : `obs ${sampleMin}-${sampleMax}`);
+  } else if (symbols.length >= 2) {
+    parts.push("No paired dates yet");
+  }
+
+  // Only legend the blank cells when at least one pair actually has too few
+  // shared dates to correlate.
+  if (hasThinPair) parts.push(`- <${MIN_CORRELATION_OBSERVATIONS} shared`);
+  return parts.join(" · ");
+}
+
+/** "NG=F: rolls back-adjusted" for each listed continuous future, as GR says it: the pane's footer and `fn CORR`'s notes. */
+export function correlationRollNotes(symbols: readonly string[], seriesBySymbol: ReadonlyMap<string, CorrelationSeries>): string[] {
+  return symbols.flatMap((symbol) => {
+    const note = seriesBySymbol.get(symbol)?.rollNote;
+    return note ? [`${symbol}: ${note}`] : [];
+  });
+}
+
+/**
+ * What the matrix says under itself for the selected cell: each of its
+ * symbols' rolls and failed refresh, then the pair's own note. A note about
+ * one symbol is said where that symbol is selected, never in the footer.
+ */
+export function matrixCellNotes(symbols: readonly string[], seriesBySymbol: ReadonlyMap<string, CorrelationSeries>, pairNote: string | null): string[] {
+  return [
+    ...correlationRollNotes(symbols, seriesBySymbol).map((note) => `${note.replace(/\.$/, "")}.`),
+    ...symbols.flatMap((symbol) => {
+      const series = seriesBySymbol.get(symbol);
+      return series?.refreshError
+        ? [`${symbol}: ${series.refreshError}${series.fetchedAt ? ` Retained history retrieved ${new Date(series.fetchedAt).toISOString()}.` : ""}`]
+        : [];
+    }),
+    ...(pairNote ? [pairNote] : []),
+  ];
+}
+
+/**
+ * The matrix already labels every symbol on both axes and the pane now carries
+ * its own range control, so the title stays generic instead of repeating them.
+ */
+export function buildCorrelationPaneTitle(): string {
+  return "Correlation";
+}

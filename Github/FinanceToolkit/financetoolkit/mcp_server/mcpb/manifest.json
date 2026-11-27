@@ -1,0 +1,190 @@
+{
+  "manifest_version": "0.4",
+  "name": "finance-toolkit",
+  "display_name": "Finance Toolkit",
+  "version": "2.4.0",
+  "description": "Give AI assistants access to 1100+ financial methods calculated transparently from raw financial statements, not pulled from third-party endpoints.",
+  "long_description": "The Finance Toolkit gives AI assistants access to 1100+ financial methods calculated transparently from raw financial statements. This includes financial statements, historical prices, analyst estimates, 100+ fundamental ratios, 55+ technical indicators, 85+ risk and performance metrics, 45+ econometric tests and estimators, and 90+ macro and fixed income indicators.\n\nA Financial Modeling Prep API key is required to access 30+ years of financial data. Obtain one at [jeroenbouma.com/fmp](https://jeroenbouma.com/fmp). Authenticate once via OAuth, no key is stored on the server. Rate limit fallback to Yahoo Finance is built in, and macro databases from OECD and GMDB are accessed independently.",
+  "author": {
+    "name": "Jeroen Bouma",
+    "email": "jer.bouma@gmail.com",
+    "url": "https://www.jeroenbouma.com"
+  },
+  "icon": "finance_toolkit_icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/JerBouma/FinanceToolkit"
+  },
+  "homepage": "https://www.jeroenbouma.com/projects/financetoolkit/mcp",
+  "documentation": "https://www.jeroenbouma.com/projects/financetoolkit/mcp",
+  "support": "https://github.com/JerBouma/FinanceToolkit/issues",
+  "license": "MIT",
+  "keywords": [
+    "finance",
+    "financial",
+    "stocks",
+    "equities",
+    "ratios",
+    "economics",
+    "indicators",
+    "options",
+    "fixed-income",
+    "technical-analysis",
+    "risk",
+    "performance",
+    "esg"
+  ],
+  "server": {
+    "type": "uv",
+    "entry_point": "financetoolkit/mcp_server/mcp_controller.py",
+    "mcp_config": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory",
+        "${__dirname}",
+        "-m",
+        "financetoolkit.mcp_server.mcp_controller"
+      ],
+      "env": {
+        "FINANCIAL_MODELING_PREP_API_KEY": "${user_config.api_key}"
+      }
+    }
+  },
+  "user_config": {
+    "api_key": {
+      "type": "string",
+      "title": "Financial Modeling Prep API Key",
+      "description": "Obtain a key at  https://www.jeroenbouma.com/fmp",
+      "required": true,
+      "sensitive": true
+    }
+  },
+  "tools": [
+    {
+      "name": "efficiency",
+      "description": "Efficiency ratios from the financial statements: asset, fixed asset, inventory, receivables, payables and working capital turnover, days of inventory, sales and payables outstanding, operating and cash conversion cycle, cost ratios (SG&A, R&D, selling and marketing, G&A, stock-based compensation, operating ratio), capex intensity and coverage, net capital expenditure, intangibles to total assets, revenue and net income per employee, and the investment anomalies asset growth and net operating assets. Requires tickers='AAPL,MSFT'; quarterly=true for quarterly data and start_date/end_date for the range. basket=true adds a 'Total': the tickers as one company, its ratios calculated on the summed statements (per-share ratios stay empty). Factor analysis of these ratios: the valuation tool with indicator='get_factor_analysis' and metrics='efficiency'. search_metrics with an indicator's name gives its parameters, options and defaults."
+    },
+    {
+      "name": "liquidity",
+      "description": "Liquidity ratios from the financial statements: current, quick and cash ratio, working capital, operating cash flow ratio and short term coverage (trailing twelve months on quarterly data). Requires tickers='AAPL,MSFT'; quarterly=true for quarterly data and start_date/end_date for the range. basket=true adds a 'Total': the tickers as one company, its ratios calculated on the summed statements (per-share ratios stay empty). Factor analysis of these ratios: the valuation tool with indicator='get_factor_analysis' and metrics='liquidity'. search_metrics with an indicator's name gives its parameters, options and defaults."
+    },
+    {
+      "name": "profitability",
+      "description": "Profitability ratios from the financial statements: gross, operating, net, EBITDA, free cash flow and pre-tax margins, ROE, ROA, operating and cash ROA, ROIC, ROCE, cash ROIC, return on tangible assets, effective and cash tax rates, interest coverage, income quality, FCF conversion, the DuPont burdens, the profitability factors (Novy-Marx gross profitability, Fama-French operating profitability, cash-based operating profitability, percent accruals) and the Nissim-Penman ratios (RNOA, net borrowing cost, financial leverage). Requires tickers='AAPL,MSFT'; quarterly=true for quarterly data and start_date/end_date for the range. basket=true adds a 'Total': the tickers as one company, its ratios calculated on the summed statements (per-share ratios stay empty). Factor analysis of these ratios: the valuation tool with indicator='get_factor_analysis' and metrics='profitability'. search_metrics with an indicator's name gives its parameters, options and defaults."
+    },
+    {
+      "name": "solvency",
+      "description": "Solvency ratios from the financial statements: debt to equity, assets, capital, EBITDA and market cap, long-term debt to capitalization, net debt to EBITDA and equity, interest and cash flow coverage, the solvency ratio, the credit ratios of the rating agencies (EBITDA interest coverage, FFO and discretionary cash flow to debt) and the degrees of operating, financial and total leverage. Requires tickers='AAPL,MSFT'; quarterly=true for quarterly data and start_date/end_date for the range. basket=true adds a 'Total': the tickers as one company, its ratios calculated on the summed statements (per-share ratios stay empty). Factor analysis of these ratios: the valuation tool with indicator='get_factor_analysis' and metrics='solvency'. search_metrics with an indicator's name gives its parameters, options and defaults."
+    },
+    {
+      "name": "valuation",
+      "description": "Valuation ratios: P/E, forward P/E, CAPE, PEG and PEGY, P/B, P/S, P/CF, P/FCF, price to tangible book, EV and EV/EBITDA, EV/EBIT, EV/sales, EV/FCF, EV to invested capital, earnings, dividend, buyback and shareholder yields (the FCF yield is in the solvency tool), payout and retention ratios, per-share figures (EPS, book value, cash flow, cash, Graham's net-net working capital), market cap and market cap to GDP (the Buffett indicator), and the issuance anomalies (net share issuance, composite equity issuance, net external financing). Requires tickers='AAPL,MSFT'; quarterly=true for quarterly data and start_date/end_date for the range. basket=true adds a 'Total': the tickers as one company, its ratios calculated on the summed statements (per-share ratios stay empty). show_daily=true gives a value per trading day (limit=-1 for the latest). The forward ratios need a Premium FMP subscription. get_factor_analysis measures the predictive power of ratios across ten or more tickers (twenty or more is better): the information coefficient (IC) per metric and horizon, metrics= a ratio, a list or 'valuation' (default), 'profitability', 'solvency', 'liquidity', 'efficiency' or 'all'; a negative IC means low values go on to outperform, as for a low P/E. The CAPE needs start_date years= (10) years before the first value; get_market_cap_to_gdp takes tickers listed in US dollars and one country=. get_quote's market cap uses the current shares, get_market_cap the diluted shares of the latest fiscal period. search_metrics with an indicator's name gives its parameters, options and defaults."
+    },
+    {
+      "name": "breadth",
+      "description": "Market breadth and volume indicators on prices, fetched automatically: OBV, price volume trend, accumulation/distribution, Chaikin oscillator and money flow, ease of movement, volume indices, Klinger, market facilitation, relative volume, volume flow, finite volume elements, volume zone oscillator, price-volume, buying and selling pressure, the volume profile, and the market measures that treat the tickers as one market (TRIN, advancers and decliners, McClellan, new highs and lows, get_market_breadth): pass an index's constituents for those (discovery get_index_constituents). Requires tickers='AAPL,MSFT'. Each indicator needs its window of history first, so the first periods after start_date can be empty: start earlier to warm up. Factor analysis of these indicators: the momentum tool with indicator='get_factor_analysis' and metrics='breadth'. get_volume_profile returns the volume per price bin over the range, not a series. search_metrics with an indicator's name gives its parameters, options and defaults."
+    },
+    {
+      "name": "momentum",
+      "description": "Momentum indicators on prices, fetched automatically: RSI and its variants (Connors, Laguerre, dynamic, intraday), stochastics (slow, RSI, KDJ, premier, SMI), MACD and PPO, Williams %R, Aroon, ADX and directional movement, CCI, MFI, force index, rate of change, Ichimoku, awesome, ultimate and Chande oscillators, TSI, vortex, KST, Coppock, Fisher transforms, Schaff, WaveTrend, QQE, Ehlers' Hilbert transform cycle indicators and filters, and more. Also get_relative_strength against the benchmark, get_seasonality per month or weekday, get_signals (crossovers, RSI zones, breakouts, 52-week highs and lows: 1 up, -1 down; signals_only=true for the periods with one), get_indicator_summary (one row per ticker: an indicator's latest value against its own history and the returns after crossing below= or above=; use it rather than the full series for 'how low is the RSI compared with the last five years'), get_factor_analysis (predictive power of indicators across ten or more tickers: the information coefficient per metric and horizon; metrics='momentum', 'overlap', 'volatility', 'breadth', 'cycle' or 'all') and L\u00f3pez de Prado's labels for machine learning (CUSUM events, triple-barrier, fixed-horizon, trend-scanning and tail-set labels, uniqueness, sample weights, bet sizes), which look forward by construction. Requires tickers='AAPL,MSFT'. Each indicator needs its window of history first, so the first periods after start_date can be empty: start earlier to warm up. The Coppock Curve is defined on monthly closes (period='monthly'); the DV intermediate oscillator needs about 360 periods of history. search_metrics with an indicator's name gives its parameters, options and defaults."
+    },
+    {
+      "name": "overlap",
+      "description": "Indicators drawn over the price, fetched automatically: moving averages (get_moving_average with method= for about 25 kinds: simple, exponential, Wilder, Hull, KAMA, T3, ALMA, VWMA, FRAMA and more), MESA adaptive average, Guppy averages, Holt-Winters channel, price transforms, midpoint, TRIX, VWAP (rolling or anchored), Parabolic SAR, Gann HiLo, Zig Zag, pivot points, Fibonacci retracements, support and resistance, Heikin-Ashi, Williams fractals, TD Sequential, liquidity sweeps and 62 candlestick patterns (1 bullish, -1 bearish per period; patterns= picks some, signals_only=true keeps the periods with one). Bollinger Bands and Keltner Channels are in the volatility tool. Requires tickers='AAPL,MSFT'. Each indicator needs its window of history first, so the first periods after start_date can be empty: start earlier to warm up. Factor analysis of these indicators: the momentum tool with indicator='get_factor_analysis' and metrics='overlap'. search_metrics with an indicator's name gives its parameters, options and defaults."
+    },
+    {
+      "name": "volatility",
+      "description": "Volatility indicators on prices, fetched automatically: Bollinger Bands, %B and BandWidth (decimals), Keltner and Donchian Channels, true range and ATR (NATR as a decimal), Chaikin volatility, relative volatility index, mass index, Supertrend, Chandelier Exit, Chande Kroll Stop, acceleration bands, adaptive price zone, price distance, market thermometer, signal-to-noise ratio, TTM Squeeze, the volatility cone and the standard deviation channel (one regression over the whole date range). Requires tickers='AAPL,MSFT'. Each indicator needs its window of history first, so the first periods after start_date can be empty: start earlier to warm up. Factor analysis of these indicators: the momentum tool with indicator='get_factor_analysis' and metrics='volatility'. search_metrics with an indicator's name gives its parameters, options and defaults."
+    },
+    {
+      "name": "models",
+      "description": "Financial models of companies from their statements and prices: WACC, DuPont and Nissim-Penman decompositions, enterprise value breakdown, valuation (DCF and its history, reverse and Monte Carlo DCF, Gordon growth, H-model, two-stage dividend discount, earnings power value, justified multiples, Graham number and intrinsic value, EVA, PVGO, implied cost of capital, peer comparison), distress and credit (Altman Z with its original, private, non-manufacturing and emerging models, Ohlson O, Zmijewski, Springate, Grover, Fulmer, Taffler, Merton distance to default, Campbell-Hilscher-Szilagyi, Shumway, synthetic credit rating), quality and manipulation scores (Piotroski F, Beneish M, Dechow F, Montier C, Mohanram G, Quality Minus Junk, accruals, Graham criteria, magic formula), financial constraints (KZ, WW, SA), growth and capital (sustainable, internal and fundamental growth, ROIIC, unlevered beta, capitalized R&D, CFROI, owner earnings, rule of 40) and return decomposition. The valuation models need no inputs: the discount rates default to each company's cost of equity or WACC and the growth to its own history; rate_of_return=, growth_rate= and the like override them, as one number or per ticker ({'AAPL': 0.08}). The scores that rank tickers against each other (magic formula, Mohanram G, quality score, Whited-Wu) need the peers in tickers=. Requires tickers='AAPL,MSFT'; quarterly=true for quarterly data and start_date/end_date for the range. basket=true adds a 'Total': the tickers as one company, its ratios calculated on the summed statements (per-share ratios stay empty). get_factor_analysis measures the predictive power of the models across ten or more tickers (metrics='scores' by default, or 'all'). Some need history before start_date: get_capitalized_research_and_development (amortization_years), get_accrual_quality (10 years) and get_discretionary_accruals (12 years). get_graham_intrinsic_value needs a FRED API key unless bond_yield= is given; get_implied_cost_of_capital needs a Premium FMP subscription. On quarterly data the distress scores use a trailing year (trailing=1 for single quarters). search_metrics with an indicator's name gives its parameters, options and defaults."
+    },
+    {
+      "name": "performance",
+      "description": "Risk-adjusted performance of tickers against the benchmark: returns (cumulative, log, excess, trailing, calendar), Sharpe ratio (standard, smart, Lo, adjusted, probabilistic, deflated; its standard error, difference test and minimum track record length), Sortino, Calmar, Sterling, Burke, Treynor, M2, Omega, information ratio, tracking error, alpha and beta (also Blume, Vasicek, Dimson, bull and bear), CAPM, capture ratios, win rate, Kelly criterion, return statistics, Fama-French and Carhart factor models (region= for Ken French's regional factors), style analysis, beta-implied returns ('the largest stock-specific fall since'), bootstrap statistics, forecast cone, backtest overfitting and more. Requires tickers='AAPL,MSFT'. Results are per period (weekly, monthly, quarterly or yearly); period='daily' needs rolling=N (e.g. rolling=60) except for the indicators that are daily by default. rolling=N gives a rolling N-period value over the full history. Sharpe, Sortino and similar ratios are per observation (per day within the period) unless annualize=true. Returns start from the first close on or after start_date: for a year-to-date return set start_date to the last trading day of the previous year. get_factor_analysis measures the predictive power of the metrics across ten or more tickers. method='lo' needs 30 or more returns per period; get_beta_implied_return needs start_date two or more years back. search_metrics with an indicator's name gives its parameters, options and defaults."
+    },
+    {
+      "name": "risk",
+      "description": "Risk measures of tickers' returns: VaR and CVaR (historic, gaussian, Cornish-Fisher, Student-t, EVT, kernel and GARCH; spectral CVaR), EVaR, entropic risk, VaR backtests (Kupiec, Christoffersen and more; Acerbi-Szekely for the CVaR), GARCH models (get_garch, forecasts, parameters, news impact, simulation; EGARCH, AVGARCH and realized GARCH are not available on this server), drawdowns (maximum, duration, recovery, series, table, statistics, DaR, CDaR, EDaR, Ulcer and Pain index), skewness, kurtosis, downside and upside deviation, partial, central and L-moments, Gini and tail measures, volatility estimators (Parkinson, Garman-Klass, Yang-Zhang and more), excess and idiosyncratic volatility, memory and chaos measures (Hurst, fractal dimension, Lyapunov), copulas and tail dependence, systemic risk (CoVaR, MES, SRISK, against the benchmark or market_ticker=) and market liquidity (Amihud, price impact, Roll and bid-ask spreads, turnover, VPIN). VaR, CVaR, drawdowns and worst realizations are returns, negative for a loss. Requires tickers='AAPL,MSFT'. period='daily' gives a value over the whole range; weekly, monthly, quarterly or yearly a value per period, and rolling=N a rolling value over the full history. get_factor_analysis measures the predictive power of risk metrics across ten or more tickers (a negative IC for volatility is the low-volatility anomaly). How unusual a move is: the econometrics tool's get_move_significance. get_srisk is meant for financial firms; get_vpin is daily (limit=-1 for the latest). search_metrics with an indicator's name gives its parameters, options and defaults."
+    },
+    {
+      "name": "econometrics",
+      "description": "Statistics and econometrics of price or return series: unit root, stationarity and bubble tests, fractional differencing, cointegration, Granger causality, VAR, VECM and ARIMA forecasts, regressions (OLS, WLS, GLS, quantile, logit/probit, IV, Fama-MacBeth, panels), causal designs (difference-in-differences, event study, regression discontinuity, synthetic control, matching), diagnostics, forecast comparison and tests, rolling statistics, entropy, regimes and breaks, pairs trading, and how unusual a value or move is: get_move_significance ('the biggest fall since'), get_level_significance (percentile, highest since, change since start_date, largest drawdown) and get_streaks. Requires tickers='AAPL,MSFT', or series= to analyze the indicators of other tools instead: references separated by ';', each tool:indicator:tickers-or-countries with an optional :column, e.g. 'macroeconomics:get_inflation_rate:United States' or 'rates:get_government_bond_yield_curve:United States:10Y'; each becomes a series named after its ticker or country, which dependent_ticker and independent_tickers name. changes='difference' suits rates. get_move_significance needs start_date a year or more back, and the answer of get_level_significance depends on start_date. spread_over= measures every series minus one of them. search_metrics with an indicator's name gives its parameters, options and defaults."
+    },
+    {
+      "name": "etf",
+      "description": "ETFs and other funds: holdings (the 25 largest by weight unless limit= says otherwise), sector and country weightings, information, profile (expense ratio, assets, NAV, premium or discount), tracking against benchmark_ticker (the fund's index or another fund of it), concentration, overlap and active share between funds, look-through valuation, liquidity, the contribution of each holding or sector to the return and the return without some holdings (exclude=). Requires tickers='VOO,QQQ'; tickers that are not a fund return no data. The holdings carry no sector or country: use the weightings or the Finance Database server. get_contribution and get_return_excluding price the holdings one request each (holdings= limits that). search_metrics with an indicator's name gives its parameters, options and defaults."
+    },
+    {
+      "name": "portfolio",
+      "description": "Portfolio construction for two or more tickers: optimal weights (minimum variance, maximum Sharpe, mean-variance, risk parity, hierarchical risk parity, HERC, NCO, Schur, inverse volatility, maximum diversification, maximum Omega, mean-risk with CVaR, CDaR and drawdowns, worst-case and distributionally robust, Black-Litterman, minimum tracking error, growth optimal, resampled, stacking, critical line), the efficient frontier and a walk-forward backtest of the optimizers; for given weights (weights={'AAPL': 0.6, 'MSFT': 0.4}, equal when omitted): risk and factor risk contributions, factor and Brinson attribution, risk metrics, stress tests, look-through exposure, diversification and a discrete allocation in whole shares; and the estimates behind them (expected returns, covariance, codependence, clusters, co-moments, entropy pooling, factor loadings, estimation uncertainty). The optimizers take bounds (minimum_weight=, maximum_weight=, sector_bounds=, country_bounds=), net_exposure= and gross_exposure= for long-short, current_weights= with maximum_turnover=, expected_returns= and covariance= estimators. Weights, returns and volatilities are annualized decimals. To follow a portfolio held over time, use portfolio_performance. search_metrics with an indicator's name gives its parameters, options and defaults."
+    },
+    {
+      "name": "portfolio_performance",
+      "description": "The value and returns of a portfolio over time, built from one of: transactions (a list of trades), holdings ({'AAPL': 10, 'MSFT': 5}), weights ({'VTI': 0.6, 'BND': 0.4}, invested on start_date and rebalanced as rebalancing= says) or preset (a classic portfolio such as '60/40' or 'All Weather'; get_presets lists them). It gives the overview per position, the performance per period, positions per day, transactions and their results, the money-weighted return (XIRR), return contributions, turnover, gross leverage, round-trip trades with their statistics (win rate, profit factor, expectancy) and position timing. Prices are valued in one currency (currency=). Returns, weights and rates are decimals. search_metrics with an indicator's name gives its parameters, options and defaults."
+    },
+    {
+      "name": "options",
+      "description": "Options on tickers, from live chains and prices: European, American (listed stock options are American: get_american_option), binomial, Black-76, CEV, Heston-Nandi, Monte Carlo and exotic option prices (Asian, barrier, lookback, touch, chooser, forward-start and cliquet, exchange and spread options), Greeks, implied volatility, volatility surfaces (SVI, SSVI, SABR, local volatility), Heston calibration, stock price simulation, delta hedging backtests and simulations, strategy payoffs (legs=), option chains and market metrics per expiry (put/call ratio, max pain, term structure, skew, implied move, risk-neutral moments, variance swap) and per ticker (gamma exposure, model-free implied volatility as the VIX, skew index, volatility risk premium). Requires tickers='AAPL,MSFT'. Option grids cover the strikes within 5% of the price unless strike_price_range= asks for more. The market metrics read the live chain, so leave end_date at today. days= cannot exceed the longest listed expiry; the Heston calibration uses expiries at least 14 days away. search_metrics with an indicator's name gives its parameters, options and defaults."
+    },
+    {
+      "name": "government",
+      "description": "Government finances by country: debt, deficit, expenditure, revenue and tax revenue (yearly, millions of national currency; level= the level of government), interest expenditure (quarterly unless period='yearly'), expenditure by function (COFOG, functions= e.g. 'Defence,Health') and trust in government. Requires countries='United States,Germany'; never tickers=. Ratios are decimal fractions (0.04 is 4% of GDP). rolling=N smooths and trailing=N sums the series. Interest expenditure covers about 40 economies (not Japan or China). search_metrics with an indicator's name gives its parameters, options and defaults."
+    },
+    {
+      "name": "macroeconomics",
+      "description": "Macroeconomic data by country: GDP and its growth, consumption, investment, trade, CPI and inflation (with core and components), producer, export and import prices, purchasing power, confidence, house, rent and commercial real estate prices, exchange rates (each currency per US dollar; for a pair such as EURUSD use market_data), money supply, savings and household debt, output gap, real interest rates, crisis indicators, credit gaps and debt service, international investment position, reserves, capacity utilization, commodity prices, futures curves and term structure, chokepoint transits, implied volatility indices, regulators' stress test scenarios and a pension scenario set, long-run asset returns, the Bank of England's millennium of data, US-only series (industrial production, recessions, retail sales, housing starts, real personal income) and the economic calendar (High impact releases from 23 days back to 7 ahead unless impact=, events= or start_date/end_date say otherwise; keep it to a few weeks). Requires countries='United States,Germany'; never tickers=. Each indicator comes at the highest frequency it is published at unless period= says otherwise. Every rate and ratio is a decimal fraction, not a percentage: an inflation rate of 4.1% comes back as 0.041; multiply by 100 to present percentages. rolling=N smooths and trailing=N sums the series. Several need no countries (commodity prices and futures, chokepoint transits, Shiller data, supply chain pressure, implied volatility). get_long_run_asset_returns requires accept_licence=true (non-commercial licence); get_millennium_of_macroeconomic_data needs an early start_date (e.g. '1700-01-01'); the first call of get_scenario_set takes one to two minutes. China's producer prices: get_economic_calendar with events='Producer Price'. search_metrics with an indicator's name gives its parameters, options and defaults."
+    },
+    {
+      "name": "environment",
+      "description": "Environmental and ESG data: ESG scores per company (tickers='AAPL'), carbon emissions and renewable energy per country (countries='United States'), the EU ETS carbon price and the NGFS climate scenarios (variable=, scenario=, model=, risk=). This is the only tool that takes tickers= or countries=, depending on the indicator. get_carbon_price needs no countries and countries= is optional for get_climate_scenario. search_metrics with an indicator's name gives its parameters, options and defaults."
+    },
+    {
+      "name": "jobs",
+      "description": "Labour and social data by country: unemployment and job vacancy rates, labour productivity, unit labour costs, population, poverty, income inequality and life tables (one or two countries at a time), and US-only series (jobless claims, insured unemployment, nonfarm payrolls) that return a 'United States' column whatever countries= says. Requires countries='United States,Germany'; never tickers=. Each indicator comes at the highest frequency it is published at unless period= says otherwise. Rates are decimal fractions. rolling=N smooths and trailing=N sums the series. The US job vacancy and payroll history beyond three years needs a FRED API key. search_metrics with an indicator's name gives its parameters, options and defaults."
+    },
+    {
+      "name": "rates",
+      "description": "Interest rates by country: central bank policy rates, overnight rates (\u20acSTR, SONIA, TONA, SOFR), short and long-term rates, government bond yields and full yield curves, the US Treasury par curve, curve analytics (zero-coupon bootstrap, Nelson-Siegel-Svensson, carry and roll-down, principal components, short rate models and simulations), real yields, breakeven and expected inflation, yield decomposition, term premium, Treasury auctions, mortgage rates and the lock-in of outstanding mortgages, corporate bond yields and spreads (ICE BofA, HQM, Moody's, excess bond premium), EIOPA and Bank of England curves, rating transitions, default rates and financial stress. Requires countries='United States,Germany'; never tickers=. Each indicator comes at the highest frequency it is published at unless period= says otherwise; keep the date range short for daily curves (one country is up to 15 maturities a day) or use period='monthly'. All rates and spreads are decimals (0.0077 is 77 basis points). The Moody's and ICE BofA series need a FRED API key. Keep the range of get_treasury_auctions short; get_default_rates is slow the first time (about 30 seconds per year); CIR needs a short rate above zero throughout (short_rate='6M' for the US). search_metrics with an indicator's name gives its parameters, options and defaults."
+    },
+    {
+      "name": "fixed_income",
+      "description": "Bond calculations on real bonds and market curves, with nothing to type in: present value, duration, yield, Z-spread, key rate durations, bucketed delta, rate shift ladders and Taylor price changes per bond (by default the benchmark US Treasuries; bonds= CUSIPs or ISINs, issuer=, maturity_start=/maturity_end=, date=), Treasury bills, TIPS, FRNs, forward prices and futures basis, a fitted Treasury curve, corporate bond universe, issuer, asset swap and I-spreads, forward and par rates, Smith-Wilson curves, curve spreads, inflation swaps and forward CPI, default probabilities, survival curves and CDS spreads from credit spreads, swap rates, FRAs, FX forwards, swaption prices, and mortgage payments and amortization at the US 30-year rate. Yields are semi-annual bond-equivalent decimals and prices clean per 100 of par. The credit curves need a FRED API key, issuer and asset swap spreads a FinancialModelingPrep API key. get_swaption_price calibrates to the short rate history from start_date, so use a long one (e.g. '2000-01-01'). TIPS have no present value or Z-spread on the nominal curve and floating rate notes are left out of the bond calculations. search_metrics with an indicator's name gives its parameters, options and defaults."
+    },
+    {
+      "name": "discovery",
+      "description": "Market discovery, without tickers or countries: lists of stocks, ETFs, indices, currencies, commodities and cryptocurrencies, the stock screener (market cap in US dollars; primary_only=true for one listing per company), gainers, losers and most active stocks, sector and industry performance and P/E, index constituents (also on a past date) and their changes, Damodaran's industry statistics, earnings, IPO and split calendars, 8-K filings, insider trades, mergers, and news and press release feeds. The news feeds are the latest articles across the whole market and cannot be narrowed to one company. To screen by classification, use the Finance Database server. The earnings calendar covers the coming week unless start_date/end_date say otherwise. search_metrics with an indicator's name gives its parameters, options and defaults."
+    },
+    {
+      "name": "market_data",
+      "description": "Raw data per ticker: historical prices, income statement, balance sheet and cash flow statement, profile, quote, analyst estimates, price targets, grades and recommendations, earnings surprises, dividend and earnings calendars, executives, employees, share float, splits, mergers, insider statistics, institutional ownership, short sale volume, earnings call transcripts (the full text of one call of one ticker per request), the market risk premium by country, US Treasury rates and the CFTC Commitment of Traders (tickers= futures symbols such as 'GC'). Use the dedicated tools for ratios, performance, risk and models rather than computing them from this data. Requires tickers='AAPL,MSFT'; currency and crypto pairs as EURUSD or BTCUSD. basket=true adds a 'Total' of the statements. The holdings of funds are in the etf tool. get_market_risk_premium and get_treasury_data need no tickers; get_short_volume is short sale volume, not short interest. search_metrics with an indicator's name gives its parameters, options and defaults."
+    },
+    {
+      "name": "search_metric_categories",
+      "description": "List the metric categories with tool, indicator and metric (method= variants) counts and totals."
+    },
+    {
+      "name": "search_by_category",
+      "description": "List the tools of a category with their indicator and metric counts."
+    },
+    {
+      "name": "search_metrics",
+      "description": "Fuzzy keyword search across the indicators of all 1100+ available metrics."
+    }
+  ],
+  "compatibility": {
+    "platforms": [
+      "darwin",
+      "linux",
+      "win32"
+    ],
+    "runtimes": {
+      "python": ">=3.11,<3.16"
+    }
+  },
+  "privacy_policies": [
+    "https://site.financialmodelingprep.com/privacy-policy"
+  ]
+}

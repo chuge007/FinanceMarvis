@@ -6,6 +6,8 @@
     "module": "esnext",
     "types": ["vite/client"],
     "allowArbitraryExtensions": true,
+    /* 共享领域内核用 .mjs + JSDoc 编写，前后端只保留一份实现 */
+    "allowJs": true,
     "skipLibCheck": true,
 
     /* Bundler mode */

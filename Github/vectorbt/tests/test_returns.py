@@ -1,0 +1,1081 @@
+from datetime import datetime
+
+import numpy as np
+import pandas as pd
+import pytest
+from scipy.stats import kurtosis, norm, skew
+
+import vectorbt as vbt
+from vectorbt import _engine
+from tests.utils import isclose
+from vectorbt.returns.metrics import approx_exp_max_sharpe
+
+qs_available = True
+try:
+    import quantstats as qs
+except:
+    qs_available = False
+
+day_dt = np.timedelta64(86400000000000)
+
+ts = pd.DataFrame(
+    {"a": [1, 2, 3, 4, 5], "b": [5, 4, 3, 2, 1], "c": [1, 2, 3, 2, 1]},
+    index=pd.DatetimeIndex(
+        [datetime(2018, 1, 1), datetime(2018, 1, 2), datetime(2018, 1, 3), datetime(2018, 1, 4), datetime(2018, 1, 5)]
+    ),
+)
+rets = ts.pct_change()
+
+seed = 42
+
+np.random.seed(seed)
+benchmark_rets = pd.DataFrame(
+    {
+        "a": rets["a"] * np.random.uniform(0.8, 1.2, rets.shape[0]),
+        "b": rets["b"] * np.random.uniform(0.8, 1.2, rets.shape[0]) * 2,
+        "c": rets["c"] * np.random.uniform(0.8, 1.2, rets.shape[0]) * 3,
+    }
+)
+
+
+# ############# Global ############# #
+
+
+def setup_module():
+    vbt.settings.numba["check_func_suffix"] = True
+    vbt.settings.caching.enabled = False
+    vbt.settings.caching.whitelist = []
+    vbt.settings.caching.blacklist = []
+    vbt.settings.returns.defaults = dict(
+        start_value=0.0,
+        window=rets.shape[0],
+        minp=1,
+        ddof=1,
+        risk_free=0.01,
+        levy_alpha=2.0,
+        required_return=0.1,
+        cutoff=0.05,
+    )
+
+
+def teardown_module():
+    vbt.settings.reset()
+
+
+# ############# accessors.py ############# #
+
+
+def ref_ulcer_index(values):
+    cum = np.cumprod(1 + np.nan_to_num(np.asarray(values, dtype=float)))
+    return np.sqrt(np.mean((cum / np.maximum.accumulate(cum) - 1) ** 2))
+
+
+def ref_martin_ratio(values, ann_factor, risk_free):
+    values = np.nan_to_num(np.asarray(values, dtype=float))
+    ulcer = ref_ulcer_index(values)
+    if ulcer == 0:
+        return np.nan
+    strategy_ann = np.prod(1 + values) ** (ann_factor / len(values)) - 1
+    return (strategy_ann - ((1 + risk_free) ** ann_factor - 1)) / ulcer
+
+
+class TestAccessors:
+    def test_indexing(self):
+        assert rets.vbt.returns["a"].total() == rets["a"].vbt.returns.total()
+
+    def test_benchmark_rets(self):
+        ret_acc = rets.vbt.returns(benchmark_rets=benchmark_rets)
+        pd.testing.assert_frame_equal(ret_acc.benchmark_rets, benchmark_rets)
+        pd.testing.assert_series_equal(ret_acc["a"].benchmark_rets, benchmark_rets["a"])
+
+    def test_freq(self):
+        assert rets.vbt.returns.wrapper.freq == day_dt
+        assert rets["a"].vbt.returns.wrapper.freq == day_dt
+        assert rets.vbt.returns(freq="2D").wrapper.freq == day_dt * 2
+        assert rets["a"].vbt.returns(freq="2D").wrapper.freq == day_dt * 2
+        assert pd.Series([1, 2, 3]).vbt.returns.wrapper.freq is None
+        assert pd.Series([1, 2, 3]).vbt.returns(freq="3D").wrapper.freq == day_dt * 3
+        assert pd.Series([1, 2, 3]).vbt.returns(freq=np.timedelta64(4, "D")).wrapper.freq == day_dt * 4
+
+    def test_ann_factor(self):
+        assert rets["a"].vbt.returns(year_freq="365 days").ann_factor == 365
+        assert rets.vbt.returns(year_freq="365 days").ann_factor == 365
+        with pytest.raises(Exception):
+            assert pd.Series([1, 2, 3]).vbt.returns(freq=None).ann_factor
+
+    def test_from_value(self):
+        pd.testing.assert_series_equal(pd.Series.vbt.returns.from_value(ts["a"]).obj, ts["a"].pct_change())
+        pd.testing.assert_frame_equal(pd.DataFrame.vbt.returns.from_value(ts).obj, ts.pct_change())
+        assert pd.Series.vbt.returns.from_value(ts["a"], year_freq="365 days").year_freq == pd.to_timedelta("365 days")
+        assert pd.DataFrame.vbt.returns.from_value(ts, year_freq="365 days").year_freq == pd.to_timedelta("365 days")
+
+    def test_daily(self):
+        ret_12h = pd.DataFrame(
+            {"a": [0.1, 0.1, 0.1, 0.1, 0.1], "b": [-0.1, -0.1, -0.1, -0.1, -0.1], "c": [0.1, -0.1, 0.1, -0.1, 0.1]},
+            index=pd.DatetimeIndex(
+                [
+                    datetime(2018, 1, 1, 0),
+                    datetime(2018, 1, 1, 12),
+                    datetime(2018, 1, 2, 0),
+                    datetime(2018, 1, 2, 12),
+                    datetime(2018, 1, 3, 0),
+                ]
+            ),
+        )
+        pd.testing.assert_series_equal(
+            ret_12h["a"].vbt.returns.daily(),
+            pd.Series(
+                np.array([0.21, 0.21, 0.1]),
+                index=pd.DatetimeIndex(["2018-01-01", "2018-01-02", "2018-01-03"], dtype="datetime64[ns]", freq="D"),
+                name=ret_12h["a"].name,
+            ),
+        )
+        pd.testing.assert_frame_equal(
+            ret_12h.vbt.returns.daily(),
+            pd.DataFrame(
+                np.array([[0.21, -0.19, -0.01], [0.21, -0.19, -0.01], [0.1, -0.1, 0.1]]),
+                index=pd.DatetimeIndex(["2018-01-01", "2018-01-02", "2018-01-03"], dtype="datetime64[ns]", freq="D"),
+                columns=ret_12h.columns,
+            ),
+        )
+
+    def test_annual(self):
+        pd.testing.assert_series_equal(
+            rets["a"].vbt.returns.annual(),
+            pd.Series(
+                np.array([4.0]),
+                index=pd.DatetimeIndex(["2018-01-01"], dtype="datetime64[ns]", freq="365D"),
+                name=rets["a"].name,
+            ),
+        )
+        pd.testing.assert_frame_equal(
+            rets.vbt.returns.annual(),
+            pd.DataFrame(
+                np.array([[4.0, -0.8, 0.0]]),
+                index=pd.DatetimeIndex(["2018-01-01"], dtype="datetime64[ns]", freq="365D"),
+                columns=rets.columns,
+            ),
+        )
+
+    def test_cumulative(self):
+        pd.testing.assert_series_equal(
+            rets["a"].vbt.returns.cumulative(), pd.Series([0.0, 1.0, 2.0, 3.0, 4.0], index=rets.index, name="a")
+        )
+        pd.testing.assert_frame_equal(
+            rets.vbt.returns.cumulative(),
+            pd.DataFrame(
+                [
+                    [0.0, 0.0, 0.0],
+                    [1.0, -0.19999999999999996, 1.0],
+                    [2.0, -0.3999999999999999, 2.0],
+                    [3.0, -0.6, 1.0],
+                    [4.0, -0.8, 0.0],
+                ],
+                index=rets.index,
+                columns=rets.columns,
+            ),
+        )
+
+    def test_total_return(self):
+        assert isclose(rets["a"].vbt.returns.total(), 4.0)
+        pd.testing.assert_series_equal(
+            rets.vbt.returns.total(), pd.Series([4.0, -0.8, 0.0], index=rets.columns, name="total_return")
+        )
+        pd.testing.assert_frame_equal(
+            rets.vbt.returns.rolling_total(),
+            pd.DataFrame(
+                [
+                    [np.nan, np.nan, np.nan],
+                    [1.0, -0.19999999999999996, 1.0],
+                    [2.0, -0.3999999999999999, 2.0],
+                    [3.0, -0.6, 1.0],
+                    [4.0, -0.8, 0.0],
+                ],
+                index=rets.index,
+                columns=rets.columns,
+            ),
+        )
+
+    def test_annualized_return(self):
+        assert isclose(rets["a"].vbt.returns.annualized(), 1.0587911840678754e51)
+        pd.testing.assert_series_equal(
+            rets.vbt.returns.annualized(),
+            pd.Series([1.0587911840678754e51, -1.0, 0.0], index=rets.columns, name="annualized_return"),
+        )
+        pd.testing.assert_frame_equal(
+            rets.vbt.returns.rolling_annualized(),
+            pd.DataFrame(
+                [
+                    [np.nan, np.nan, np.nan],
+                    [8.669103912675328e54, -1.0, 8.669103912675328e54],
+                    [1.1213796164129035e58, -1.0, 1.1213796164129035e58],
+                    [8.669103912675328e54, -1.0, 2.9443342053298444e27],
+                    [1.0587911840678754e51, -1.0, 0.0],
+                ],
+                index=rets.index,
+                columns=rets.columns,
+            ),
+        )
+
+    def test_annualized_volatility(self):
+        assert isclose(rets["a"].vbt.returns.annualized_volatility(), 6.417884083645567)
+        pd.testing.assert_series_equal(
+            rets.vbt.returns.annualized_volatility(),
+            pd.Series(
+                [6.417884083645567, 2.5122615973129334, 13.509256086106296],
+                index=rets.columns,
+                name="annualized_volatility",
+            ),
+        )
+        pd.testing.assert_frame_equal(
+            rets.vbt.returns.rolling_annualized_volatility(),
+            pd.DataFrame(
+                [
+                    [np.nan, np.nan, np.nan],
+                    [np.nan, np.nan, np.nan],
+                    [6.754628043053148, 0.6754628043053155, 6.754628043053148],
+                    [6.62836217969305, 1.2868638306046682, 12.868638306046675],
+                    [6.417884083645567, 2.5122615973129334, 13.509256086106296],
+                ],
+                index=rets.index,
+                columns=rets.columns,
+            ),
+        )
+
+    def test_ulcer_index(self):
+        for col in rets.columns:
+            assert isclose(rets[col].vbt.returns.ulcer_index(), ref_ulcer_index(rets[col]))
+            assert isclose(rets[col].vbt.returns.ulcer_index(engine="numba"), ref_ulcer_index(rets[col]))
+        res = rets.vbt.returns.ulcer_index()
+        assert res.name == "ulcer_index"
+        assert list(res.index) == list(rets.columns)
+        flat = pd.Series([0.0, 0.0, 0.0])
+        assert flat.vbt.returns(freq="1D").ulcer_index() == 0.0
+        assert np.isnan(pd.Series([], dtype=float).vbt.returns(freq="1D").ulcer_index())
+
+    def test_ulcer_index_nan_returns(self):
+        # NaN returns count as zero-return observations, like in `max_drawdown`
+        x = pd.Series([0.01, np.nan, -0.02, 0.015], index=pd.date_range("2020", periods=4))
+        acc = x.vbt.returns(freq="1D")
+        assert isclose(acc.ulcer_index(), x.fillna(0).vbt.returns(freq="1D").ulcer_index())
+        assert isclose(acc.max_drawdown(), x.fillna(0).vbt.returns(freq="1D").max_drawdown())
+        all_nan = pd.Series([np.nan] * 3, index=pd.date_range("2020", periods=3)).vbt.returns(freq="1D")
+        assert all_nan.ulcer_index() == 0.0
+        assert np.isnan(all_nan.martin_ratio())
+
+    def test_rolling_ulcer_index(self):
+        window = 3
+        res = rets.vbt.returns.rolling_ulcer_index(window=window, minp=window)
+        assert res.shape == rets.shape
+        for col in rets.columns:
+            for i in range(len(rets)):
+                sub = rets[col].iloc[max(0, i - window + 1) : i + 1]
+                if sub.notna().sum() < window:
+                    assert np.isnan(res[col].iloc[i])
+                else:
+                    assert isclose(res[col].iloc[i], ref_ulcer_index(sub))
+        pd.testing.assert_frame_equal(
+            rets.vbt.returns.rolling_ulcer_index(window=window, minp=window, engine="numba"), res
+        )
+        res_minp = rets.vbt.returns.rolling_ulcer_index(window=window, minp=1)
+        for col in rets.columns:
+            for i in range(len(rets)):
+                sub = rets[col].iloc[max(0, i - window + 1) : i + 1]
+                if sub.notna().sum() < 1:
+                    assert np.isnan(res_minp[col].iloc[i])
+                else:
+                    assert isclose(res_minp[col].iloc[i], ref_ulcer_index(sub))
+
+    def test_martin_ratio(self):
+        r = rets["b"].vbt.returns
+        expected = r.annualized() / r.ulcer_index()
+        assert isclose(r.martin_ratio(risk_free=0.0), expected)
+        assert isclose(r.martin_ratio(risk_free=0.0, engine="numba"), expected)
+        assert rets.vbt.returns.martin_ratio().name == "martin_ratio"
+
+        # risk_free is a constant per-period return, as in sharpe_ratio and omega_ratio. Martin's
+        # definition annualizes the strategy and the risk-free returns separately, then subtracts.
+        x = pd.Series([0.01, -0.02, 0.015, -0.01, 0.02, -0.005], index=pd.date_range("2020", periods=6))
+        acc = x.vbt.returns(freq="1D", year_freq="365D")
+        rf = 0.001
+        strategy_ann = np.prod(1 + x.values) ** (365 / len(x)) - 1
+        rf_ann = (1 + rf) ** 365 - 1
+        ulcer = ref_ulcer_index(x.values)
+        assert isclose(acc.ulcer_index(), ulcer)
+        assert isclose(acc.martin_ratio(risk_free=rf), (strategy_ann - rf_ann) / ulcer)
+        assert not isclose(acc.martin_ratio(risk_free=rf), acc.martin_ratio(risk_free=0.0))
+        # compounding the excess per-period returns instead gives a different number
+        assert not isclose(acc.martin_ratio(risk_free=rf), (np.prod(1 + x.values - rf) ** (365 / len(x)) - 1) / ulcer)
+        assert isclose(acc.martin_ratio(risk_free=0.0), strategy_ann / ulcer)
+        assert isclose(acc.martin_ratio(), acc.martin_ratio(risk_free=0.01))  # test module default
+        acc_rf = x.vbt.returns(freq="1D", year_freq="365D", defaults=dict(risk_free=rf))
+        assert isclose(acc_rf.martin_ratio(), acc.martin_ratio(risk_free=rf))
+
+        flat = pd.Series([0.01, 0.01, 0.01], index=pd.date_range("2020", periods=3))
+        assert np.isnan(flat.vbt.returns(freq="1D", year_freq="365D").martin_ratio())
+        assert np.isnan(pd.Series([], dtype=float).vbt.returns(freq="1D").martin_ratio())
+
+    def test_martin_ratio_references(self):
+        rng = np.random.default_rng(7)
+        x = pd.Series(rng.normal(0.0005, 0.01, 20), index=pd.date_range("2020", periods=20))
+        window = 5
+
+        for freq, year_freq, ann_factor in [("1D", "365D", 365.0), ("2D", "365D", 182.5), ("1D", "1D", 1.0)]:
+            acc = x.vbt.returns(freq=freq, year_freq=year_freq)
+            assert acc.ann_factor == ann_factor
+            for rf in [0.0, 0.0005, -0.0003]:
+                assert isclose(acc.martin_ratio(risk_free=rf), ref_martin_ratio(x.values, ann_factor, rf))
+                assert isclose(
+                    acc.martin_ratio(risk_free=rf, engine="numba"), ref_martin_ratio(x.values, ann_factor, rf)
+                )
+                res = acc.rolling_martin_ratio(window=window, minp=window, risk_free=rf)
+                res_numba = acc.rolling_martin_ratio(window=window, minp=window, risk_free=rf, engine="numba")
+                pd.testing.assert_series_equal(res, res_numba)
+                assert res.iloc[: window - 1].isna().all()
+                for i in range(window - 1, len(x)):
+                    assert isclose(res.iloc[i], ref_martin_ratio(x.values[i - window + 1 : i + 1], ann_factor, rf))
+
+    def test_rolling_martin_ratio_interior_nan(self):
+        x = pd.Series(
+            [0.01, -0.02, np.nan, 0.015, -0.01, 0.02, np.nan, -0.005, 0.004, 0.01],
+            index=pd.date_range("2020", periods=10),
+        )
+        acc = x.vbt.returns(freq="1D", year_freq="365D")
+        window, rf = 4, 0.0004
+        res = acc.rolling_martin_ratio(window=window, minp=2, risk_free=rf)
+        for i in range(len(x)):
+            sub = x.values[max(0, i - window + 1) : i + 1]
+            if np.isfinite(sub).sum() < 2:
+                assert np.isnan(res.iloc[i])
+            else:
+                assert isclose(res.iloc[i], ref_martin_ratio(sub, 365.0, rf))
+        # at least one window really contains an interior NaN
+        assert any(np.isnan(x.values[max(0, i - window + 1) : i + 1]).any() and i >= window for i in range(len(x)))
+
+    def test_rolling_martin_ratio(self):
+        window = 3
+        freq = rets.vbt.returns.wrapper.freq
+        # consistency check against the 1-dim path; the independent references are below
+        res = rets.vbt.returns.rolling_martin_ratio(window=window, minp=window, risk_free=0.0)
+        assert res.shape == rets.shape
+        for col in rets.columns:
+            for i in range(len(rets)):
+                sub = rets[col].iloc[max(0, i - window + 1) : i + 1]
+                if sub.notna().sum() < window:
+                    assert np.isnan(res[col].iloc[i])
+                else:
+                    assert isclose(res[col].iloc[i], sub.vbt.returns(freq=freq).martin_ratio(risk_free=0.0))
+        pd.testing.assert_frame_equal(
+            rets.vbt.returns.rolling_martin_ratio(window=window, minp=window, risk_free=0.0, engine="numba"), res
+        )
+        rf = 0.001
+        ann_factor = 365
+        assert rets.vbt.returns.ann_factor == ann_factor
+        res_rf = rets.vbt.returns.rolling_martin_ratio(window=window, minp=window, risk_free=rf)
+        for col in rets.columns:
+            for i in range(len(rets)):
+                sub = rets[col].iloc[max(0, i - window + 1) : i + 1]
+                if sub.notna().sum() < window:
+                    assert np.isnan(res_rf[col].iloc[i])
+                    continue
+                vals = sub.fillna(0).values
+                cum = np.cumprod(1 + vals)
+                ulcer = np.sqrt(np.mean((cum / np.maximum.accumulate(cum) - 1) ** 2))
+                if ulcer == 0:
+                    assert np.isnan(res_rf[col].iloc[i])
+                    continue
+                expected = (cum[-1] ** (ann_factor / len(vals)) - 1 - ((1 + rf) ** ann_factor - 1)) / ulcer
+                assert isclose(res_rf[col].iloc[i], expected)
+        assert not res_rf.equals(res)
+        pd.testing.assert_frame_equal(
+            rets.vbt.returns(defaults=dict(risk_free=0.001)).rolling_martin_ratio(window=window, minp=window), res_rf
+        )
+
+    def test_calmar_ratio(self):
+        assert isclose(rets["a"].vbt.returns.calmar_ratio(), np.nan)
+        pd.testing.assert_series_equal(
+            rets.vbt.returns.calmar_ratio(), pd.Series([np.nan, -1.25, 0.0], index=rets.columns, name="calmar_ratio")
+        )
+        pd.testing.assert_frame_equal(
+            rets.vbt.returns.rolling_calmar_ratio(),
+            pd.DataFrame(
+                [
+                    [np.nan, np.nan, np.nan],
+                    [np.nan, -5.000000000000001, np.nan],
+                    [np.nan, -2.5000000000000004, np.nan],
+                    [np.nan, -1.6666666666666667, 8.833002615989533e27],
+                    [np.nan, -1.25, 0.0],
+                ],
+                index=rets.index,
+                columns=rets.columns,
+            ),
+        )
+
+    def test_omega_ratio(self):
+        assert isclose(rets["a"].vbt.returns.omega_ratio(risk_free=0.01, required_return=0.1), np.inf)
+        pd.testing.assert_series_equal(
+            rets.vbt.returns.omega_ratio(risk_free=0.01, required_return=0.1),
+            pd.Series([np.inf, 0.0, 1.7327023435781848], index=rets.columns, name="omega_ratio"),
+        )
+        pd.testing.assert_frame_equal(
+            rets.vbt.returns.rolling_omega_ratio(),
+            pd.DataFrame(
+                [
+                    [np.nan, np.nan, np.nan],
+                    [np.inf, 0.0, np.inf],
+                    [np.inf, 0.0, np.inf],
+                    [np.inf, 0.0, 4.305883016460259],
+                    [np.inf, 0.0, 1.7327023435781848],
+                ],
+                index=rets.index,
+                columns=rets.columns,
+            ),
+        )
+
+    def test_sharpe_ratio(self):
+        assert isclose(rets["a"].vbt.returns.sharpe_ratio(risk_free=0.01), 29.052280196490333)
+        pd.testing.assert_series_equal(
+            rets.vbt.returns.sharpe_ratio(risk_free=0.01),
+            pd.Series(
+                [29.052280196490333, -48.06592068111974, 4.232900240313306], index=rets.columns, name="sharpe_ratio"
+            ),
+        )
+        pd.testing.assert_frame_equal(
+            rets.vbt.returns.rolling_sharpe_ratio(),
+            pd.DataFrame(
+                [
+                    [np.nan, np.nan, np.nan],
+                    [np.nan, np.nan, np.nan],
+                    [39.98739801487463, -126.98700720939904, 39.98739801487463],
+                    [33.101020977359426, -76.89667951041766, 10.746626111906732],
+                    [29.052280196490333, -48.06592068111974, 4.232900240313306],
+                ],
+                index=rets.index,
+                columns=rets.columns,
+            ),
+        )
+
+    def test_zero_volatility_ratios(self, test_engine):
+        zero_std_rets = pd.DataFrame(
+            {"zero": [0.0, 0.0, 0.0], "pos": [0.25, 0.25, 0.25], "neg": [-0.25, -0.25, -0.25]},
+            index=rets.index[:3],
+        )
+        pd.testing.assert_series_equal(
+            zero_std_rets.vbt.returns.sharpe_ratio(risk_free=0.0, engine=test_engine),
+            pd.Series([np.nan, np.inf, -np.inf], index=zero_std_rets.columns, name="sharpe_ratio"),
+        )
+        pd.testing.assert_series_equal(
+            zero_std_rets.vbt.returns.sortino_ratio(required_return=0.0, engine=test_engine),
+            pd.Series([np.nan, np.inf, -np.sqrt(365)], index=zero_std_rets.columns, name="sortino_ratio"),
+        )
+
+    def test_sharpe_ratio_constant_returns(self, test_engine):
+        # The mean of a constant series is not always exactly that constant, which used to
+        # leave a tiny non-zero std and a Sharpe ratio around 1e16 instead of signed infinity
+        const_rets = pd.DataFrame(
+            {"pos": [0.001] * 252, "neg": [-0.001] * 252, "pos_nan": [0.001] * 251 + [np.nan]},
+            index=pd.date_range("2024-01-01", periods=252, freq="D"),
+        )
+        pd.testing.assert_series_equal(
+            const_rets.vbt.returns(freq="1D").sharpe_ratio(risk_free=0.0, engine=test_engine),
+            pd.Series([np.inf, -np.inf, np.inf], index=const_rets.columns, name="sharpe_ratio"),
+        )
+        assert const_rets["pos"].vbt.returns(freq="1D").sharpe_ratio(risk_free=0.0, engine=test_engine) == np.inf
+        # Equal values after subtracting the risk-free rate also count as zero volatility
+        assert np.isnan(const_rets["pos"].vbt.returns(freq="1D").sharpe_ratio(risk_free=0.001, engine=test_engine))
+
+        # Constant +/-inf columns have NaN std; all engines/layouts must return NaN, not signed inf
+        # (the contiguous Rust path used to treat them as zero-volatility via the constant shortcut).
+        inf_arr = np.column_stack([np.full(32, np.inf), np.full(32, -np.inf)])
+        for order in ("C", "F"):
+            arr = np.array(inf_arr, order=order, copy=True)
+            assert arr.flags["C_CONTIGUOUS"] == (order == "C")
+            assert arr.flags["F_CONTIGUOUS"] == (order == "F")
+            out = vbt.returns.dispatch.sharpe_ratio(arr, 252.0, 0.0, 1, engine=test_engine)
+            assert np.isnan(out).all(), (order, test_engine, out)
+
+    def test_deflated_sharpe_ratio(self):
+        pd.testing.assert_series_equal(
+            rets.vbt.returns.deflated_sharpe_ratio(risk_free=0.01),
+            pd.Series(
+                [0.2374973566617728, 5.910048655681186e-16, 0.0032783041604936523],
+                index=rets.columns,
+                name="deflated_sharpe_ratio",
+            ),
+        )
+        pd.testing.assert_series_equal(
+            rets.vbt.returns.deflated_sharpe_ratio(risk_free=0.03),
+            pd.Series(
+                [0.15146264148773053, 5.864288083101271e-16, 0.002229547585230213],
+                index=rets.columns,
+                name="deflated_sharpe_ratio",
+            ),
+        )
+
+    def test_deflated_sharpe_ratio_reference(self):
+        np.random.seed(seed)
+        n = 500
+        arr = np.random.standard_t(4, size=(n, 3)) * 0.01 + 0.001
+        arr[np.random.uniform(size=(n, 3)) < 0.05] = np.nan
+        acc = pd.DataFrame(arr, index=pd.date_range("2020", periods=n)).vbt.returns(freq="D", year_freq="365 days")
+        sharpe = acc.sharpe_ratio().values
+        sr = sharpe / np.sqrt(365)
+        sr0 = approx_exp_max_sharpe(0, np.var(sharpe, ddof=1) / 365, 3)
+        t = np.sum(~np.isnan(arr), axis=0)
+        g3 = skew(arr, nan_policy="omit")
+        g4 = kurtosis(arr, fisher=False, nan_policy="omit")
+        np.testing.assert_allclose(
+            acc.deflated_sharpe_ratio().values,
+            norm.cdf((sr - sr0) * np.sqrt(t - 1) / np.sqrt(1 - g3 * sr + (g4 - 1) / 4 * sr**2)),
+        )
+
+    def test_deflated_sharpe_ratio_nan(self):
+        np.random.seed(seed)
+        n = 300
+        df = pd.DataFrame(np.random.standard_t(4, size=(n, 3)) * 0.01 + 0.001, index=pd.date_range("2020", periods=n))
+        df.iloc[10:60, 0] = np.nan
+
+        def dsr(obj):
+            acc = obj.vbt.returns(freq="D", year_freq="365 days")
+            return acc.deflated_sharpe_ratio(risk_free=0.0, var_sharpe=0.01, nb_trials=5).iloc[0]
+
+        assert dsr(df) == pytest.approx(dsr(df.dropna()), rel=1e-12)
+        assert dsr(df) != pytest.approx(dsr(df.fillna(0.0)), rel=1e-3)
+
+    def test_downside_risk(self):
+        assert isclose(rets["a"].vbt.returns.downside_risk(required_return=0.1), 0.0)
+        pd.testing.assert_series_equal(
+            rets.vbt.returns.downside_risk(required_return=0.1),
+            pd.Series([0.0, 8.329186468210578, 7.069987427302981], index=rets.columns, name="downside_risk"),
+        )
+        pd.testing.assert_frame_equal(
+            rets.vbt.returns.rolling_downside_risk(),
+            pd.DataFrame(
+                [
+                    [np.nan, np.nan, np.nan],
+                    [0.0, 5.7314919523628385, 0.0],
+                    [0.0, 6.227459353540574, 0.0],
+                    [0.0, 6.978571699349585, 4.779779942245908],
+                    [0.0, 8.329186468210578, 7.069987427302981],
+                ],
+                index=rets.index,
+                columns=rets.columns,
+            ),
+        )
+
+    def test_sortino_ratio(self):
+        assert isclose(rets["a"].vbt.returns.sortino_ratio(required_return=0.1), np.inf)
+        pd.testing.assert_series_equal(
+            rets.vbt.returns.sortino_ratio(required_return=0.1),
+            pd.Series([np.inf, -18.441677017667562, 3.4417788692752858], index=rets.columns, name="sortino_ratio"),
+        )
+        pd.testing.assert_frame_equal(
+            rets.vbt.returns.rolling_sortino_ratio(),
+            pd.DataFrame(
+                [
+                    [np.nan, np.nan, np.nan],
+                    [np.inf, -19.1049731745428, np.inf],
+                    [np.inf, -19.04869919906529, np.inf],
+                    [np.inf, -18.887182253617894, 22.06052281036573],
+                    [np.inf, -18.441677017667562, 3.4417788692752858],
+                ],
+                index=rets.index,
+                columns=rets.columns,
+            ),
+        )
+
+    def test_information_ratio(self):
+        assert isclose(rets["a"].vbt.returns.information_ratio(benchmark_rets["a"]), -0.5575108215121097)
+        pd.testing.assert_series_equal(
+            rets.vbt.returns.information_ratio(benchmark_rets),
+            pd.Series(
+                [-0.5575108215121097, 1.8751745305884349, -0.3791876496995291],
+                index=rets.columns,
+                name="information_ratio",
+            ),
+        )
+        pd.testing.assert_frame_equal(
+            rets.vbt.returns.rolling_information_ratio(benchmark_rets),
+            pd.DataFrame(
+                [
+                    [np.nan, np.nan, np.nan],
+                    [np.nan, np.nan, np.nan],
+                    [-1.1972053570548309, 1.6499071488151926, -1.9503403469059444],
+                    [-0.9036343476254122, 2.183905200180643, -0.6855076064440647],
+                    [-0.5575108215121097, 1.8751745305884349, -0.3791876496995291],
+                ],
+                index=rets.index,
+                columns=rets.columns,
+            ),
+        )
+
+    def test_beta(self):
+        assert isclose(rets["a"].vbt.returns.beta(benchmark_rets["a"]), 0.7853755858374825)
+        pd.testing.assert_series_equal(
+            rets.vbt.returns.beta(benchmark_rets),
+            pd.Series([0.7853755858374825, 0.4123019930790345, 0.30840682076341036], index=rets.columns, name="beta"),
+        )
+        pd.testing.assert_frame_equal(
+            rets.vbt.returns.rolling_beta(benchmark_rets),
+            pd.DataFrame(
+                [
+                    [np.nan, np.nan, np.nan],
+                    [np.nan, np.nan, np.nan],
+                    [0.7887842027059571, 0.2049668794115673, 0.2681790192492397],
+                    [0.7969484728140032, 0.34249231546013587, 0.30111751528469777],
+                    [0.7853755858374825, 0.4123019930790345, 0.30840682076341036],
+                ],
+                index=rets.index,
+                columns=rets.columns,
+            ),
+        )
+
+    def test_alpha(self):
+        assert isclose(rets["a"].vbt.returns.alpha(benchmark_rets["a"], risk_free=0.01), 41819510790.213036)
+        pd.testing.assert_series_equal(
+            rets.vbt.returns.alpha(benchmark_rets, risk_free=0.01),
+            pd.Series([41819510790.213036, -0.9999999939676926, -0.999999999999793], index=rets.columns, name="alpha"),
+        )
+        pd.testing.assert_frame_equal(
+            rets.vbt.returns.rolling_alpha(benchmark_rets),
+            pd.DataFrame(
+                [
+                    [np.nan, np.nan, np.nan],
+                    [np.nan, np.nan, np.nan],
+                    [18396133022.071487, -1.0, 558643.320341666],
+                    [974350522.6315696, -0.9999999999999931, -0.9999999996015246],
+                    [41819510790.213036, -0.9999999939676926, -0.999999999999793],
+                ],
+                index=rets.index,
+                columns=rets.columns,
+            ),
+        )
+
+    def test_tail_ratio(self):
+        assert isclose(rets["a"].vbt.returns.tail_ratio(), 3.5238095238095237)
+        pd.testing.assert_series_equal(
+            rets.vbt.returns.tail_ratio(),
+            pd.Series(
+                [3.5238095238095237, 0.43684210526315786, 1.947368421052631], index=rets.columns, name="tail_ratio"
+            ),
+        )
+        pd.testing.assert_frame_equal(
+            rets.vbt.returns.rolling_tail_ratio(),
+            pd.DataFrame(
+                [
+                    [np.nan, np.nan, np.nan],
+                    [1.0, 1.0, 1.0],
+                    [1.857142857142857, 0.818181818181818, 1.857142857142857],
+                    [2.714285714285715, 0.6307692307692306, 3.8000000000000007],
+                    [3.5238095238095237, 0.43684210526315786, 1.947368421052631],
+                ],
+                index=rets.index,
+                columns=rets.columns,
+            ),
+        )
+
+    def test_value_at_risk(self):
+        assert isclose(rets["a"].vbt.returns.value_at_risk(cutoff=0.05), 0.26249999999999996)
+        pd.testing.assert_series_equal(
+            rets.vbt.returns.value_at_risk(cutoff=0.05),
+            pd.Series(
+                [0.26249999999999996, -0.47500000000000003, -0.47500000000000003],
+                index=rets.columns,
+                name="value_at_risk",
+            ),
+        )
+        pd.testing.assert_frame_equal(
+            rets.vbt.returns.rolling_value_at_risk(),
+            pd.DataFrame(
+                [
+                    [np.nan, np.nan, np.nan],
+                    [1.0, -0.19999999999999996, 1.0],
+                    [0.525, -0.2475, 0.525],
+                    [0.3499999999999999, -0.325, -0.24999999999999994],
+                    [0.26249999999999996, -0.47500000000000003, -0.47500000000000003],
+                ],
+                index=rets.index,
+                columns=rets.columns,
+            ),
+        )
+
+    def test_cond_value_at_risk(self):
+        assert isclose(rets["a"].vbt.returns.cond_value_at_risk(cutoff=0.05), 0.25)
+        pd.testing.assert_series_equal(
+            rets.vbt.returns.cond_value_at_risk(cutoff=0.05),
+            pd.Series([0.25, -0.5, -0.5], index=rets.columns, name="cond_value_at_risk"),
+        )
+        pd.testing.assert_frame_equal(
+            rets.vbt.returns.rolling_cond_value_at_risk(),
+            pd.DataFrame(
+                [
+                    [np.nan, np.nan, np.nan],
+                    [1.0, -0.19999999999999996, 1.0],
+                    [0.5, -0.25, 0.5],
+                    [0.33333333333333326, -0.33333333333333337, -0.33333333333333337],
+                    [0.25, -0.5, -0.5],
+                ],
+                index=rets.index,
+                columns=rets.columns,
+            ),
+        )
+
+    def test_cond_value_at_risk_nan(self):
+        arr = np.array(
+            [-0.05, 0.01, np.nan, -0.02, 0.03, 0.02, -0.01, 0.04, -0.03, 0.0]
+            + [0.01, 0.02, -0.04, 0.01, 0.02, 0.03, -0.02, 0.01, 0.0, 0.02, 0.01]
+        ).reshape(-1, 1)
+        clean = arr[~np.isnan(arr[:, 0])]
+        result = vbt.returns.nb.cond_value_at_risk_nb(arr, 0.1)
+        np.testing.assert_allclose(result, vbt.returns.nb.cond_value_at_risk_nb(clean, 0.1))
+        np.testing.assert_allclose(result, [np.mean([-0.05, -0.04])])
+        assert np.isnan(vbt.returns.nb.cond_value_at_risk_nb(np.full((3, 1), np.nan), 0.1)[0])
+        assert np.isnan(vbt.returns.nb.cond_value_at_risk_nb(np.empty((0, 1)), 0.1)[0])
+
+    def test_rolling_cond_value_at_risk_nan(self):
+        arr = np.array([-0.05, 0.01, np.nan, -0.02, 0.03, 0.02, -0.01, 0.04, -0.03, 0.0, 0.01, np.nan, -0.04]).reshape(
+            -1, 1
+        )
+        window = 6
+        result = vbt.returns.nb.rolling_cond_value_at_risk_nb(arr, window, 1, 0.2)
+        expected = np.full(len(arr), np.nan)
+        for i in range(len(arr)):
+            chunk = arr[max(0, i - window + 1) : i + 1, 0]
+            chunk = chunk[~np.isnan(chunk)]
+            if len(chunk) > 0:
+                k = int((len(chunk) - 1) * 0.2)
+                expected[i] = np.sort(chunk)[: k + 1].mean()
+        np.testing.assert_allclose(result[:, 0], expected)
+
+    @pytest.mark.skipif(not _engine.is_rust_available(), reason="vectorbt-rust is not installed or version-compatible")
+    def test_cond_value_at_risk_nan_rust(self):
+        arr = np.array(
+            [-0.05, 0.01, np.nan, -0.02, 0.03, 0.02, -0.01, 0.04, -0.03, 0.0]
+            + [0.01, 0.02, -0.04, 0.01, 0.02, 0.03, -0.02, 0.01, 0.0, 0.02, 0.01]
+        ).reshape(-1, 1)
+        np.testing.assert_allclose(
+            vbt.returns.dispatch.cond_value_at_risk(arr, 0.1, engine="rust"),
+            vbt.returns.nb.cond_value_at_risk_nb(arr, 0.1),
+        )
+        all_nan = np.full((3, 1), np.nan)
+        assert np.isnan(vbt.returns.dispatch.cond_value_at_risk(all_nan, 0.1, engine="rust")[0])
+        np.testing.assert_allclose(
+            vbt.returns.dispatch.rolling_cond_value_at_risk(arr, 6, 1, 0.2, engine="rust"),
+            vbt.returns.nb.rolling_cond_value_at_risk_nb(arr, 6, 1, 0.2),
+            equal_nan=True,
+        )
+
+    def test_capture(self):
+        assert isclose(rets["a"].vbt.returns.capture(benchmark_rets["a"]), 0.0007435597416888084)
+        pd.testing.assert_series_equal(
+            rets.vbt.returns.capture(benchmark_rets),
+            pd.Series([0.0007435597416888084, 1.0, -0.0], index=rets.columns, name="capture"),
+        )
+        pd.testing.assert_frame_equal(
+            rets.vbt.returns.rolling_capture(benchmark_rets),
+            pd.DataFrame(
+                [
+                    [np.nan, np.nan, np.nan],
+                    [1.443034545422564e-07, 1.0, 4.0670014163453153e-66],
+                    [6.758314743559073e-07, 1.0, 2.2829041301869233e-75],
+                    [9.623155594782632e-06, 1.0, 43620380068493.234],
+                    [0.0007435597416888084, 1.0, -0.0],
+                ],
+                index=rets.index,
+                columns=rets.columns,
+            ),
+        )
+
+    def test_up_capture(self):
+        assert isclose(rets["a"].vbt.returns.up_capture(benchmark_rets["a"]), 0.0001227848643711666)
+        pd.testing.assert_series_equal(
+            rets.vbt.returns.up_capture(benchmark_rets),
+            pd.Series([0.0001227848643711666, np.nan, 1.0907657953912082e-112], index=rets.columns, name="up_capture"),
+        )
+        pd.testing.assert_frame_equal(
+            rets.vbt.returns.rolling_up_capture(benchmark_rets),
+            pd.DataFrame(
+                [
+                    [np.nan, np.nan, np.nan],
+                    [2.0823486992829062e-14, np.nan, 1.6540500520554797e-131],
+                    [5.555940938023189e-10, np.nan, 1.0907657953912082e-112],
+                    [2.0468688202710215e-07, np.nan, 1.0907657953912082e-112],
+                    [0.0001227848643711666, np.nan, 1.0907657953912082e-112],
+                ],
+                index=rets.index,
+                columns=rets.columns,
+            ),
+        )
+
+    def test_down_capture(self):
+        assert isclose(rets["a"].vbt.returns.down_capture(benchmark_rets["a"]), np.nan)
+        pd.testing.assert_series_equal(
+            rets.vbt.returns.down_capture(benchmark_rets),
+            pd.Series([np.nan, np.nan, np.nan], index=rets.columns, name="down_capture"),
+        )
+        pd.testing.assert_frame_equal(
+            rets.vbt.returns.rolling_down_capture(benchmark_rets),
+            pd.DataFrame(
+                [
+                    [np.nan, np.nan, np.nan],
+                    [np.nan, 1.0, np.nan],
+                    [np.nan, 1.0, np.nan],
+                    [np.nan, 1.0, 1.0],
+                    [np.nan, np.nan, np.nan],
+                ],
+                index=rets.index,
+                columns=rets.columns,
+            ),
+        )
+
+    def test_drawdown(self):
+        pd.testing.assert_series_equal(
+            rets["a"].vbt.returns.drawdown(),
+            pd.Series(np.array([0.0, 0.0, 0.0, 0.0, 0.0]), index=rets["a"].index, name=rets["a"].name),
+        )
+        pd.testing.assert_frame_equal(
+            rets.vbt.returns.drawdown(),
+            pd.DataFrame(
+                np.array(
+                    [
+                        [0.0, 0.0, 0.0],
+                        [0.0, -0.2, 0.0],
+                        [0.0, -0.4, 0.0],
+                        [0.0, -0.6, -0.33333333],
+                        [0.0, -0.8, -0.66666667],
+                    ]
+                ),
+                index=pd.DatetimeIndex(
+                    ["2018-01-01", "2018-01-02", "2018-01-03", "2018-01-04", "2018-01-05"],
+                    dtype="datetime64[ns]",
+                    freq=None,
+                ),
+                columns=rets.columns,
+            ),
+        )
+
+    def test_max_drawdown(self):
+        assert isclose(
+            rets["a"].vbt.returns.max_drawdown(), rets["a"].vbt.returns.drawdowns.max_drawdown(fill_value=0.0)
+        )
+        pd.testing.assert_series_equal(
+            rets.vbt.returns.max_drawdown(), rets.vbt.returns.drawdowns.max_drawdown(fill_value=0.0)
+        )
+        pd.testing.assert_frame_equal(
+            rets.vbt.returns.rolling_max_drawdown(),
+            pd.DataFrame(
+                [
+                    [np.nan, np.nan, np.nan],
+                    [0.0, -0.19999999999999996, 0.0],
+                    [0.0, -0.3999999999999999, 0.0],
+                    [0.0, -0.6, -0.33333333333333337],
+                    [0.0, -0.8, -0.6666666666666667],
+                ],
+                index=rets.index,
+                columns=rets.columns,
+            ),
+        )
+
+    def test_drawdowns(self):
+        assert type(rets["a"].vbt.returns.drawdowns) is vbt.Drawdowns
+        assert rets["a"].vbt.returns.drawdowns.wrapper.freq == rets["a"].vbt.wrapper.freq
+        assert rets["a"].vbt.returns.drawdowns.wrapper.ndim == rets["a"].ndim
+        assert rets.vbt.returns.drawdowns.wrapper.ndim == rets.ndim
+        assert isclose(
+            rets["a"].vbt.returns.drawdowns.max_drawdown(fill_value=0.0), rets["a"].vbt.returns.max_drawdown()
+        )
+        pd.testing.assert_series_equal(
+            rets.vbt.returns.drawdowns.max_drawdown(fill_value=0.0), rets.vbt.returns.max_drawdown()
+        )
+
+    def test_stats(self):
+        stats_index = pd.Index(
+            [
+                "Start",
+                "End",
+                "Period",
+                "Total Return [%]",
+                "Annualized Return [%]",
+                "Annualized Volatility [%]",
+                "Max Drawdown [%]",
+                "Max Drawdown Duration",
+                "Sharpe Ratio",
+                "Calmar Ratio",
+                "Omega Ratio",
+                "Sortino Ratio",
+                "Skew",
+                "Kurtosis",
+                "Tail Ratio",
+                "Common Sense Ratio",
+                "Value at Risk",
+            ],
+            dtype="object",
+        )
+        pd.testing.assert_series_equal(
+            rets.vbt.returns.stats(),
+            pd.Series(
+                [
+                    pd.Timestamp("2018-01-01 00:00:00"),
+                    pd.Timestamp("2018-01-05 00:00:00"),
+                    pd.Timedelta("5 days 00:00:00"),
+                    106.66666666666667,
+                    3.529303946892918e52,
+                    747.9800589021598,
+                    73.33333333333333,
+                    pd.Timedelta("3 days 00:00:00"),
+                    -4.926913414772034,
+                    -0.625,
+                    np.inf,
+                    np.inf,
+                    0.25687104876585726,
+                    -0.25409565813913854,
+                    1.9693400167084374,
+                    1.2436594860479807e51,
+                    -0.2291666666666667,
+                ],
+                index=stats_index,
+                name="agg_func_mean",
+            ),
+        )
+        pd.testing.assert_series_equal(
+            rets.vbt.returns.stats(column="a"),
+            pd.Series(
+                [
+                    pd.Timestamp("2018-01-01 00:00:00"),
+                    pd.Timestamp("2018-01-05 00:00:00"),
+                    pd.Timedelta("5 days 00:00:00"),
+                    400.0,
+                    1.0587911840678753e53,
+                    641.7884083645566,
+                    np.nan,
+                    pd.NaT,
+                    29.052280196490333,
+                    np.nan,
+                    np.inf,
+                    np.inf,
+                    1.4693345482106241,
+                    2.030769230769236,
+                    3.5238095238095237,
+                    3.730978458143942e51,
+                    0.26249999999999996,
+                ],
+                index=stats_index,
+                name="a",
+            ),
+        )
+        pd.testing.assert_series_equal(
+            rets.vbt.returns.stats(column="a", settings=dict(freq="10 days", year_freq="200 days")),
+            pd.Series(
+                [
+                    pd.Timestamp("2018-01-01 00:00:00"),
+                    pd.Timestamp("2018-01-05 00:00:00"),
+                    pd.Timedelta("50 days 00:00:00"),
+                    400.0,
+                    62400.0,
+                    150.23130314433288,
+                    np.nan,
+                    pd.NaT,
+                    6.800624405721308,
+                    np.nan,
+                    np.inf,
+                    np.inf,
+                    1.4693345482106241,
+                    2.030769230769236,
+                    3.5238095238095237,
+                    2202.3809523809523,
+                    0.26249999999999996,
+                ],
+                index=stats_index,
+                name="a",
+            ),
+        )
+        pd.testing.assert_series_equal(
+            rets.vbt.returns.stats(column="a", settings=dict(benchmark_rets=benchmark_rets)),
+            pd.Series(
+                [
+                    pd.Timestamp("2018-01-01 00:00:00"),
+                    pd.Timestamp("2018-01-05 00:00:00"),
+                    pd.Timedelta("5 days 00:00:00"),
+                    400.0,
+                    451.8597134178033,
+                    1.0587911840678753e53,
+                    641.7884083645566,
+                    np.nan,
+                    pd.NaT,
+                    29.052280196490333,
+                    np.nan,
+                    np.inf,
+                    np.inf,
+                    1.4693345482106241,
+                    2.030769230769236,
+                    3.5238095238095237,
+                    3.730978458143942e51,
+                    0.26249999999999996,
+                    41819510790.213036,
+                    0.7853755858374825,
+                ],
+                index=pd.Index(
+                    [
+                        "Start",
+                        "End",
+                        "Period",
+                        "Total Return [%]",
+                        "Benchmark Return [%]",
+                        "Annualized Return [%]",
+                        "Annualized Volatility [%]",
+                        "Max Drawdown [%]",
+                        "Max Drawdown Duration",
+                        "Sharpe Ratio",
+                        "Calmar Ratio",
+                        "Omega Ratio",
+                        "Sortino Ratio",
+                        "Skew",
+                        "Kurtosis",
+                        "Tail Ratio",
+                        "Common Sense Ratio",
+                        "Value at Risk",
+                        "Alpha",
+                        "Beta",
+                    ],
+                    dtype="object",
+                ),
+                name="a",
+            ),
+        )
+        pd.testing.assert_series_equal(
+            rets.vbt.returns.stats(column="a", settings=dict(benchmark_rets=benchmark_rets)),
+            rets.vbt.returns(benchmark_rets=benchmark_rets).stats(column="a"),
+        )
+        pd.testing.assert_series_equal(rets["c"].vbt.returns.stats(), rets.vbt.returns.stats(column="c"))
+        pd.testing.assert_series_equal(
+            rets["c"].vbt.returns.stats(), rets.vbt.returns.stats(column="c", group_by=False)
+        )
+        pd.testing.assert_series_equal(
+            rets.vbt.returns(freq="10d").stats(), rets.vbt.returns.stats(settings=dict(freq="10d"))
+        )
+        pd.testing.assert_series_equal(
+            rets.vbt.returns(freq="d", year_freq="400d").stats(),
+            rets.vbt.returns.stats(settings=dict(freq="d", year_freq="400d")),
+        )
+        stats_df = rets.vbt.returns.stats(agg_func=None)
+        assert stats_df.shape == (3, 17)
+        pd.testing.assert_index_equal(stats_df.index, rets.vbt.returns.wrapper.columns)
+        pd.testing.assert_index_equal(stats_df.columns, stats_index)
+
+    def test_qs(self):
+        if qs_available:
+            pd.testing.assert_series_equal(
+                rets.vbt.returns.qs.sharpe(), qs.stats.sharpe(rets.dropna(), periods=365, rf=0.01)
+            )
+            pd.testing.assert_series_equal(
+                rets.vbt.returns(freq="h", year_freq="252d").qs.sharpe(),
+                qs.stats.sharpe(rets.dropna(), periods=252 * 24, rf=0.01),
+            )
+            pd.testing.assert_series_equal(
+                rets.vbt.returns(freq="h", year_freq="252d").qs.sharpe(periods=252, periods_per_year=252, rf=0),
+                qs.stats.sharpe(rets.dropna()),
+            )
+            # Verify delegation against the installed QuantStats version's preparation rules.
+            valid_mask = rets["a"].notna() & benchmark_rets["a"].notna()
+            expected = qs.stats.r_squared(rets["a"][valid_mask], benchmark=benchmark_rets["a"][valid_mask])
+            assert isclose(rets["a"].vbt.returns(benchmark_rets=benchmark_rets["a"]).qs.r_squared(), expected)

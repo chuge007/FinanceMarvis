@@ -1,0 +1,49 @@
+import { useSyncExternalStore } from "react";
+import { apiClient } from "./index";
+import { freeQuoteDelayMinutes, resolvePlanAccess, type PlanAccess, type QuoteDelayFacts } from "./plan-rules";
+
+export * from "./plan-rules";
+
+function planAccessKey(): string {
+  const user = apiClient.getCurrentUser();
+  if (!user) return apiClient.isDisplayScopePending() ? "pending" : "anonymous";
+  return [
+    user.id,
+    user.emailVerified === true ? "verified" : "unverified",
+    user.plan ?? "",
+    user.effectivePlan ?? "",
+    user.trialEndsAt ?? "",
+  ].join(":");
+}
+
+/** Plan state of the signed-in cloud session, refreshed whenever the session changes. */
+export function usePlanAccess(): PlanAccess {
+  useSyncExternalStore(
+    (onChange) => apiClient.subscribeCurrentUser(onChange),
+    planAccessKey,
+    planAccessKey,
+  );
+  return resolvePlanAccess(apiClient.getCurrentUser());
+}
+
+export function cloudDisplayScope(): string | null {
+  const user = apiClient.getCurrentUser();
+  const access = resolvePlanAccess(user);
+  const account = user?.id ?? null;
+  return apiClient.isDisplayScopePending() ? null : JSON.stringify([account, access.emailVerified, access.hasProAccess]);
+}
+
+/** Non-secret identity for display data whose answer depends on cloud access. */
+export function useCloudDisplayScope(): string | null {
+  usePlanAccess();
+  return cloudDisplayScope();
+}
+
+/**
+ * The delay this account sees on a price (see {@link freeQuoteDelayMinutes}):
+ * the free tier's on a price that is not live, null with Pro or a trial.
+ * Follows sign-in and plan changes.
+ */
+export function useFreeQuoteDelay(quote: QuoteDelayFacts | null | undefined): number | null {
+  return freeQuoteDelayMinutes(usePlanAccess(), quote);
+}

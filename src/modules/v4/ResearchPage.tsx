@@ -8,8 +8,9 @@ import { CorrelationLab } from './components/CorrelationLab';
 import { StructureView } from './components/StructureView';
 import { LegacyLens } from './components/LegacyLens';
 import { IndustryPage } from '../industry/IndustryPage';
+import { SidecarFeed } from '../../shared/components/SidecarFeed';
 
-type SubTab = 'industry' | 'overlay' | 'corr' | 'structure' | 'legacy';
+type SubTab = 'industry' | 'overlay' | 'corr' | 'structure' | 'project-files' | 'legacy';
 
 const LEGACY_TABS: ModuleTab[] = ['macro', 'sentiment', 'fundflow', 'technical', 'rotation'];
 
@@ -18,6 +19,7 @@ const SUBS: { id: SubTab; label: string; hint: string }[] = [
   { id: 'overlay', label: '叠加实验室', hint: '同轴看趋势与背离' },
   { id: 'corr', label: '相关性', hint: '矩阵 / 滚动 / 领先滞后' },
   { id: 'structure', label: '结构', hint: '板块相对强弱' },
+  { id: 'project-files', label: '项目文件', hint: 'SEC EDGAR 官方文件：edgartools / sec-edgar-downloader' },
   { id: 'legacy', label: '旧版透镜', hint: '保留原有明细页' },
 ];
 
@@ -97,6 +99,25 @@ export const ResearchPage = memo(function ResearchPage({ initialTab }: Props) {
           <StructureView structure={structure} loading={structureLoading} />
         </div>
       )}
+      {tab === 'project-files' && (
+        <div className="space-y-3">
+          <p className="text-[0.8125rem] leading-relaxed text-[#636878]">
+            SEC EDGAR 是美股财报与持仓的一手主源；以下每条线都标出供数项目与依赖。
+            未配置 EDGAR_IDENTITY 或未装 edgartools 时显示「缺」，不用模拟文件顶替。
+          </p>
+          <SidecarFeed
+            project="edgartools" stability="S1" title="EDGAR 10-K / 10-Q / 8-K 文件"
+            caliber="edgartools Company.get_filings，官方一手；给的是已提交文件，不是预约日期"
+            method="edgar.filings" params={{ ticker: 'AAPL', limit: 20 }} maxRows={20}
+          />
+          <SidecarFeed
+            project="sec-edgar-downloader" stability="S1" title="EDGAR 13F 持仓文件"
+            caliber="13F-HR 机构持仓文件；仅官方已提交记录，不做持仓合并"
+            method="edgar.13f" params={{ ticker: 'AAPL', limit: 20 }} maxRows={20}
+          />
+        </div>
+      )}
+
       {tab === 'legacy' && <LegacyLens initial={isLegacy ? initialTab : undefined} />}
     </div>
   );

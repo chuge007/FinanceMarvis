@@ -1,0 +1,78 @@
+import { MISSING_VALUE } from "../../../utils/format";
+import type { SupplyEntity } from "../../../api-client/supply-chain";
+import type { GraphPath, GraphPayload } from "../../../api-client/supply-chain-graph";
+import { hongKongListingCode, listingSuffixVenue } from "../../../sources/listing-symbols";
+import { canonicalExchange, canonicalTickerKey, isUsListingExchange, publicTickerKey } from "../../../utils/exchanges";
+
+export const entityKey = (entity: SupplyEntity) => entity.ticker ? publicTickerKey(entity.ticker, entity.exchange ?? undefined) : `id:${entity.id}`;
+/**
+ * The ticker as shown and typed to open it, as every other function writes a
+ * listing: a US listing bare, any other with its venue (`STAN:LSE`,
+ * `0941:HKEX`), never a bare STAN that a US company could hold. A ticker served
+ * with a vendor's venue suffix (`600028.SS`, `000063.SZ`) is read as its venue's
+ * listing (`600028:SSE`, `000063:SZSE`).
+ */
+export const entityTicker = (entity: Pick<SupplyEntity, "ticker" | "exchange">): string | null => {
+  if (!entity.ticker) return entity.ticker;
+  const suffixed = listingSuffixVenue(entity.ticker, entity.exchange ?? undefined);
+  const symbol = suffixed?.symbol ?? entity.ticker;
+  const exchange = suffixed?.exchange ?? entity.exchange;
+  return exchange && !isUsListingExchange(exchange) ? canonicalTickerKey(hongKongListingCode(symbol, canonicalExchange(exchange)), exchange) : symbol;
+};
+export const entityLabel = (entity: SupplyEntity) => entityTicker(entity) ?? entity.name;
+/**
+ * A trade link whose every disclosure is a related-party (connected) trade,
+ * as the server labels a table row: the graph names it one rather than a
+ * plain supplier or customer.
+ */
+export const relatedPartyLink = (link: Pick<GraphPayload["links"][number], "relationship" | "evidence">) =>
+  link.relationship === "commerce" && link.evidence.length > 0 && link.evidence.every(item => item.relatedParty === true);
+/**
+ * A route in the direction goods move: a supplier's route ends at the focus
+ * company ("WPM → NEM" for a streamer buying from a miner), a customer's
+ * starts there, so a relationship reads the same way on both companies' pages.
+ */
+export function pathLabel(path: GraphPath, data: GraphPayload) {
+  const nodes = new Map(data.nodes.map(node => [node.id, node]));
+  const labels = path.nodeIds.map(id => nodes.get(id) ? entityLabel(nodes.get(id)!) : id);
+  return (path.id.startsWith("upstream|") ? labels.reverse() : labels).join(" → ");
+}
+/**
+ * "6% est. of A revenue" for a product of shares along a route; one hop's
+ * share is the one its report files, "4.5% of A revenue", never an estimate.
+ */
+export function exposureLabel(path: GraphPath, data: GraphPayload) {
+  const exposure = path.exposure;
+  if (!exposure) return MISSING_VALUE;
+  const denominator = data.nodes.find(node => node.id === exposure.denominatorEntityId);
+  return `${Number(exposure.pct.toPrecision(4))}%${exposure.estimated ? " est." : ""} of ${denominator ? entityLabel(denominator) : exposure.denominatorEntityId} ${exposure.basis}`;
+}
+export interface GraphNode { entity: SupplyEntity; column: number; hops: number; path: GraphPath | null; related: boolean; }
+/** A selected path has priority over other positions so every highlighted hop remains connected. */
+export function graphNodes(data: GraphPayload, collapsed: readonly string[], selectedPath: GraphPath | null): GraphNode[] {
+  if (!data.entity) return [];
+  const entities = new Map(data.nodes.map(node => [node.id, node]));
+  const result = new Map<string, GraphNode>();
+  result.set(data.entity.id, { entity: data.entity, column: 0, hops: 0, path: null, related: false });
+  const reaches = [...data.upstream, ...data.downstream, ...data.related];
+  const links = new Map(data.links.map(link => [link.id, link]));
+  const addPath = (path: GraphPath, direction: "upstream" | "downstream", selected = false) => {
+    const sign = direction === "upstream" ? -1 : 1;
+    path.nodeIds.forEach((id, index) => {
+      const entity = entities.get(id);
+      if (!entity || path.nodeIds.slice(1, index).some(node => collapsed.includes(node))) return;
+      const previous = result.get(id);
+      const prefixLinks = path.linkIds.slice(0, index);
+      const prefixPath = index === path.hops ? path : { ...path, nodeIds: path.nodeIds.slice(0, index + 1), linkIds: prefixLinks, hops: index, confidence: prefixLinks.reduce((value, id) => value * (links.get(id)?.confidence ?? 0), 1), score: prefixLinks.reduce((value, id) => value * (links.get(id)?.weight ?? 0), 1), exposure: null };
+      const related = prefixLinks.some(id => links.get(id)?.relationship !== "commerce");
+      if (!previous || index < previous.hops || selected) result.set(id, { entity, column: index === 0 ? 0 : sign * index, hops: index, path: index ? prefixPath : null, related });
+    });
+  };
+  for (const reach of reaches) addPath(data.options.ranking === "shortest" ? reach.shortestPath : reach.bestPath, reach.direction);
+  for (const path of data.paths) addPath(path, path.id.startsWith("upstream|") ? "upstream" : "downstream");
+  if (selectedPath) {
+    const reach = reaches.find(row => row.bestPath.id === selectedPath.id || row.shortestPath.id === selectedPath.id);
+    addPath(selectedPath, reach?.direction ?? (selectedPath.id.startsWith("upstream|") ? "upstream" : "downstream"), true);
+  }
+  return [...result.values()].sort((a, b) => a.column - b.column || Number(a.related) - Number(b.related) || (b.path?.score ?? 0) - (a.path?.score ?? 0) || a.entity.name.localeCompare(b.entity.name));
+}

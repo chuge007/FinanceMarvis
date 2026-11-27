@@ -1,0 +1,999 @@
+# Frequently Asked Questions
+
+
+  ## I'm trying to run the code, but it's not working, how do I fix it?
+
+  If your question is formulated in a short manner like the above, we won't help. We don't teach programming. If you're unable to read and understand the [Manual](https://github.com/ccxt/ccxt/wiki) or you can't follow precisely the guides from the [CONTRIBUTING](https://github.com/ccxt/ccxt/blob/master/CONTRIBUTING.md) doc on how to report an issue, we won't help either. Read the CONTRIBUTING guides on how to report an issue and read the Manual. You should not risk anyone's money and time without reading the entire Manual very carefully. You should not risk anything if you're not used to a lot of reading with tons of details. Also, if you don't have the confidence with the programming language you're using, there are much better places for coding fundamentals and practice. Search for `python tutorials`, `js videos`, play with examples, this is how other people climb up the learning curve. No shortcuts, if you want to learn something.
+
+  ## What is required to get help?
+
+  When asking a question:
+
+  - Use the search button for duplicates first!
+  - **Post your request and response in `verbose` mode!** Add `exchange.verbose = true` right before the line you're having issues with, and copypaste what you see on your screen. It's written and mentioned everywhere, in the [Troubleshooting](https://github.com/ccxt/ccxt/wiki/Manual#troubleshooting) section, in the [README](https://github.com/ccxt/ccxt/blob/master/README.md) and in many answers to similar questions among [previous issues](https://github.com/ccxt/ccxt/issues) and [pull requests](https://github.com/ccxt/ccxt/pulls). No excuses. The verbose output should include both the request and response from the exchange.
+  - Include the full error callstack!
+  - Write your programming language **and language version number**
+  - Write the CCXT / CCXT Pro library version number
+  - Which exchange it is
+  - Which method you're trying to call
+
+  - **Post your code** to reproduce the problem. Make it a complete short runnable program, don't swallow the lines and make it as compact as you can (5-10 lines of code), including the exchange instantation code. Remove all irrelevant parts from it, leaving just the essence of the code to reproduce the issue.
+    - **DON'T POST SCREENSHOTS OF CODE OR ERRORS, POST THE OUTPUT AND CODE IN PLAIN TEXT!**
+    - **Surround code and output with triple backticks: &#096;&#096;&#096;GOOD&#096;&#096;&#096;**.
+    - Don't confuse the backtick symbol (&#096;) with the quote symbol (\'): '''BAD'''
+    - Don't confuse a single backtick with triple backticks: &#096;BAD&#096;
+
+  - **DO NOT POST YOUR `apiKey` AND `secret`!** Keep them safe (remove them before posting)!
+
+  ## I am calling a method and I get an error, what am I doing wrong?
+
+  You're not reporting the issue properly ) Please, help the community to help you ) Read this and follow the steps: https://github.com/ccxt/ccxt/blob/master/CONTRIBUTING.md#how-to-submit-an-issue. Once again, your code to reproduce the issue and your verbose request and response **ARE REQUIRED**. *Just the error traceback, or just the response, or just the request, or just the code – is not enough!*
+
+  ## I got an incorrect result from a method call, can you help?
+
+  Basically the same answer as the previous question. Read and follow **precisely**: https://github.com/ccxt/ccxt/blob/master/CONTRIBUTING.md#how-to-submit-an-issue. Once again, your code to reproduce the issue and your verbose request and response **ARE REQUIRED**. *Just the error traceback, or just the response, or just the request, or just the code – is not enough!*
+
+  ## Can you implement feature `foo` in exchange `bar`?
+
+  Yes, we can. And we will, if nobody else does that before us. There's very little point in asking this type of questions, because the answer is always positive. When someone asks if we can do this or that, the question is not about our abilities, it all boils down to time and management needed for implementing all accumulated feature requests.
+
+  Moreover, this is an open-source library which is a work in progress. This means, that this project is intended to be developed by the community of users, who are using it. What you're asking is not whether we can or cannot implement it, in fact you're actually telling us to go do that particular task and this is not how we see a voluntary collaboration. Your contributions, PRs and commits are welcome: https://github.com/ccxt/ccxt/blob/master/CONTRIBUTING.md#how-to-contribute-code.
+
+  We don't give promises or estimates on the free open-source work. If you wish to speed it up, feel free to reach out to us via info@ccxt.trade.
+
+  ## When will you add feature `foo` for exchange `bar` ? What's the estimated time? When should we expect this?
+
+  We don't give promises or estimates on the open-source work. The reasoning behind this is explained in the previous paragraph.
+
+  ## When will you add the support for an exchange requested in the Issues?
+
+  Again, we can't promise on the dates for adding this or that exchange, due to reasons outlined above. The answer will always remain the same: _as soon as we can_.
+
+  ## How long should I wait for a feature to be added? I need to decide whether to implement it myself or to wait for the CCXT Dev Team to implement it for me.
+
+  Please, go for implemeting it yourself, do not wait for us. We will add it as soon as we can. Also, your contributions are very welcome:
+
+  - https://github.com/ccxt/ccxt/blob/master/CONTRIBUTING.md#how-to-contribute-code
+
+  ## What's your progress on adding the feature `foo` that was requested earlier? How do you do implementing exchange `bar`?
+
+  This type of questions is usually a waste of time, because answering it usually requires too much time for context-switching, and it often takes more time to answer this question, than to actually satisfy the request with code for a new feature or a new exchange. The progress of this open-source project is also open, so, whenever you're wondering how it is doing, take a look into commit history.
+
+  ## What is the status of this PR? Any update?
+
+  If it is not merged, it means that the PR contains errors, that should be fixed first. If it could be merged as is – we would merge it, and you wouldn't have asked this question in the first place. The most frequent reason for not merging a PR is a violation of any of the [CONTRIBUTING guidelines](https://github.com/ccxt/ccxt/blob/master/CONTRIBUTING.md#derived-exchange-classes). Those guidelines should be taken literally, cannot skip a single line or word from there if you want your PR to be merged quickly. Code contributions that do not break the guidelines get merged almost immediately (usually, within hours).
+
+  ## Can you point out the errors or what should I edit in my PR to get it merged into master branch?
+
+  Unfortunately, we don't always have the time to quickly list out each and every single error in the code that prevents it from merging. It is often easier and faster to just go and fix the error rather than explain what one should do to fix it. Most of them are already outlined in the [CONTRIBUTING guidelines](https://github.com/ccxt/ccxt/blob/master/CONTRIBUTING.md#derived-exchange-classes). The main rule of thumb is to follow **all guidelines literally**.
+
+  ## Hey! The fix you've uploaded is in TypeScript, would you fix JavaScript / Python / PHP as well, please?
+
+  Our build system generates exchange-specific JavaScript, Python, PHP, C#, Go, Java and Rust code for us automatically, so it is transpiled from TypeScript, and there's no need to fix all languages separately one by one.
+
+  Thus, if it is fixed in TypeScript, it is fixed in JavaScript NPM, Python pip, PHP Composer, C# NuGet, Go, Java and Rust (crates.io) as well. The automatic build usually takes 15-20 minutes. Just upgrade your version with `npm`, `pip` or `composer` **after the new version arrives** and you'll be fine.
+
+  More about it here:
+
+  - https://github.com/ccxt/ccxt/blob/master/CONTRIBUTING.md#multilanguage-support
+  - https://github.com/ccxt/ccxt/blob/master/CONTRIBUTING.md#transpiled-generated-files
+
+  ## What are Exchange Rate FX markets on Binance and how do I use them?
+
+  Binance offers the Exchange Rate Foreign Exchange (FX) perpetual `USDBRL/USDT:USDT`. It uses the USD/BRL exchange rate as its underlying asset and is traded through the same perpetual-swap methods as other Binance USDT-settled linear swaps. It is a derivative contract where the amount is the number of contracts, the position is USDT-settled, and funding applies. This should NOT be confused with the similarly named FX Currency Swap found in traditional finance.
+
+
+  ## How to create an order with takeProfit+stopLoss?
+  Some exchanges support `createOrder` with the additional "attached" `stopLoss` & `takeProfit` sub-orders - view [StopLoss And TakeProfit Orders Attached To A Position](Manual.md#stoploss-and-takeprofit-orders-attached-to-a-position). 
+  However, some exchanges might not support that feature and you will need to run separate `createOrder` methods to add conditional order (e.g. ***trigger order | stoploss order | takeprofit order**) to the already open position - view [Conditional orders](Manual.md#conditional-orders).
+  You can also check them by looking at `exchange.has['createOrderWithTakeProfitAndStopLoss']`, `exchange.has['createStopLossOrder']` and `exchange.has['createTakeProfitOrder']`, however they are not as precise as `.features` property.
+
+  ## What is the difference between `takeProfit/stopLoss` and `takeProfitPrice/stopLossPrice` orders
+
+  At CCXT, we distinguish between several types of takeProfit/stopLoss orders. If you want to place an order that opens a position and simultaneously attaches a take-profit or stop-loss order within the same request (provided the exchange supports this feature), you should use the `takeProfit/stopLoss` syntax.
+  We refer to these attached TP/SL orders **type 3**.
+
+  Example:
+  ```Python
+    params = {
+      'stopLoss': {
+          'triggerPrice': 12.34,  # at what price it will trigger
+          'price': 12.00,  # if exchange supports, 'price' param would be limit price (for market orders, don't include this param)
+        },
+        'takeProfit': {
+            # similar params here
+        }
+    }
+    order = exchange.create_order ('SOL/USDT', 'limit', 'buy', 0.5, 13, params)
+  ```
+
+  If the exchange does not support these attached orders, or you want to place an independent order that will act as a stop Loss/take profit order then you can place a `stopLossPrice` **or** `takeProfitPrice` order, we call these independent sl/tp orders **type 2**.
+
+  Example
+  ```Python
+      symbol = 'ADA/USDT:USDT'
+      main_order = await binance.create_order(symbol, 'market', 'buy', 50) # open position
+      tp_order = await binance.create_order(symbol, 'limit', 'sell', 50, 1.5, {"takeProfitPrice": 1.6}) # take profit order
+      sl_order = await binance.create_order(symbol, 'limit', 'sell', 50, 0.24, {"stopLossPrice": 0.25}) # stop loss order
+  ```
+
+ ## How do trailing orders work?
+  Some exchanges support using `createOrder` to create a `trailingPercent` or `trailingAmount` order - view: [Trailing Orders](Manual.md#trailing-orders)
+  
+  Trailing orders follow behind the current market price by either a percentange or a quote amount. The order trails in one direction but not the other so that it can eventually be executed. The executed order can be a market order or a limit order. A trailing order can usually be placed to open a position, or combined with the `reduceOnly` parameter set to true in order to close a position. These details about what orders are allowed depends on the exchange. Trailing orders often support a `trailingTriggerPrice` parameter and if the current market price crosses that value it will start the trailing function set by `trailingPercent` or `trailingAmount`.
+  
+  Some exchanges might not support this trailing feature. You can check the `.features` property. You can also check if `createOrder` on the exchange you're using has `trailingPercent` or `trailingAmount` as an available parameter in the docstring. Some exchanges might have `exchange.has['createTrailingPercentOrder']`, or `exchange.has['createTrailingAmountOrder']` set to true, which signals that the `trailingPercent` or `trailingAmount` parameters are available in `createOrder`.
+
+  Examples of creating `trailingPercent` and `trailingAmount` orders:
+  ```Python
+    params = {
+      'trailingPercent': 1.0, # percentage away from the current market price, 1.0 means 1%
+      # 'trailingAmount': 100.0, # quote amount away from the current market price, for a SOL/USDT pair this is 100 USDT away from the current market price.
+      # 'trailingTriggerPrice': 44500.0, # the price to trigger activating a trailing stop order
+      'reduceOnly': True, # set to true if you want to close a position, set to false if you want to open a new position
+    }
+    order = exchange.create_order ('SOL/USDT:USDT', 'market', 'sell', 0.5, None, params)
+  ```
+  ```Python
+    trailingAmount = 100.0
+    trailingTriggerPrice = 115.0
+    params = {
+        'reduceOnly': True,
+    }
+    order = exchange.create_trailing_amount_order ('SOL/USDT:USDT', 'market', 'sell', 0.5, None, trailingAmount, trailingTriggerPrice, params)
+  ```
+  ```Python
+    trailingPercent = 1.0
+    trailingTriggerPrice = 115.0
+    params = {
+        'reduceOnly': False,
+    }
+    order = exchange.create_trailing_percent_order ('SOL/USDT:USDT', 'limit', 'buy', 0.5, 13, trailingPercent, trailingTriggerPrice, params)
+  ```
+
+  ## How to create a spot market buy with cost?
+  To create a market-buy order with cost, first, you need to check if the exchange supports that feature (`exchange.has['createMarketBuyOrderWithCost']).
+  If it does, then you can use the `createMarketBuyOrderWithCost` method.
+  Example:
+  ```Python
+  order = await exchange.createMarketBuyOrderWithCost(symbol, cost)
+  ```
+
+## What does the `createMarketBuyRequiresPrice` option mean?
+
+Many exchanges require the amount to be in the quote currency (they don't accept the base amount) when placing spot-market buy orders. In those cases, the exchange will have the option `createMarketBuyRequiresPrice` set to `true`.
+
+Example: If you wanted to buy BTC/USDT with a market buy-order, you would need to provide an amount = 5 USDT instead of 0.000X. We have a check to prevent errors that explicitly require the price because users will usually provide the amount in the base currency.
+
+So by default, if you do, `create_order(symbol, 'market,' 'buy,' 10)` will throw an error if the exchange has that option (`createOrder() requires the price argument for market buy orders to calculate the total cost to spend (amount * price), alternatively set the createMarketBuyOrderRequiresPrice option or param to false...`).
+
+If the exchange requires the cost and the user provided the base amount, we need to request an extra parameter **price** and multiply them to get the cost. If you're aware of this behavior, you can simply disable `createMarketBuyOrderRequiresPrice` and pass the cost in the amount parameter, but disabling it does not mean you can place the order using the base amount instead of the quote.
+
+If you do `create_order(symbol, 'market', 'buy', 0.001, 20000)`  ccxt will use the required price to calculate the cost by doing `0.01*20000` and send that value to the exchange.
+
+If you want to provide the cost directly in the amount argument, you can do `exchange.options['createMarketBuyOrderRequiresPrice'] = False` (you acknowledge that the amount will be the cost for market-buy) and then you can do `create_order(symbol, 'market', 'buy', 10)`
+
+This is basically to avoid a user doing this: `create_order('SHIB/USDT', market, buy, 1000000)` and thinking he's trying to buy 1kk of shib but in reality he's buying 1kk USDT worth of SHIB. For that reason, by default ccxt always accepts the base currency in the amount parameter.
+
+Alternatively, you can use the functions `createMarketBuyOrderWithCost`/ `createMarketSellOrderWithCost` if they are available.
+
+  See more: [Market Buys](Manual.md#market-buys)
+
+  ## What's the difference between trading spot and swap/perpetual futures?
+  Spot trading involves buying or selling a financial instrument (like a cryptocurrency) for immediate delivery. It's straightforward, involving the direct exchange of assets.
+
+  Swap trading, on the other hand, involves derivative contracts where two parties exchange financial instruments or cash flows at a set date in the future, based on the underlying asset. Swaps are often used for leverage, speculation, or hedging and do not necessarily involve the exchange of the underlying asset until the contract expires.
+
+
+  Besides that, you will be handling contracts if you're trading swaps and not the base currency (e.g., BTC) directly, so if you create an order with `amount = 1`, the amount in BTC will vary depending on the `contractSize`. You can check the contract size by doing:
+
+  ```Python
+  await exchange.loadMarkets()
+  symbol = 'XRP/USDT:USDT'
+  market = exchange.market(symbol)
+  print(market['contractSize'])
+  ```
+
+  ## Why am I getting an error that says "must be greater than minimum amount precision of 1"?
+  This is a common error that happens when creating orders for contract markets. This error happens when the exchange is expecting a natural number of contracts (1,2,3, etc) in the amount argument of createOrder.
+  
+  Each contract is worth a certain amount of the base asset, determined by the contractSize. You can retrieve the contractSize from a symbols market structure like this:
+  ```Python
+  await exchange.loadMarkets()
+  symbol = 'SOL/USDT:USDT'
+  market = exchange.market(symbol)
+  print(market['contractSize'])
+  ```
+
+  If you create an order with `amount = 1`, the amount of the base asset that is used for the order will vary depending on the symbols `contractSize`.
+
+  Below is a formula and example to find the number of `contracts` that you should use for the amount argument if you want to use 0.5 of the base asset:
+  ```Python
+  await exchange.loadMarkets()
+  symbol = 'SOL/USDT:USDT'
+  market = exchange.market(symbol)
+  # Converting a 0.5 base amount to the number of contracts:
+  # Formula: contracts = (base amount / contract size)
+  contracts = round(0.5 / market['contractSize'])
+  ```
+
+  Here is an example of finding the base amount that will be used with an amount argument of 1 contract:
+  ```Python
+  await exchange.loadMarkets()
+  symbol = 'SOL/USDT:USDT'
+  market = exchange.market(symbol)
+  # Finding the base amount that will be used with 1 contract:
+  # Formula: base amount = (contracts * contract size)
+  contracts = 1
+  base_amount = (contracts * market['contractSize'])
+  ```
+
+  ## How to place a reduceOnly order?
+  A reduceOnly order is a type of order that can only reduce a position, not increase it. To place a reduceOnly order, you typically use the createOrder method with a reduceOnly parameter set to true. This ensures that the order will only execute if it decreases the size of an open position, and it will either partially fill or not fill at all if executing it would increase the position size.
+
+<!-- tabs:start -->
+#### **Javascript**
+```javascript
+const params = {
+    'reduceOnly': true, // set to true if you want to close a position, set to false if you want to open a new position
+}
+const order = await exchange.createOrder (symbol, type, side, amount, price, params)
+```
+#### **Python**
+```python
+params = {
+    'reduceOnly': True, # set to True if you want to close a position, set to False if you want to open a new position
+}
+order = exchange.create_order (symbol, type, side, amount, price, params)
+```
+#### **PHP**
+```php
+$params = {
+    'reduceOnly': true, // set to true if you want to close a position, set to false if you want to open a new position
+}
+$order = $exchange->create_order ($symbol, $type, $side, $amount, $price, $params);
+```
+<!-- tabs:end -->
+
+
+  ## How to check the endpoint used by the unified method?
+  To check the endpoint used by a unified method in the CCXT library, you would typically need to refer to the source code of the library for the specific exchange implementation you're interested in. The unified methods in CCXT abstract away the details of the specific endpoints they interact with, so this information is not directly exposed via the library's API. For detailed inspection, you can look at the implementation of the method for the particular exchange in the CCXT library's source code on GitHub.
+
+  See more: [Unified API](Manual.md#unified-api)
+
+  ## How to differentiate between previousFundingRate, fundingRate and nextFundingRate in the funding rate structure?
+  The funding rate structure has three different funding rate values that can be returned:
+  1. `previousFundingRate`refers to the most recently completed rate.
+  2. `fundingRate` is the upcoming rate. This value is always changing until the funding time passes and then it becomes the previousFundingRate.
+  3. `nextFundingRate` is only supported on a few exchanges and is the predicted funding rate after the upcoming rate. This value is two funding rates from now.
+
+  As an example, say it is 12:30. The `previousFundingRate` happened at 12:00 and we're looking to see what the upcoming funding rate will be by checking the `fundingRate` value. In this example, given 4-hour intervals, the `fundingRate` will happen in the future at 4:00 and the `nextFundingRate` is the predicted rate that will happen at 8:00.
+
+## How to use the Lighter Exchange in CCXT?
+
+Lighter is available as part of CCXT and works like any other CCXT exchange, with two particularities:
+
+1. **Credentials** — Lighter does not use an `apiKey`/`secret` pair. You authenticate either with your L1 (Ethereum) private key, or with a Lighter API key created in the Lighter UI.
+2. **Signing library** — except in Go, you have to tell CCXT where the Lighter signing binary is (`libraryPath`).
+
+### Which credentials do I need?
+
+| Your situation | What to provide | Section |
+|---|---|---|
+| You can export the L1 private key of your wallet | `privateKey` | [Using the L1 private key](#using-the-l1-private-key) |
+| You use Ledger, MetaMask or another wallet whose private key you can't (or don't want to) export | `accountIndex`, `apiKeyIndex` and the Lighter API private key inside `options['auths']` | [How to use Ledger/MetaMask or Lighter API keys](#how-to-use-ledgermetamask-or-lighter-api-keys) |
+
+In both cases you also need the [signing library](#dependencies-requirements).
+
+### Using the L1 private key
+
+This is the simplest setup: the L1 private key is enough, and CCXT derives everything else from it.
+
+- `privateKey`: the L1 private key — **mandatory**
+- `accountIndex` (an integer) in `exchange.options` — **optional**, CCXT fetches it from your wallet address. Set it if you are using a sub-account.
+- `apiKeyIndex` (an integer between 4 and 254) in `exchange.options` — **optional**, CCXT uses `254` by default.
+
+```Python
+lighter = ccxt.lighter({
+    'privateKey': '0x...',  # L1 private key
+    'options': {
+        'libraryPath': 'path/to/lighter-signer-linux-arm64.so',
+    }
+})
+```
+
+With this setup CCXT generates a new Lighter API key for the chosen `apiKeyIndex` and registers it on your account, replacing whatever key was stored at that index. Pick an `apiKeyIndex` that is not used by another application.
+
+### How to use Ledger/MetaMask or Lighter API keys
+
+If you can't get the L1 private key (hardware wallets like Ledger never expose it, and you may not want to export it from MetaMask), create an API key in the Lighter UI and give that to CCXT instead:
+
+1. Go to https://app.lighter.xyz/apikeys and create an API key, signing with your wallet as usual.
+2. Write down the three values shown there:
+   - the **account index**
+   - the **API key index**
+   - the **private key** of the API key — it is shown only when the key is created, so save it right away
+3. Pass them to CCXT as shown below. Do **not** set `privateKey` — that field is reserved for the L1 key.
+
+```Python
+import ccxt
+
+exchange = ccxt.lighter({
+    'options': {
+        'accountIndex': 123456,       # account index from the Lighter UI
+        'apiKeyIndex': 5,             # API key index from the Lighter UI
+        'libraryPath': r'C:\lighter\lighter-signer-windows-amd64.dll',
+        'builderFee': False,
+        'auths': {
+            '123456': {               # accountIndex, as a string
+                '5': {                # apiKeyIndex, as a string
+                    'lighterPrivateKey': 'YOUR_LIGHTER_API_PRIVATE_KEY',  # private key shown at app.lighter.xyz/apikeys when you created the API key
+                },
+            },
+        },
+    },
+})
+
+balances = exchange.fetch_balance()
+```
+
+```Javascript
+const exchange = new ccxt.lighter ({
+    'options': {
+        'accountIndex': 123456,
+        'apiKeyIndex': 5,
+        'libraryPath': '/path/to/lighter.wasm',
+        'wasmExecPath': '/path/to/wasm_exec.js',
+        'builderFee': false,
+        'auths': {
+            '123456': {
+                '5': {
+                    'lighterPrivateKey': 'YOUR_LIGHTER_API_PRIVATE_KEY',
+                },
+            },
+        },
+    },
+});
+```
+
+Things that commonly go wrong:
+
+- **The keys of `auths` must match `accountIndex` and `apiKeyIndex` exactly, written as strings** (`'123456'` and `'5'` above). If they don't match, CCXT can't find the key and fails with an authentication error.
+- **`lighterPrivateKey` goes inside `auths`, not at the top level** of the constructor or of `options`.
+- **`apiKeyIndex` must be between 4 and 254.** Any other value is silently replaced by `254`, which then won't match your `auths` entry.
+- **`accountIndex` is required here.** Without the L1 key CCXT can't work out your wallet address to look it up (alternatively set `walletAddress` and CCXT will fetch the index for you).
+- **Set `'builderFee': False`.** Approving the builder fee needs a signature from the L1 key, which is not available in this setup.
+- For the same reason, CCXT can't create or rotate Lighter API keys for you in this setup — manage them in the Lighter UI.
+
+### Dependencies requirements
+
+Since the signing algorithms and structs are not supported natively in all languages, CCXT uses the officially distributed binaries for signing (via FFI/WASM). Depending on the language, you need to provide the path to that binary.
+
+#### Python/C#/PHP users
+
+- The binaries can be downloaded here: https://github.com/elliottech/lighter-python/tree/8bac9f56b9d0dd0eedaeb53a00ccb4fc9d77082e/lighter/signers
+- Choose the binary that matches your OS and architecture (`.so` for Linux, `.dylib` for macOS, `.dll` for Windows).
+- If your OS/architecture is not available, you can clone and build the library from lighter-go: https://github.com/elliottech/lighter-go/tree/25847e7e39603dbb90a0bf60b689b571116b7187
+- Provide the path to the binary as `libraryPath`.
+
+```Python
+lighter = ccxt.lighter({
+    'options': {
+        'libraryPath': 'path/to/lighter-signer-linux-arm64.so',
+    }
+})
+```
+
+#### Javascript/Typescript users
+
+- CCXT uses the WASM binary built from the official package. It can be downloaded here https://github.com/ccxt/lighter-wasm or built from source.
+- You also need to provide the path to `wasm_exec.js`. You can download it from the same repo, or point to your local file if Go is installed.
+
+```Javascript
+const lighter = new ccxt.lighter ({
+    'options': {
+        'libraryPath': '/path/to/lighter-wasm/lighter.wasm',
+        'wasmExecPath': '/opt/homebrew/opt/go/libexec/lib/wasm/wasm_exec.js',
+    }
+})
+```
+
+#### GO users
+
+- Nothing is required: CCXT consumes the official Go package, so you only need to provide the credentials.
+
+### Troubleshooting
+
+- **`could not load the signer, set options["libraryPath"]...`** — `libraryPath` is missing or wrong, or (when using a Lighter API key) the `auths` entry doesn't match your `accountIndex`/`apiKeyIndex`.
+- **`requires "privateKey" credential`** — no usable credentials were found. Either set the L1 `privateKey`, or check the `auths` block described in [How to use Ledger/MetaMask or Lighter API keys](#how-to-use-ledgermetamask-or-lighter-api-keys).
+- **`after the latest update (v4.5.50), CCXT now expects the l1 private key...`** — you put the Lighter API private key in `privateKey`. Move it to `options['auths'][accountIndex][apiKeyIndex]['lighterPrivateKey']`.
+
+
+## How to use the DyDx Exchange in CCXT?
+
+DyDx is available as part of CCXT and it works similarly to any other CCXT exchange, but it has some particularities that might be confusing for some users but we will explain it in detail below. We just need to set some basic credentials and dependencies.
+
+Due to current signing-related dependency requirements, the exchange is available only in Python and JavaScript. Support for additional languages will be introduced once the necessary dependencies have been ported.
+
+
+## Credentials requirements
+
+DyDx requires one of the following :
+- `privateKey`: the l1 private key (hex) used on dydx, or you can set l2 mnemonic in options
+- `mnemonic` in `exchange.options`: the 24 words to retrieve your l2 private key, you can find it on the web UI
+
+Example
+
+```Python
+dydx = ccxt.dydx({
+	'privateKey': 'XXXXXXX',
+})
+
+# or
+dydx = ccxt.dydx({
+	'options': {
+		'mnemonic': 'test test ...',
+	}
+})
+```
+
+### Dependencies requirements
+
+DyDx requires another dependency for python users. Before use it, you need to install pycryptodom locally.
+
+```BASH
+$ pip3 install pycryptodom
+```
+
+
+Additionally, protobuf is also required, but it is not a direct dependency of CCXT. You will need to install it manually:
+
+```
+npm install protobufjs // javascript/typescript
+pip install "protobuf==5.29.5" // python
+```
+
+### Usage
+
+Usage is largely consistent with other exchanges, though certain behaviors differ.
+
+For example, while orders can be placed normally, cancelling an order on dYdX does not use the traditional orderId. Instead, dYdX requires additional fields such as:
+
+- clientOrderId, not the orderId
+- orderFlags (0 for market and non-limit GTT orders, 64 for limit GTT orders, and 32 for conditional orders), ccxt assumes 64 as default
+- goodTillBlockTimeInSeconds (required for long-term and conditional orders; CCXT assumes a default of 30 days)
+- subAccountId, ccxt assumes 0 as default
+
+CCXT provides sensible defaults for the most common use cases; however, you may need to override these values (using params or options) depending on your specific requirements.
+
+## How to use the InteractiveBrokers in CCXT?
+
+InteractiveBrokers (IBKR) works differently from the other exchanges in CCXT: it is a broker rather than a single exchange, and you connect through the IBKR Web API. This section covers:
+
+1. [Choosing a connection method](#choosing-a-connection-method)
+2. [Connecting with OAuth 1.0](#connecting-with-oauth-10)
+3. [Connecting with the Client Portal Gateway](#connecting-with-the-client-portal-gateway)
+4. [One session per user](#one-session-per-user)
+5. [Account ids](#account-ids)
+6. [Paper trading](#paper-trading)
+7. [Symbols](#symbols)
+8. [Choosing which markets to load](#choosing-which-markets-to-load)
+9. [Examples](#examples)
+
+### Choosing a connection method
+
+There are two ways to connect, and which one you can use depends on your IBKR account:
+
+| | OAuth 1.0 | Client Portal Gateway |
+|---|---|---|
+| Who can use it | only accounts approved by IBKR for programmatic access (does not seem to be available to all retail users) | any account |
+| Credentials | api keys + `.pem` files | none, you log in to a local gateway app |
+| Maintenance | none once the keys are activated | the gateway has to be running, and may need a manual login once every 24 hours |
+
+If you can get OAuth access, use it. Otherwise use the Client Portal Gateway.
+
+### Connecting with OAuth 1.0
+
+1. Visit https://ndcdyn.interactivebrokers.com/oauth/ and try to generate credentials.
+2. If that page shows the error `Oauth1.0 is only available to institutional clients`, you first need to go through [this registration process](https://www.interactivebrokers.com/docs/web-api/authentication/oauth-1a/first-party-oauth/registration-process) and email IBKR to request programmatic access. If your request is rejected, use the [Client Portal Gateway](#connecting-with-the-client-portal-gateway) instead.
+
+    ![OAuth 1.0 is only available to institutional clients error](https://i.imgur.com/vu8JXK9.png)
+
+3. Once approved, generate your api keys.
+
+    ![generating the OAuth api keys](https://i.imgur.com/pSHadxF.png)
+
+4. Wait for the keys to be activated, which might take up to 24 hours.
+5. Set the credentials:
+
+```
+const exchange = new ccxt.interactivebrokers ({
+    'apiKey': '______ACCESS_TOKEN______',
+    'secret': '______ACCESS_TOKEN_SECRET______',
+    'options': {
+        'consumer_key': '______VALUE_HERE______',
+        'signaturePemPath': '______PATH_TO_FILE______',
+        'encryptionPemPath': '______PATH_TO_FILE______',
+        'dhParamPemPath': '______PATH_TO_FILE______',
+    },
+});
+```
+
+### Connecting with the Client Portal Gateway
+
+If your account is not permitted to generate OAuth credentials, you can use the `Client Portal Gateway`, a local IBKR bridge that does not need api keys.
+
+1. Get the gateway running, in one of two ways:
+    - **Docker (preferred)**: use the dockerized repository https://github.com/ccxt/interactive-brokers-cpg-wrapper/ (you need [Docker](https://docs.docker.com/engine/install/) installed):
+        - Clone the repository and start the container:
+
+            ```bash
+            git clone https://github.com/ccxt/interactive-brokers-cpg-wrapper.git
+            cd interactive-brokers-cpg-wrapper
+            docker compose up -d --build
+            ```
+
+        - To use another port (e.g. when 5000 is taken, as on macOS where AirPlay Receiver uses it), change the port mapping in `docker-compose.yml` from `"5000:5000"` to e.g. `"5001:5000"` before starting it.
+    - **Manual**: download the files from https://www.interactivebrokers.com/docs/web-api/authentication/cpgw/installation-authentication and follow the instructions shown there. In this case you have to re-run the gateway manually after every device restart and similar cases, which is why the dockerized approach is preferred.
+2. Log in at https://localhost:5000
+3. Enable the gateway in CCXT:
+
+```
+const exchange = new ccxt.interactivebrokers ({
+    'options': {
+        'useGateway': true,
+        // if a custom port is needed, add the field below
+        // 'gatewayUrl': 'https://localhost:5000/',
+    },
+});
+```
+
+The gateway listens on port 5000 by default. If that port is already taken on your machine, you can run the gateway on any other port, then log in at that port and set `gatewayUrl` to match, e.g. `'gatewayUrl': 'https://localhost:5001/'`.
+
+Note that the gateway needs slightly more maintenance than OAuth: it might require you to log in manually once every 24 hours at https://localhost:5000
+
+### One session per user
+
+IBKR allows only one active session per user. If you log in to the IBKR website or to another IBKR app with the same user, your running CCXT session may be disconnected.
+
+To avoid this, create an additional user in Account Management and use it only for the API (this also applies when connecting through the gateway). Each user needs its own market data subscriptions.
+
+### Account ids
+
+If you have multiple sub-accounts, you need to specify the one you want to trade in, by providing its account id in the options:
+
+```
+const exchange = new ccxt.interactivebrokers ({
+    'options': {
+        'useGateway': true,
+        'accountId': 'UXXXXX', // your account id here
+    },
+});
+```
+
+### Paper trading
+
+Paper trading is also supported, just toggle the option upon logging in.
+
+### Symbols
+
+IBKR is a broker, not a single exchange: the same ticker can be listed on many venues (`AAPL` on NASDAQ, on the Mexican exchange, as a CFD, ...) and the same coin is offered by several crypto providers. To keep every market unique, CCXT puts the **listing exchange** in the base part of the symbol, right after the IBKR ticker:
+
+```
+<ticker>.<listingExchange>/<currency>                        // spot: stocks, crypto, forex, bonds
+<ticker>.<listingExchange>/<currency>:<currency>             // swap: cfds and perp-style futures
+<ticker>.<listingExchange>/<currency>:<currency>-<YYMMDD>    // future: dated futures, with the expiry date
+```
+
+For example, the Apple stock is `AAPL.NASDAQ/USD`:
+
+| part | value | meaning |
+|------|-------|---------|
+| ticker | `AAPL` | the IBKR ticker |
+| listing exchange | `NASDAQ` | the venue the contract is listed on |
+| currency | `USD` | the currency the contract is quoted in |
+
+The market `id` is always the IBKR contract id (`conid`), e.g. `265598` for `AAPL.NASDAQ/USD`, and the raw IBKR contract is available in `market['info']`.
+
+#### Symbols by market type
+
+| market | example symbol | notes |
+|--------|----------------|-------|
+| stock | `AAPL.NASDAQ/USD`, `IBM.NYSE/USD`, `BRK.B.NYSE/USD` | a space in the IBKR ticker becomes a dot (`BRK B` -> `BRK.B`) |
+| crypto | `BTC.PAXOS/USD`, `BTC.ZEROHASH/USD` | one market per crypto provider |
+| forex | `EUR.OTC/USD` | |
+| cfd | `AAPL.IBUSCFD/USD:USD` | unified as a swap, `IBUSCFD` = US cfds, `IBCFD` = non-US cfds |
+| perp-style future | `BTC.NANO.COINDERIV/USD:USD` | Coinbase Derivatives, unified as a swap |
+| dated future | `BTC.MICRO.CME/USD:USD-261224`, `ETH.CME/USD:USD-261127` | the suffix is the expiry date (2026-12-24) |
+| bond | `US-T-4.125-270131.SMART/USD`, `US-T-270114.SMART/USD` | see the bond rules below |
+
+#### Special cases
+
+- **Futures**: the base is the underlying coin instead of the IBKR ticker (`MBT` -> `BTC`, `BIP` -> `BTC`), and the contract size goes in between as `NANO.` / `MICRO.` when the IBKR contract is a nano or micro one. For example, `BTC.MICRO.CME/USD:USD-261224` is the CME Micro Bitcoin future (0.1 BTC) expiring on 2026-12-24.
+- **Bonds**: every bond of an issuer has the same IBKR ticker (`US-T` for the US treasuries), so the coupon and the maturity date (`YYMMDD`) are added to tell them apart. `US-T-4.125-270131.SMART/USD` is the 4.125% note maturing on 2027-01-31, and a bill (no coupon) is `US-T-270114.SMART/USD`. Bonds are routed across many venues, so the exchange part is always `SMART`.
+- **Collisions**: if two contracts still end up with the same symbol, the later one gets the IBKR conid in place of the exchange (or appended to the base for bonds), e.g. `BTC.150045489/USD:USD`.
+
+#### Finding a symbol
+
+Since the exchange and the expiry are part of the symbol, the easiest way to find a symbol is to look it up in the loaded markets:
+
+```
+const symbols = exchange.symbols.filter ((symbol) => symbol.startsWith ('BTC.'));
+// [ 'BTC.PAXOS/USD', 'BTC.ZEROHASH/USD', ... ]
+```
+
+### Choosing which markets to load
+
+Which markets are loaded is configured in `options.fetchMarkets`. Loading only what you need makes `loadMarkets` much faster:
+
+```
+const exchange = new ccxt.interactivebrokers ({
+    'options': {
+        'useGateway': true,
+        'fetchMarkets': {
+            // 'crypto', 'forex', 'swap', 'future', 'cfd', 'stock' are loaded by default, 'bond' is opt-in
+            'types': [ 'stock', 'crypto', 'bond' ],
+            'exchanges': {
+                'STK': [ 'NASDAQ' ], // the stock exchanges to load, the default is NYSE
+            },
+            'cryptoSpotSymbols': [ 'BTC', 'ETH' ], // the coins to load, on every provider
+            'bondSymbols': [ 'US-T' ], // the bond issuers to load, US-T = US treasuries
+            'bondFilters': { '29': 'Notes', '27': '202701' }, // 29 = type (Bills, Notes, Bonds, ...), 27 = maturity month (YYYYMM)
+        },
+    },
+});
+await exchange.loadMarkets ();
+const ticker = await exchange.fetchTicker ('AAPL.NASDAQ/USD');
+```
+
+| option | what it controls |
+|--------|------------------|
+| `types` | the market types to load |
+| `exchanges` | the listing exchanges to load, per IBKR security type (`STK` = stocks) |
+| `cryptoSpotSymbols` | the coins to load, on every crypto provider |
+| `bondSymbols` | the bond issuers to load |
+| `bondFilters` | IBKR bond filters: `29` = type (Bills, Notes, Bonds, ...), `27` = maturity month (`YYYYMM`) |
+
+### Examples
+
+Complete examples: [stocks](https://github.com/ccxt/ccxt/blob/master/examples/ts/ibkr-trade-stocks.ts), [crypto](https://github.com/ccxt/ccxt/blob/master/examples/ts/ibkr-trade-crypto.ts) and [bonds](https://github.com/ccxt/ccxt/blob/master/examples/ts/ibkr-trade-bonds.ts).
+
+## How to use the GRVT Exchange in CCXT?
+
+GRVT works similarly to any other CCXT DEX and only requires the l1 private key of the wallet.
+
+An example on how to instantiate the GRVT exchange:
+
+```
+exchange = ccxt.grvt({
+	'privateKey': 'XXXXXXX', // the l1 private key (hex)
+})
+```
+Note: Users who signed up via email, their wallet is powered by Privy (GRVT's embedded wallet solution). To export the private key:
+
+1. Go to https://home.privy.io
+2. Log in with the same email/Google account used to sign up on GRVT
+3. From there, you can export the private key
+
+*(If you need a help, you can visit https://support.privy.io)*
+
+CCXT is also a builder on GRVT meaning that by default users will pay 1bps (0.01%) extra for using it through CCXT, however this fee is totally optional and can be disabled by providing the option `builderFee: False` in options. Howerer, your contribution is much appreciated.
+
+```
+exchange.options['builderFee'] = False
+```
+
+## How to use the Extended Exchange in CCXT?
+
+Extended works similarly to any other CCXT DEX and only requires the StarkKey private key and the API Key, both can be retrieved using the website.
+
+- Go to this page: https://app.extended.exchange/api-management
+- Click Generate API Key
+- Copy the API Key and Stark Key Private
+
+![ApiKey](https://github-production-user-asset-6210df.s3.amazonaws.com/43336371/604986514-ed87d5e9-5a68-4db6-8463-fcb205293eec.png?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAVCODYLSA53PQK4ZA%2F20260609%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20260609T092018Z&X-Amz-Expires=300&X-Amz-Signature=b14cae7910f5118835e140e4e41477124ce6a8236294c331442108c07f273164&X-Amz-SignedHeaders=host&response-content-type=image%2Fpng)
+
+An example on how to instantiate the extended exchange:
+
+```
+exchange = ccxt.extended({
+  'apiKey: 'AAAA', // apiKey
+	'privateKey': 'XXXXXXX', // the star key private key
+})
+```
+
+CCXT is also a builder on Extended meaning that by default users will pay 1bps (0.01%) extra for using it through CCXT, however this fee is totally optional and can be disabled by providing the option `builderFee: False` in options. Howerer, your contribution is much appreciated.
+
+```
+exchange.options['builderFee'] = False
+```
+
+## How to use the Apex Exchange in CCXT?
+
+An example on how to instantiate the Apex exchange:
+
+```
+exchange = ccxt.apex({
+    'apiKey': 'your api Key',
+    'secret': 'your api secret',
+    'walletAddress': 'your eth address',
+    'options': {
+        'accountId': 'your account id',
+        'passphrase': 'your api passphrase',
+        'seeds': 'your zklink omni seed',
+    },
+})
+```
+
+## How to trade stocks at Backpack?
+
+Backpack lists tokenized US stocks next to its crypto markets. In CCXT they are regular spot markets flagged with `market['stock'] = true`. Set the `stock` option once when creating the exchange and every unified method will target the stock markets.
+
+- Instantiate the exchange with the `stock` option and load the stock markets:
+
+```
+exchange = ccxt.backpack({
+    'apiKey': 'xxx',
+    'secret': 'xxx',
+    'options': { 'stock': True },
+})
+stocks = exchange.load_markets()
+```
+
+- Stock symbols look like `SPCX.US/USDC`, so you can fetch tickers, order books and trades as usual:
+
+```
+ticker = exchange.fetch_ticker('SPCX.US/USDC')
+orderbook = exchange.fetch_order_book('SPCX.US/USDC')
+```
+
+- Place and cancel orders with `create_order` and `cancel_order` like any other spot market:
+
+```
+order = exchange.create_order('SPCX.US/USDC', 'limit', 'buy', 1, 100)
+exchange.cancel_order(order['id'], 'SPCX.US/USDC')
+```
+
+Markets ending in `.RFQ` (for example `AAPL.US.RFQ/USDC`) are quote-based: `create_order` with `type = 'market'` requests a quote and executes it, and an optional `price` acts as the worst price you accept. With the option set, `fetch_balance()` returns only your stock holdings. To trade crypto again from the same instance, set `exchange.options['stock'] = False`.
+
+## How to trade stocks at Bitget?
+
+Bitget lists tokenized US stocks as spot markets of its unified trading account (UTA). In CCXT they are regular spot markets flagged with `market['stock'] = true`, with symbols such as `RGOOGL/USDT`. Set the `stock` option once when creating the exchange and every call on that instance targets the stock markets.
+
+- Instantiate the exchange with the `stock` option, then load markets and balances as usual:
+
+```
+exchange = ccxt.bitget({
+    'apiKey': 'xxx',
+    'secret': 'xxx',
+    'password': 'xxx',
+    'options': { 'stock': True },
+})
+markets = exchange.load_markets()
+balance = exchange.fetch_balance()
+```
+
+- Market data, orders and cancels then work like any other spot market:
+
+```
+ticker = exchange.fetch_ticker('RGOOGL/USDT')
+orderbook = exchange.fetch_order_book('RGOOGL/USDT')
+order = exchange.create_order('RGOOGL/USDT', 'limit', 'buy', 1, 150)
+exchange.cancel_order(order['id'], 'RGOOGL/USDT')
+```
+
+The option applies to every method of that instance, so keep a separate instance without it for crypto trading. A few venue limits apply to stock markets: `fetch_order_book` and `fetch_trades` are private endpoints that need an API key whitelisted for stock trading, `fetch_order_book` takes no `limit`, `fetch_trades` takes no `since` or `paginate`, and only market and limit orders are supported, so trigger, stop-loss, take-profit and trailing orders are rejected.
+
+## How to use the Prediction Exchanges in CCXT?
+
+Prediction-market exchanges (Polymarket, Kalshi, Hyperliquid, Limitless, Myriad) live in their own `prediction` namespace and work like any other CCXT exchange, with one key difference: instead of a market `symbol` you address an **outcome** — a handle of the form `MARKET:LABEL` (for example `TRUMP_WIN_2024:YES`). Wherever an outcome is accepted you can pass either the unified handle or the venue's raw `outcomeId` (a Polymarket token id, a Kalshi ticker, ...) — both resolve to the same outcome. Prices are probabilities between 0 and 1, amounts are shares, and costs are in the collateral currency (usually USDC/USD).
+
+Everything on a prediction venue is organized as a three-level hierarchy — **Event → Markets → Outcomes**:
+
+- an **event** is the real-world topic being traded ("US Presidential Election 2024")
+- each event contains one or more **markets** — a concrete yes/no or multi-choice question within the topic ("Will Trump win?")
+- each market contains its **outcomes** — the individual sides you can actually buy and sell (`YES` / `NO`, or one outcome per candidate)
+
+```text
+Event    "US Presidential Election 2024"
+├── Market    "Will Trump win?"
+│   ├── Outcome    TRUMP_WIN_2024:YES
+│   └── Outcome    TRUMP_WIN_2024:NO
+└── Market    "Will Biden win?"
+    ├── Outcome    BIDEN_WIN_2024:YES
+    └── Outcome    BIDEN_WIN_2024:NO
+```
+
+`fetchEvents` returns this full hierarchy (events carrying their markets, markets carrying their outcomes), and all trading and market-data methods operate at the bottom level — the outcome handle is what you pass wherever a regular exchange would take a symbol.
+
+The namespace per language:
+
+```Python
+import ccxt.prediction
+exchange = ccxt.prediction.polymarket({...})
+```
+```Javascript
+const exchange = new ccxt.prediction.polymarket ({...})
+```
+```PHP
+$exchange = new \ccxt\prediction\polymarket([...]);
+```
+```Go
+import ccxtprediction "github.com/ccxt/ccxt/go/v4/prediction"
+exchange := ccxtprediction.NewPolymarket(map[string]any{...})
+```
+```Java
+import io.github.ccxt.exchanges.prediction.Polymarket;
+Polymarket exchange = new Polymarket();
+```
+C# uses `new ccxt.prediction.polymarket(...)`.
+
+> **Note:** unlike regular exchanges, do **not** start with `loadMarkets()` / `fetchMarkets()` on prediction exchanges. Use `fetchEvents(params)` as the entry point instead: it searches the venue and returns full event structures, and the outcome handles it returns are resolved on demand by every unified method, no market loading required.
+
+The usual entry point is `fetchEvents`, which returns event structures (each carrying its markets and their outcomes). It must be scoped by at least one selector — `query` (free-text search), `tags`, `eventId` or `slug` — and also accepts `status`, `sort` and `limit`:
+
+```Python
+# search events by free text
+events = await exchange.fetch_events({'query': 'bitcoin', 'limit': 10})
+for event in events:
+    print(event['title'])
+    for market in event['markets']:
+        for outcome in market['outcomes']:
+            print('   ', outcome['outcome'], '->', outcome['price'])  # price = probability 0..1
+
+# or address a known event directly by its slug
+events = await exchange.fetch_events({'slug': 'will-bitcoin-hit-150k-in-2026'})
+
+# every unified method takes the outcome handle where a symbol would normally go
+outcome = events[0]['markets'][0]['outcomes'][0]['outcome']  # "MARKET:LABEL" handle
+ticker = await exchange.fetch_ticker(outcome)
+order = await exchange.create_order(outcome, 'limit', 'buy', 5, 0.02)
+```
+
+All the familiar unified methods (`fetchTicker`, `fetchOrderBook`, `fetchTrades`, `fetchOHLCV`, `createOrder`, `cancelOrder`, `fetchBalance`, `fetchPositions`, `watch*`, ...) take the outcome handle where a symbol would normally go. Complete runnable end-to-end examples for every language live under `examples/<lang>/prediction/`.
+
+## How to use the Prediction Exchange Polymarket?
+
+Polymarket requires two credentials:
+
+- `privateKey`: the private key of the EOA (the wallet you log in with) — used to derive the L2 API credentials and to sign orders
+- `walletAddress`: your **polymarket account wallet** — the proxy / deposit wallet shown in your polymarket profile, **not** the EOA itself (the EOA holds no funds; polymarket keeps your USDC in a proxy wallet it created for your account)
+
+```Python
+exchange = ccxt.prediction.polymarket({
+    'privateKey': '0x...',       # EOA private key
+    'walletAddress': '0x...',    # polymarket account wallet (profile / deposit wallet)
+})
+```
+
+You can find the account wallet address in your polymarket profile page (it is also returned as `proxyWallet` by `https://gamma-api.polymarket.com/public-profile?address=<your EOA>`).
+
+Notes:
+
+- Accounts created recently use the **deposit wallet** flow and work with the defaults shown above.
+- Older accounts (browser-wallet / Gnosis-Safe proxies) need the signature type switched: `exchange.options['signatureType'] = 2` — and if you pass your EOA as `walletAddress`, also set `exchange.options['funder']` to the proxy wallet that holds the USDC.
+- Alternatively to the `privateKey`, you can supply previously created L2 API credentials directly as `apiKey`, `secret` and `password` (the POLY passphrase).
+
+## How to use the Prediction Exchange Kalshi?
+
+Kalshi uses classic API credentials generated in the account settings (https://kalshi.com/account/profile → API keys):
+
+- `apiKey`: the access key (a UUID, sent as `KALSHI-ACCESS-KEY`)
+- `privateKey`: the RSA private key (PEM) that kalshi generates alongside the access key — requests are RSA-signed, there is no `secret`
+
+```Python
+exchange = ccxt.prediction.kalshi({
+    'apiKey': 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx',
+    'privateKey': '-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----',
+})
+```
+
+## how to use the Prediction Exchange Hyperliquid?
+
+Hyperliquid prediction markets use exactly the same credentials as the regular hyperliquid DEX:
+
+- `walletAddress`: your wallet address
+- `privateKey`: the private key of that wallet (or of an API/agent wallet created on https://app.hyperliquid.xyz/API — in that case `walletAddress` stays your main wallet address and `privateKey` is the agent key)
+
+```Python
+exchange = ccxt.prediction.hyperliquid({
+    'walletAddress': '0x...',
+    'privateKey': '0x...',
+})
+```
+
+The id `hyperliquid` exists both as a regular crypto DEX (`ccxt.hyperliquid`) and as a prediction exchange (`ccxt.prediction.hyperliquid`) — the prediction class only exposes the prediction markets, addressed by outcome handles. Public market data works without any credentials.
+
+## How to use priority fees on Hyperliquid?
+
+Hyperliquid lets latency-sensitive traders pay an [order priority fee](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/priority-fees) to get an order processed sooner. Pass `priorityFee` in the `params` of `createOrder` or `createOrders` (and their WebSocket versions).
+
+`priorityFee` is an integer rate in units of `1e-8`, so `10000` is 1 basis point (0.01%) of the order notional:
+
+```Python
+exchange = ccxt.hyperliquid({
+    'walletAddress': 'YOUR_WALLET_ADDRESS',
+    'privateKey': 'YOUR_PRIVATE_KEY',
+})
+
+# market orders are sent as IOC, so they can carry a priority fee
+order = exchange.create_order('SOL/USDC:USDC', 'market', 'buy', 0.2, 150, {'priorityFee': 10000})
+
+# an IOC limit order
+order = exchange.create_order('SOL/USDC:USDC', 'limit', 'buy', 0.2, 150, {'timeInForce': 'IOC', 'priorityFee': 10000})
+
+# a post-only order
+order = exchange.create_order('SOL/USDC:USDC', 'limit', 'buy', 0.2, 140, {'postOnly': True, 'priorityFee': 10000})
+
+# one fee for a whole batch
+orders = exchange.create_orders([
+    {'symbol': 'SOL/USDC:USDC', 'type': 'limit', 'side': 'buy', 'amount': 0.2, 'price': 140, 'params': {'postOnly': True}},
+    {'symbol': 'SOL/USDC:USDC', 'type': 'limit', 'side': 'buy', 'amount': 0.2, 'price': 139, 'params': {'postOnly': True}},
+], {'priorityFee': 10000})
+```
+
+Rules enforced by the exchange (CCXT checks the order types before sending):
+
+- every order in the request must be IOC (market orders included), or every order must be post-only and not reduce-only; a plain GTC limit order cannot carry a priority fee
+- the fee applies to the whole request, so it cannot be combined with attached `stopLoss` / `takeProfit` orders, and all orders in `createOrders` must share the same value
+- it is not available on outcome (prediction) markets, and `editOrder` does not support it
+
+How the fee is charged:
+
+- it is paid in HYPE from the **undelegated staking balance**, not from the trading balance; without one the order is rejected with `InsufficientFunds` (`Insufficient delegatable balance for priority order`)
+- IOC orders pay on the filled notional, so an IOC that does not fill pays nothing; the fee shortens the time to execution, linearly up to 8 bps (`priorityFee = 80000`), and above that it only breaks ties between orders
+- post-only orders pay on the resting notional as soon as they are placed, whether or not they fill later; the fee improves the queue position among orders placed within the same 400 ms
+
+## How to fetch an RPI orderbook?
+
+OKX publishes a second order book that merges its regular liquidity with RPI (Retail Price Improvement) liquidity. Pass `rpi` to `fetchOrderBook` — either per call or once in `options` — and CCXT routes to that endpoint instead of the regular one. Everything else is unchanged, the returned [order book structure](Manual.md#order-book-structure) is the same.
+
+```Python
+exchange = ccxt.okx()
+
+# per call
+orderbook = exchange.fetch_order_book('BTC/USDT', 5, {'rpi': True})
+
+# or for every call
+exchange.options['fetchOrderBook'] = {'rpi': True}
+orderbook = exchange.fetch_order_book('BTC/USDT', 5)
+
+print(orderbook['bids'][0], orderbook['asks'][0])
+```
+
+The RPI book is capped at 400 entries per side, a larger `limit` is reduced to it.
+
+Binance has one too, but only for linear (USDⓈ-M) futures, and only as a per-call parameter:
+
+```Python
+exchange = ccxt.binance()
+orderbook = exchange.fetch_order_book('BTC/USDT:USDT', 5, {'rpi': True})
+```
+
+
+## Rust build is too slow and heavy, how to improve it?
+
+The `ccxt` crate compiles every exchange by default. A fresh debug build of a crate that depends on it needs about 19 GB of RAM and a few minutes; a release build needs about 50 GB, which does not complete on a 16 or 32 GB machine.
+
+Every exchange sits behind a cargo feature named after its id. Turn the defaults off and list only the exchanges you use:
+
+```toml
+[dependencies]
+ccxt = { version = "4", default-features = false, features = ["binance", "kraken", "okx"] }
+```
+
+Measured on the same machine, that brings a fresh build with three exchanges from 3m23s / 18.6 GB down to 29s / 2.5 GB (release: 7m49s / 50 GB down to 3m05s / 4.9 GB).
+
+Things to know:
+
+- `ccxt-pro` (WebSocket) and `ccxt-prediction` use the same feature names. Features are per crate, so put the list on every ccxt crate you depend on, and leave `default-features = false` on each of them, otherwise that crate's `all` brings every exchange back:
+
+  ```toml
+  ccxt     = { version = "4", default-features = false, features = ["binance"] }
+  ccxt-pro = { version = "4", default-features = false, features = ["binance"] }
+  ```
+
+- A derived exchange enables its parent on its own (`binanceus` pulls in `binance`).
+- Prediction markets that share an id with a regular exchange are separate features: `ccxt-prediction`'s `binance` is the prediction venue, `ccxt`'s `binance` the spot/derivatives one.
+- `ccxt::from_id("kraken", …)` returns `None` for an exchange that was not compiled in, so a program that picks exchanges at runtime needs them in the list.
+- If you still need everything, `debug = 0` (or `"line-tables-only"`) in `[profile.dev]` and `lto = "off"` in `[profile.release]` of your own `Cargo.toml` cut memory noticeably; `RUSTFLAGS="-C codegen-units=4"` trades build time for a lower peak.

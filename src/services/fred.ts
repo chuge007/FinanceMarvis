@@ -12,6 +12,7 @@
  */
 import { canRequest, recordFailure, recordSuccess } from '../shared/utils/circuitBreaker';
 import { reportSource } from '../shared/utils/sourceHealth';
+import { apiGet } from '../core/data/client';
 
 export interface FredPoint {
   date: string;
@@ -76,10 +77,36 @@ async function fetchOne(
 }
 
 /**
+ * 优先走本地数据平台：/api/v1/series 背后是 SQLite 历史库，
+ * 一次拿多年数据且不再每次刷新都打上游；服务不可用时（纯前端 dev 未启后端）
+ * 自动回落到下面的直连链路，行为与改造前一致。
+ */
+let serviceDownUntil = 0;
+
+async function fetchFromPlatform(seriesId: string, limit: number): Promise<FredPoint[] | null> {
+  if (Date.now() < serviceDownUntil) return null;
+  try {
+    const env = await apiGet<{ series: Array<{ points: FredPoint[] }> }>(
+      '/series',
+      { ids: `fred:${seriesId}`, range: 'max', limit },
+      8000,
+    );
+    return env.data.series?.[0]?.points ?? [];
+  } catch {
+    // 5 分钟内不再尝试，避免每屏都等一次 8s 超时
+    serviceDownUntil = Date.now() + 5 * 60_000;
+    return null;
+  }
+}
+
+/**
  * 取一条 FRED 序列的最近 limit 个观测；失败返回空数组（不抛异常、不阻塞页面）。
  * 直连失败会自动经 `/fred-proxy` 重试一次。
  */
 export async function fetchFredSeries(seriesId: string, limit = 300): Promise<FredPoint[]> {
+  const fromPlatform = await fetchFromPlatform(seriesId, limit);
+  if (fromPlatform && fromPlatform.length) return fromPlatform;
+
   const key = `${seriesId}:${limit}`;
   const hit = cache.get(key);
   if (hit && Date.now() - hit.ts < TTL) return hit.data;

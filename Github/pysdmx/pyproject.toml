@@ -1,0 +1,142 @@
+[project]
+name = "pysdmx"
+version = "1.23.0"
+description = "Your opinionated Python SDMX library"
+license = { text = "Apache-2.0" }
+readme = "README.rst"
+requires-python = ">=3.9"
+authors = [
+    { name = "Xavier Sosnovsky", email = "<xavier.sosnovsky@bis.org>" },
+    { name = "Stratos Nikoloutsos", email = "<stratos.nikoloutsos@bis.org>" },
+    { name = "Francisco Javier Hernandez del Caño", email = "<javier.hernandez@meaningfuldata.eu>" },
+    { name = "Mateo de Lorenzo Argelés", email = "<mateo.delorenzo@meaningfuldata.eu>" },
+    { name = "Jose Antonio Franco Martin", email = "<jose.franco@meaningfuldata.eu>" },
+    { name = "Mario Cortés Ruiz", email = "<mario.cortes@meaningfuldata.eu>" }
+
+]
+keywords = ["sdmx", "data discovery", "data retrieval", "metadata", "fmr"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Typing :: Typed"
+]
+dependencies = [
+    "httpx[http2] (>=0.27.2)",
+    "msgspec>=0.20.0",
+    "parsy>=2.1"
+]
+
+[project.urls]
+homepage = "https://sdmx.io/tools/pysdmx"
+repository = "https://github.com/bis-med-it/pysdmx"
+documentation = "https://bis-med-it.github.io/pysdmx"
+"Bug Tracker" = "https://bis-med-it.github.io/pysdmx/issues"
+
+[project.optional-dependencies]
+data = ["pandas>=2.1.4", "pyarrow>=14.0,<26.0"]
+dc = ["python-dateutil>=2.8.2"]
+vtl = ["vtlengine>=1.8.0,<2.0"]
+json = ["sdmxschemas>=1.1.0", "jsonschema>=4.10", "rfc3339-validator>=0.1.4"]
+xml = ["lxml>=6.1.0; sys_platform != 'emscripten'",
+    "lxml>=6.0.2; sys_platform == 'emscripten'",
+    "xmltodict>=0.13", "sdmxschemas>=1.1.0"]
+all = ["lxml>=6.1.0; sys_platform != 'emscripten'",
+    "lxml>=6.0.2; sys_platform == 'emscripten'",
+    "xmltodict>=0.13", "sdmxschemas>=1.1.0", "pandas>=2.1.4",
+    "pyarrow>=14.0,<26.0", "python-dateutil>=2.8.2", "vtlengine>=1.8.0,<2.0",
+    "jsonschema>=4.10", "rfc3339-validator>=0.1.4"]
+
+[tool.poetry]
+requires-poetry = ">=2.0"
+
+[tool.poetry.dependencies]
+python = ">=3.10,<4.0"
+
+[tool.poetry.group.dev.dependencies]
+coverage = ">=7.13.1,<8.0"
+ruff = ">=0.15,<1.0"
+mypy = ">=2.0,<3.0"
+pytest = ">=9.0,<10.0"
+pytest-asyncio = ">=1.0,<2.0"
+pytest-cov = ">=7.0,<8.0"
+respx = ">=0.23,<1.0"
+pyroma = ">=5.0,<6.0"
+pytest-mock = ">=3.15,<4.0"
+
+[tool.poetry.group.extras-dev.dependencies]
+lxml-stubs = ">=0.5.1,<1.0"
+types-xmltodict = ">=0.13.0.3,<2.0"
+types-python-dateutil = ">=2.9.0.20240316,<3.0"
+pyarrow-stubs = ">=14.0,<26.0"
+pandas-stubs = ">=2.2.3.241009,<4.0.0"
+types-jsonschema = ">=4.25.1.20251009,<5.0"
+types-rfc3339-validator = ">=0.1.0.20250322,<1.0"
+
+[tool.poetry.group.docs.dependencies]
+sphinx = [
+    { version = ">=8.0,<9.0", python = "<3.11" },
+    { version = ">=9.0,<10.0", python = ">=3.11" }
+]
+sphinx-rtd-theme = ">=3.0,<4.0"
+sphinx-autodoc-typehints = [
+    { version = ">=3.0,<3.6", python = "<3.11" },
+    { version = ">=3.6,<3.10", python = "==3.11" },
+    { version = ">=3.10,<4.0", python = ">=3.12" }
+]
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.ruff]
+line-length = 79
+lint.select = [
+    "ASYNC", # flake8-async: checks for async/await best practices
+    "B",     # flake8-bugbear: detect bugs and design problems
+    "C4",    # flake8-comprehensions: better list/dict/set comprehensions
+    "C90",   # mccabe: code complexity checker
+    "D",     # pydocstyle: enforce docstring conventions
+    "DTZ",   # flake8-datetimez: datetime best practices and timezone issues
+    "E",     # pycodestyle errors
+    "ERA",   # eradicate: Find commented-out code that should be removed
+    "F",     # pyflakes: detect various errors
+    "FURB",  # refurb: functional Python improvements and refactoring
+    "I",     # isort: import sorting
+    "LOG",   # flake8-logging: logging best practices
+    "PERF",  # perflint: performance optimizations
+    "PT",    # flake8-pytest-style: pytest best practices
+    "S",     # flake8-bandit: security issues
+    "SIM",   # flake8-simplify: code simplification suggestions
+    "W"      # pycodestyle warnings    
+]
+lint.ignore = ["D411", "E203", "F901"]
+lint.mccabe.max-complexity = 10
+lint.pydocstyle.convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["C901", "DTZ", "D100", "D103", "D104", "PERF", "S101", "S311"]
+
+[tool.mypy]
+files = "src"
+disallow_untyped_defs = true
+disallow_untyped_calls = true
+ignore_errors = false
+no_implicit_optional = true
+show_column_numbers = true
+strict_equality = true
+strict_optional = true
+strict = true
+enable_error_code = [
+    "redundant-expr",
+    "truthy-bool",
+]
+warn_return_any = false
+
+[tool.coverage.run]
+branch = true
+omit = [
+    # We cannot test this properly with pytest as we always install all extras
+    "__extras_check.py"
+]

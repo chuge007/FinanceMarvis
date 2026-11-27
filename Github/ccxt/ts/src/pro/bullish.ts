@@ -1,0 +1,1113 @@
+
+//  ---------------------------------------------------------------------------
+
+import bullishRest from '../bullish.js';
+import { ArrayCache, ArrayCacheBySymbolById, ArrayCacheBySymbolBySide } from '../base/ws/Cache.js';
+import type { Balances, Dict, Int, List, Order, OrderBook, Position, Str, Strings, Ticker, Trade, int } from '../base/types.js';
+import Client from '../base/ws/Client.js';
+import { ExchangeError } from '../base/errors.js';
+import type { WsOrderBook } from '../base/ws/OrderBook.js';
+
+//  ---------------------------------------------------------------------------
+
+export default class bullish extends bullishRest {
+    override describe (): Dict {
+        return this.deepExtend (super.describe (), {
+            'has': {
+                'ws': true,
+                'watchTicker': true,
+                'watchTickers': false,
+                'watchOrderBook': true,
+                'unWatchOrderBook': true,
+                'watchOrders': true,
+                'unWatchOrders': true,
+                'watchTrades': true,
+                'unWatchTrades': true,
+                'watchPositions': true,
+                'unWatchPositions': true,
+                'watchMyTrades': true,
+                'unWatchMyTrades': true,
+                'watchBalance': true,
+                'watchOHLCV': false,
+            },
+            'urls': {
+                'api': {
+                    'ws': {
+                        'public': 'wss://api.exchange.bullish.com',
+                        'private': 'wss://api.exchange.bullish.com/trading-api/v1/private-data',
+                    },
+                },
+                'test': {
+                    'ws': {
+                        'public': 'wss://api.simnext.bullish-test.com',
+                        'private': 'wss://api.simnext.bullish-test.com/trading-api/v1/private-data',
+                    },
+                },
+            },
+            'options': {
+                'ws': {
+                    'cookies': {},
+                },
+            },
+            'streaming': {
+                'ping': this.ping,
+                'keepAlive': 99000, // disconnect after 100 seconds of inactivity
+            },
+        });
+    }
+
+    requestId (): int {
+        const requestId = this.sum (this.safeInteger (this.options, 'requestId', 0), 1);
+        this.options['requestId'] = requestId;
+        return requestId;
+    }
+
+    override ping (client: Client): Dict {
+        // bullish does not support built-in ws protocol-level ping-pong
+        // https://api.exchange.bullish.com/docs/api/rest/trading-api/v2/#overview--keep-websocket-open
+        const id = this.requestId ().toString ();
+        return {
+            'jsonrpc': '2.0',
+            'type': 'command',
+            'method': 'keepalivePing',
+            'params': {},
+            'id': id,
+        };
+    }
+
+    handlePong (client: Client, message: Dict): Dict {
+        //
+        //     {
+        //         "id": "7",
+        //         "jsonrpc": "2.0",
+        //         "result": {
+        //             "responseCodeName": "OK",
+        //             "responseCode": "200",
+        //             "message": "Keep alive pong"
+        //         }
+        //     }
+        //
+        client.lastPong = this.milliseconds ();
+        return message; // current line is for transpilation compatibility
+    }
+
+    async watchPublic (url: string, messageHash: string, request = {}, params = {}): Promise<any> {
+        const id = this.requestId ().toString ();
+        const message: Dict = {
+            'jsonrpc': '2.0',
+            'type': 'command',
+            'method': 'subscribe',
+            'params': request,
+            'id': id,
+        };
+        const wsUrl = this.safeString (this.urls['api']['ws'], 'public');
+        if (wsUrl === undefined) {
+            throw new ExchangeError (this.id + ' watchPublic() has no public websocket url');
+        }
+        return await this.watch (wsUrl + url, messageHash, this.deepExtend (message, params), messageHash);
+    }
+
+    /**
+     * @ignore
+     * @method
+     * @name bullish#unsubscribePublic
+     * @description sends an unsubscribe command for one public topic and registers the pending unsubscription under the request id
+     * @param {string} url path of the public websocket endpoint the subscription was opened on
+     * @param {string} topic unified cache topic: trades, orderbook
+     * @param {string} messageHash message hash the subscription was opened with
+     * @param {string} symbol unified symbol of the market to unsubscribe from
+     * @param {object} request exchange-specific topic and symbol of the subscription
+     * @param {object} [params] extra parameters specific to the exchange API endpoint
+     * @returns {any} status of the unwatch request
+     */
+    async unsubscribePublic (url: string, topic: string, messageHash: string, symbol: string, request = {}, params = {}): Promise<any> {
+        const wsUrl = this.safeString (this.urls['api']['ws'], 'public');
+        if (wsUrl === undefined) {
+            throw new ExchangeError (this.id + ' unsubscribePublic() has no public websocket url');
+        }
+        const requestId = this.requestId ().toString ();
+        const message: Dict = {
+            'jsonrpc': '2.0',
+            'type': 'command',
+            'method': 'unsubscribe',
+            'params': request,
+            'id': requestId,
+        };
+        const unsubHash = 'unsubscribe::' + messageHash;
+        const symbols = [ symbol ];
+        // the acknowledgement is matched by the request id, so the pending unsubscription is stored under it
+        const subscription: Dict = {
+            'unsubscribe': true,
+            'id': requestId,
+            'topic': topic,
+            'symbols': symbols,
+            'subMessageHash': messageHash,
+            'messageHash': unsubHash,
+        };
+        return await this.watch (wsUrl + url, unsubHash, this.deepExtend (message, params), requestId, subscription);
+    }
+
+    handleUnSubscription (client: Client, subscription: Dict) {
+        //
+        //     {
+        //         "jsonrpc": "2.0",
+        //         "id": "2",
+        //         "result": {
+        //             "responseCode": "200",
+        //             "responseCodeName": "OK",
+        //             "message": "Successfully unsubscribed (anonymousTrades BTCUSDC)"
+        //         }
+        //     }
+        //
+        const subHash = this.safeString (subscription, 'subMessageHash');
+        const unsubHash = this.safeString (subscription, 'messageHash');
+        const subHashIsPrefix = this.safeBool (subscription, 'subHashIsPrefix', false);
+        this.cleanUnsubscription (client, subHash, unsubHash, subHashIsPrefix);
+        this.cleanCache (subscription);
+        const requestId = this.safeString (subscription, 'id', '');
+        if (requestId in client.subscriptions) {
+            delete client.subscriptions[requestId];
+        }
+    }
+
+    async watchPrivate (messageHash: string, subscribeHash: string, request = {}, params = {}): Promise<any> {
+        const url = this.urls['api']['ws']['private'];
+        const token = await this.handleToken ();
+        const cookies: Dict = {
+            'JWT_COOKIE': token,
+        };
+        this.options['ws']['cookies'] = cookies;
+        const id = this.requestId ().toString ();
+        const message: Dict = {
+            'jsonrpc': '2.0',
+            'type': 'command',
+            'method': 'subscribe',
+            'params': request,
+            'id': id,
+        };
+        const result = await this.watch (url, messageHash, this.deepExtend (message, params), subscribeHash);
+        return result;
+    }
+
+    /**
+     * @ignore
+     * @method
+     * @name bullish#unsubscribePrivate
+     * @description sends an unsubscribe command for one private topic and registers the pending unsubscription under the request id
+     * @param {string} topic unified cache topic: orders, myTrades, positions
+     * @param {string} subscribeHash hash the subscription was opened with, per-symbol message hashes start with it
+     * @param {object} request exchange-specific topic of the subscription
+     * @param {object} [params] extra parameters specific to the exchange API endpoint
+     * @param {string} [params.tradingAccountId] the trading account id the subscription was opened with
+     * @returns {any} status of the unwatch request
+     */
+    async unsubscribePrivate (topic: string, subscribeHash: string, request = {}, params = {}): Promise<any> {
+        const url = this.urls['api']['ws']['private'];
+        const token = await this.handleToken ();
+        const cookies: Dict = {
+            'JWT_COOKIE': token,
+        };
+        this.options['ws']['cookies'] = cookies;
+        const tradingAccountId = this.safeString (params, 'tradingAccountId');
+        let paramsOmitted = params;
+        let requestParams = request;
+        if (tradingAccountId !== undefined) {
+            const accountRequest: Dict = {
+                'tradingAccountId': tradingAccountId,
+            };
+            paramsOmitted = this.omit (params, 'tradingAccountId');
+            requestParams = this.extend (request, accountRequest);
+        }
+        const requestId = this.requestId ().toString ();
+        const message: Dict = {
+            'jsonrpc': '2.0',
+            'type': 'command',
+            'method': 'unsubscribe',
+            'params': requestParams,
+            'id': requestId,
+        };
+        const unsubHash = 'unsubscribe::' + subscribeHash;
+        // the acknowledgement is matched by the request id, so the pending unsubscription is stored under it
+        const subscription: Dict = {
+            'unsubscribe': true,
+            'id': requestId,
+            'topic': topic,
+            'subMessageHash': subscribeHash,
+            'subHashIsPrefix': true,
+            'messageHash': unsubHash,
+        };
+        return await this.watch (url, unsubHash, this.deepExtend (message, paramsOmitted), requestId, subscription);
+    }
+
+    /**
+     * @method
+     * @name bullish#watchTrades
+     * @description get the list of most recent trades for a particular symbol
+     * @see https://api.exchange.bullish.com/docs/api/rest/trading-api/v2/#overview--unified-anonymous-trades-websocket-unauthenticated
+     * @param {string} symbol unified symbol of the market to fetch trades for
+     * @param {int} [since] timestamp in ms of the earliest trade to fetch
+     * @param {int} [limit] the maximum amount of trades to fetch
+     * @param {object} [params] extra parameters specific to the exchange API endpoint
+     * @returns {object[]} a list of [trade structures]{@link https://docs.ccxt.com/?id=public-trades}
+     */
+    override async watchTrades (symbol: string, since: Int = undefined, limit: Int = undefined, params: Dict = {}): Promise<Trade[]> {
+        if (this.markets === undefined) {
+            await this.loadMarkets ();
+        }
+        const market = this.market (symbol);
+        const messageHash = 'trades::' + this.safeString (market, 'symbol', '');
+        const url = '/trading-api/v1/market-data/trades';
+        const request: Dict = {
+            'topic': 'anonymousTrades',
+            'symbol': market['id'],
+        };
+        const trades = await this.watchPublic (url, messageHash, request, params);
+        let limitResolved = limit;
+        if (this.newUpdates) {
+            limitResolved = trades.getLimit (symbol, limit);
+        }
+        return this.filterBySinceLimit (trades, since, limitResolved, 'timestamp', true);
+    }
+
+    /**
+     * @method
+     * @name bullish#unWatchTrades
+     * @description unsubscribes from the trades channel
+     * @see https://docs.exchange.bullish.com/websocket/api/ws-mkt-data-trades/operation-send-unsubscribe
+     * @param {string} symbol unified symbol of the market to unsubscribe from
+     * @param {object} [params] extra parameters specific to the exchange API endpoint
+     * @returns {any} status of the unwatch request
+     */
+    override async unWatchTrades (symbol: string, params: Dict = {}): Promise<any> {
+        if (this.markets === undefined) {
+            await this.loadMarkets ();
+        }
+        const market = this.market (symbol);
+        const marketSymbol = this.safeString (market, 'symbol', '');
+        const marketId = this.safeString (market, 'id', '');
+        const messageHash = 'trades::' + marketSymbol;
+        const url = '/trading-api/v1/market-data/trades';
+        const request: Dict = {
+            'topic': 'anonymousTrades',
+            'symbol': marketId,
+        };
+        return await this.unsubscribePublic (url, 'trades', messageHash, marketSymbol, request, params);
+    }
+
+    handleTrades (client: Client, message: Dict) {
+        //
+        //     {
+        //         "type": "snapshot",
+        //         "dataType": "V1TAAnonymousTradeUpdate",
+        //         "data": {
+        //             "trades": [
+        //                 {
+        //                     "tradeId": "100086000000609304",
+        //                     "isTaker": true,
+        //                     "price": "104889.2063",
+        //                     "createdAtTimestamp": "1749124509118",
+        //                     "quantity": "0.01000000",
+        //                     "publishedAtTimestamp": "1749124531466",
+        //                     "side": "BUY",
+        //                     "createdAtDatetime": "2025-06-05T11:55:09.118Z",
+        //                     "symbol": "BTCUSDC"
+        //                 }
+        //             ],
+        //             "createdAtTimestamp": "1749124509118",
+        //             "publishedAtTimestamp": "1749124531466",
+        //             "symbol": "BTCUSDC"
+        //         }
+        //     }
+        //
+        const data = this.safeDict (message, 'data', {});
+        const marketId = this.safeString (data, 'symbol');
+        const symbol = this.safeSymbol (marketId);
+        if (symbol === undefined) {
+            return;
+        }
+        const market = this.market (symbol);
+        const rawTrades = this.safeList (data, 'trades', []);
+        const trades = this.parseTrades (rawTrades, market);
+        if (!(symbol in this.trades)) {
+            const limit = this.safeInteger (this.options, 'tradesLimit', 1000);
+            const tradesArrayCache = new ArrayCache (limit);
+            this.trades[symbol] = tradesArrayCache;
+        }
+        const tradesArray = this.trades[symbol];
+        const tradesList = this.toArray (trades);
+        for (let i = 0; i < tradesList.length; i++) {
+            tradesArray.append (tradesList[i]);
+        }
+        this.trades[symbol] = tradesArray;
+        const messageHash = 'trades::' + this.safeString (market, 'symbol', '');
+        client.resolve (tradesArray, messageHash);
+    }
+
+    /**
+     * @method
+     * @name bullish#watchTicker
+     * @description watches a price ticker, a statistical calculation with the information calculated over the past 24 hours for a specific market
+     * @see https://api.exchange.bullish.com/docs/api/rest/trading-api/v2/#overview--anonymous-market-data-price-tick-unauthenticated
+     * @param {string} symbol unified symbol of the market to fetch the ticker for
+     * @param {object} [params] extra parameters specific to the exchange API endpoint
+     * @returns {object} a [ticker structure]{@link https://docs.ccxt.com/?id=ticker-structure}
+     */
+    override async watchTicker (symbol: string, params: Dict = {}): Promise<Ticker> {
+        if (this.markets === undefined) {
+            await this.loadMarkets ();
+        }
+        const market = this.market (symbol);
+        const symbolValue: string = this.safeString (market, 'symbol', '');
+        const wsUrl = this.safeString (this.urls['api']['ws'], 'public');
+        if (wsUrl === undefined) {
+            throw new ExchangeError (this.id + ' watchTicker() has no public websocket url');
+        }
+        const messageHash = 'ticker::' + symbolValue;
+        return await this.watch (wsUrl + '/trading-api/v1/market-data/tick/' + this.safeString (market, 'id', ''), messageHash, params, messageHash); // no need to send a subscribe message, the server sends a ticker update on connect
+    }
+
+    handleTicker (client: Client, message: Dict) {
+        //
+        //     {
+        //         "type": "update",
+        //         "dataType": "V1TATickerResponse",
+        //         "data": {
+        //             "askVolume": "0.00100822",
+        //             "average": "104423.1806",
+        //             "baseVolume": "472.83799258",
+        //             "bestAsk": "104324.6000",
+        //             "bestBid": "104324.5000",
+        //             "bidVolume": "0.00020146",
+        //             "change": "-198.4864",
+        //             "close": "104323.9374",
+        //             "createdAtTimestamp": "1749132838951",
+        //             "publishedAtTimestamp": "1749132838955",
+        //             "high": "105966.6577",
+        //             "last": "104323.9374",
+        //             "lastTradeDatetime": "2025-06-05T14:13:56.111Z",
+        //             "lastTradeSize": "0.02396100",
+        //             "low": "104246.6662",
+        //             "open": "104522.4238",
+        //             "percentage": "-0.19",
+        //             "quoteVolume": "49662592.6712",
+        //             "symbol": "BTC-USDC-PERP",
+        //             "type": "ticker",
+        //             "vwap": "105030.6996",
+        //             "currentPrice": "104324.7747",
+        //             "ammData": [
+        //                 {
+        //                     "feeTierId": "1",
+        //                     "currentPrice": "104324.7747",
+        //                     "baseReservesQuantity": "8.27911366",
+        //                     "quoteReservesQuantity": "1067283.0234",
+        //                     "bidSpreadFee": "0.00000000",
+        //                     "askSpreadFee": "0.00000000"
+        //                 }
+        //             ],
+        //             "createdAtDatetime": "2025-06-05T14:13:58.951Z",
+        //             "markPrice": "104289.6884",
+        //             "fundingRate": "-0.000192",
+        //             "openInterest": "92.24146651"
+        //         }
+        //     }
+        //
+        const updateType = this.safeString (message, 'type', '');
+        const data = this.safeDict (message, 'data', {});
+        const marketId = this.safeString (data, 'symbol');
+        const market = this.safeMarket (marketId);
+        const symbol = market['symbol'];
+        let parsed = this.parseTicker (data, market);
+        if (updateType === 'update') {
+            const ticker = this.safeDict (this.tickers, symbol, {});
+            parsed = this.parseTicker (this.extend (this.safeDict (ticker, 'info', {}), data), market);
+        }
+        this.tickers[symbol] = parsed;
+        const messageHash = 'ticker::' + symbol;
+        client.resolve (this.tickers[symbol], messageHash);
+    }
+
+    /**
+     * @method
+     * @name bullish#watchOrderBook
+     * @description watches information on open orders with bid (buy) and ask (sell) prices, volumes and other data
+     * @see https://api.exchange.bullish.com/docs/api/rest/trading-api/v2/#overview--multi-orderbook-websocket-unauthenticated
+     * @param {string} symbol unified symbol of the market to fetch the order book for
+     * @param {int} [limit] the maximum amount of order book entries to return
+     * @param {object} [params] extra parameters specific to the exchange API endpoint
+     * @returns {object} an [order book structure]{@link https://docs.ccxt.com/?id=order-book-structure}
+     */
+    override async watchOrderBook (symbol: string, limit: Int = undefined, params: Dict = {}): Promise<OrderBook> {
+        if (this.markets === undefined) {
+            await this.loadMarkets ();
+        }
+        const market = this.market (symbol);
+        const url = '/trading-api/v1/market-data/orderbook';
+        const messageHash = 'orderbook::' + this.safeString (market, 'symbol', '');
+        const request: Dict = {
+            'topic': 'l2Orderbook', // 'l2Orderbook' returns only snapshots while 'l1Orderbook' returns only updates
+            'symbol': market['id'],
+        };
+        const orderbook: WsOrderBook = await this.watchPublic (url, messageHash, request, params);
+        return orderbook.limit ();
+    }
+
+    /**
+     * @method
+     * @name bullish#unWatchOrderBook
+     * @description unsubscribes from the orderbook channel
+     * @see https://docs.exchange.bullish.com/websocket/api/ws-mkt-data-orderbook/operation-send-unsubscribe
+     * @param {string} symbol unified symbol of the market to unsubscribe from
+     * @param {object} [params] extra parameters specific to the exchange API endpoint
+     * @returns {any} status of the unwatch request
+     */
+    override async unWatchOrderBook (symbol: string, params: Dict = {}): Promise<any> {
+        if (this.markets === undefined) {
+            await this.loadMarkets ();
+        }
+        const market = this.market (symbol);
+        const marketSymbol = this.safeString (market, 'symbol', '');
+        const marketId = this.safeString (market, 'id', '');
+        const messageHash = 'orderbook::' + marketSymbol;
+        const url = '/trading-api/v1/market-data/orderbook';
+        const request: Dict = {
+            'topic': 'l2Orderbook',
+            'symbol': marketId,
+        };
+        return await this.unsubscribePublic (url, 'orderbook', messageHash, marketSymbol, request, params);
+    }
+
+    handleOrderBook (client: Client, message: Dict) {
+        //
+        //     {
+        //         "type": "snapshot",
+        //         "dataType": "V1TALevel2",
+        //         "data": {
+        //             "timestamp": "1749372632028",
+        //             "bids": [
+        //                 "105523.3000",
+        //                 "0.00046045",
+        //             ],
+        //             "asks": [
+        //                 "105523.4000",
+        //                 "0.00117112",
+        //             ],
+        //             "publishedAtTimestamp": "1749372632073",
+        //             "datetime": "2025-06-08T08:50:32.028Z",
+        //             "sequenceNumberRange": [ 1967862061, 1967862062 ],
+        //             "symbol": "BTCUSDC"
+        //         }
+        //     }
+        //
+        // current channel is 'l2Orderbook' which returns only snapshots
+        const data = this.safeDict (message, 'data', {});
+        const marketId = this.safeString (data, 'symbol');
+        const symbol = this.safeSymbol (marketId);
+        const messageHash = 'orderbook::' + symbol;
+        const timestamp = this.safeInteger (data, 'timestamp');
+        if (!(symbol in this.orderbooks)) {
+            this.orderbooks[symbol] = this.orderBook ();
+        }
+        const orderbook = this.orderbooks[symbol];
+        const bids = this.separateBidsOrAsks (this.safeList (data, 'bids', []));
+        const asks = this.separateBidsOrAsks (this.safeList (data, 'asks', []));
+        const snapshot: Dict = {
+            'bids': bids,
+            'asks': asks,
+        };
+        const parsed = this.parseOrderBook (snapshot, symbol, timestamp);
+        const sequenceNumberRange = this.safeList (data, 'sequenceNumberRange', []);
+        if (sequenceNumberRange.length > 0) {
+            const lastIndex = sequenceNumberRange.length - 1;
+            parsed['nonce'] = this.safeInteger (sequenceNumberRange, lastIndex);
+        }
+        orderbook.reset (parsed);
+        this.orderbooks[symbol] = orderbook;
+        client.resolve (orderbook, messageHash);
+    }
+
+    separateBidsOrAsks (entry: any[]): List {
+        const result: List = [];
+        // 300 = '54885.0000000'
+        // 301 = '0.06141566'
+        // 302 ='53714.0000000'
+        const entries = this.toArray (entry);
+        for (let i = 0; i < entries.length; i++) {
+            if (i % 2 !== 0) {
+                continue;
+            }
+            const price = this.safeString (entries, i);
+            result.push ([ price, this.safeString (entries, i + 1) ]);
+        }
+        return result;
+    }
+
+    /**
+     * @method
+     * @name bullish#watchOrders
+     * @description watches information on multiple orders made by the user
+     * @see https://api.exchange.bullish.com/docs/api/rest/trading-api/v2/#overview--private-data-websocket-authenticated
+     * @param {string} symbol unified market symbol of the market orders were made in
+     * @param {int} [since] the earliest time in ms to fetch orders for
+     * @param {int} [limit] the maximum number of order structures to retrieve
+     * @param {object} [params] extra parameters specific to the exchange API endpoint
+     * @param {string} [params.tradingAccountId] the trading account id to fetch entries for
+     * @returns {object[]} a list of [order structures]{@link https://docs.ccxt.com/?id=order-structure}
+     */
+    override async watchOrders (symbol: Str = undefined, since: Int = undefined, limit: Int = undefined, params: Dict = {}): Promise<Order[]> {
+        if (this.markets === undefined) {
+            await this.loadMarkets ();
+        }
+        const subscribeHash = 'orders';
+        let messageHash: string = subscribeHash;
+        let symbolResolved: Str = undefined;
+        if (symbol !== undefined) {
+            symbolResolved = this.symbol (symbol);
+            messageHash = subscribeHash + '::' + symbolResolved;
+        }
+        const request: Dict = {
+            'topic': 'orders',
+        };
+        const tradingAccountId = this.safeString (params, 'tradingAccountId');
+        const paramsOmitted = (tradingAccountId !== undefined) ? this.omit (params, 'tradingAccountId') : params;
+        if (tradingAccountId !== undefined) {
+            request['tradingAccountId'] = tradingAccountId;
+        }
+        const orders = await this.watchPrivate (messageHash, subscribeHash, request, paramsOmitted);
+        let limitResolved = limit;
+        if (this.newUpdates) {
+            limitResolved = orders.getLimit (symbolResolved, limit);
+        }
+        return this.filterBySymbolSinceLimit (orders, symbolResolved, since, limitResolved, true);
+    }
+
+    /**
+     * @method
+     * @name bullish#unWatchOrders
+     * @description unsubscribes from the orders channel, the subscription is account-wide so all symbols are unsubscribed
+     * @see https://docs.exchange.bullish.com/websocket/api/ws-private-data/operation-send-unsubscribe
+     * @param {string} [symbol] not used by bullish unWatchOrders
+     * @param {object} [params] extra parameters specific to the exchange API endpoint
+     * @param {string} [params.tradingAccountId] the trading account id the subscription was opened with
+     * @returns {any} status of the unwatch request
+     */
+    override async unWatchOrders (symbol: Str = undefined, params: Dict = {}): Promise<any> {
+        if (this.markets === undefined) {
+            await this.loadMarkets ();
+        }
+        const request: Dict = {
+            'topic': 'orders',
+        };
+        return await this.unsubscribePrivate ('orders', 'orders', request, params);
+    }
+
+    handleOrders (client: Client, message: Dict) {
+        // snapshot
+        //     {
+        //         "type": "snapshot",
+        //         "tradingAccountId": "111309424211255",
+        //         "dataType": "V1TAOrder",
+        //         "data": [ ... ] // could be an empty list or a list of orders
+        //     }
+        //
+        // update
+        //     {
+        //         "type": "update",
+        //         "tradingAccountId": "111309424211255",
+        //         "dataType": "V1TAOrder",
+        //         "data": {
+        //             "status": "OPEN",
+        //             "createdAtTimestamp": "1751893427971",
+        //             "quoteFee": "0.000000",
+        //             "stopPrice": null,
+        //             "quantityFilled": "0.00000000",
+        //             "handle": null,
+        //             "clientOrderId": null,
+        //             "quantity": "0.10000000",
+        //             "margin": false,
+        //             "side": "BUY",
+        //             "createdAtDatetime": "2025-07-07T13:03:47.971Z",
+        //             "isLiquidation": false,
+        //             "borrowedQuoteQuantity": null,
+        //             "borrowedBaseQuantity": null,
+        //             "timeInForce": "GTC",
+        //             "borrowedQuantity": null,
+        //             "baseFee": "0.000000",
+        //             "quoteAmount": "0.0000000",
+        //             "price": "0.0000000",
+        //             "statusReason": "Order accepted",
+        //             "type": "MKT",
+        //             "statusReasonCode": 6014,
+        //             "allowBorrow": false,
+        //             "orderId": "862317981870850049",
+        //             "publishedAtTimestamp": "1751893427975",
+        //             "symbol": "ETHUSDT",
+        //             "averageFillPrice": null
+        //         }
+        //     }
+        //
+        const type = this.safeString (message, 'type');
+        let rawOrders: Dict[] = [];
+        if (type === 'update') {
+            const data = this.safeDict (message, 'data', {});
+            rawOrders.push (data); // update is a single order
+        } else {
+            rawOrders = this.safeList (message, 'data', []); // snapshot is a list of orders
+        }
+        const numRawOrders = rawOrders.length; // hoisted - inline .length within conditionals becomes strlen for php, fatal on arrays
+        if (numRawOrders > 0) {
+            if (this.orders === undefined) {
+                const limit = this.safeInteger (this.options, 'ordersLimit', 1000);
+                this.orders = new ArrayCacheBySymbolById (limit);
+            }
+            const orders = this.orders;
+            const symbols: Dict = {};
+            for (let i = 0; i < rawOrders.length; i++) {
+                const parsedOrder = this.parseOrder (rawOrders[i]);
+                orders.append (parsedOrder);
+                const symbol = this.safeString (parsedOrder, 'symbol');
+                if (symbol !== undefined) {
+                    symbols[symbol] = true;
+                }
+            }
+            const messageHash = 'orders';
+            client.resolve (orders, messageHash);
+            const keys = Object.keys (symbols);
+            for (let i = 0; i < keys.length; i++) {
+                const hashSymbol = keys[i];
+                const symbolMessageHash = messageHash + '::' + hashSymbol;
+                client.resolve (this.orders, symbolMessageHash);
+            }
+        }
+    }
+
+    /**
+     * @method
+     * @name bullish#watchMyTrades
+     * @description watches information on multiple trades made by the user
+     * @see https://api.exchange.bullish.com/docs/api/rest/trading-api/v2/#overview--private-data-websocket-authenticated
+     * @param {string} symbol unified market symbol of the market trades were made in
+     * @param {int} [since] the earliest time in ms to fetch trades for
+     * @param {int} [limit] the maximum number of trade structures to retrieve
+     * @param {object} [params] extra parameters specific to the exchange API endpoint
+     * @param {string} [params.tradingAccountId] the trading account id to fetch entries for
+     * @returns {object[]} a list of [trade structures]{@link https://docs.ccxt.com/?id=trade-structure}
+     */
+    override async watchMyTrades (symbol: Str = undefined, since: Int = undefined, limit: Int = undefined, params: Dict = {}): Promise<Trade[]> {
+        if (this.markets === undefined) {
+            await this.loadMarkets ();
+        }
+        const subscribeHash = 'myTrades';
+        let messageHash: string = subscribeHash;
+        let symbolResolved: Str = undefined;
+        if (symbol !== undefined) {
+            symbolResolved = this.symbol (symbol);
+            messageHash = subscribeHash + '::' + symbolResolved;
+        }
+        const request: Dict = {
+            'topic': 'trades',
+        };
+        const tradingAccountId = this.safeString (params, 'tradingAccountId');
+        const paramsOmitted = (tradingAccountId !== undefined) ? this.omit (params, 'tradingAccountId') : params;
+        if (tradingAccountId !== undefined) {
+            request['tradingAccountId'] = tradingAccountId;
+        }
+        const trades = await this.watchPrivate (messageHash, subscribeHash, request, paramsOmitted);
+        let limitResolved = limit;
+        if (this.newUpdates) {
+            limitResolved = trades.getLimit (symbolResolved, limit);
+        }
+        return this.filterBySinceLimit (trades, since, limitResolved, 'timestamp', true);
+    }
+
+    /**
+     * @method
+     * @name bullish#unWatchMyTrades
+     * @description unsubscribes from the user trades channel, the subscription is account-wide so all symbols are unsubscribed
+     * @see https://docs.exchange.bullish.com/websocket/api/ws-private-data/operation-send-unsubscribe
+     * @param {string} [symbol] not used by bullish unWatchMyTrades
+     * @param {object} [params] extra parameters specific to the exchange API endpoint
+     * @param {string} [params.tradingAccountId] the trading account id the subscription was opened with
+     * @returns {any} status of the unwatch request
+     */
+    override async unWatchMyTrades (symbol: Str = undefined, params: Dict = {}): Promise<any> {
+        if (this.markets === undefined) {
+            await this.loadMarkets ();
+        }
+        const request: Dict = {
+            'topic': 'trades',
+        };
+        return await this.unsubscribePrivate ('myTrades', 'myTrades', request, params);
+    }
+
+    handleMyTrades (client: Client, message: Dict) {
+        //
+        // snapshot
+        //     {
+        //         "type": "snapshot",
+        //         "tradingAccountId": "111309424211255",
+        //         "dataType": "V1TATrade",
+        //         "data": [ ... ] // could be an empty list or a list of trades
+        //     }
+        //
+        // update
+        //     {
+        //         "type": "update",
+        //         "tradingAccountId": "111309424211255",
+        //         "dataType": "V1TATrade",
+        //         "data": {
+        //             "clientOtcTradeId": null,
+        //             "tradeId": "100203000003940164",
+        //             "baseFee": "0.00000000",
+        //             "isTaker": true,
+        //             "quoteAmount": "253.6012195",
+        //             "price": "2536.0121950",
+        //             "createdAtTimestamp": "1751914859840",
+        //             "quoteFee": "0.0000000",
+        //             "tradeRebateAmount": null,
+        //             "tradeRebateAssetSymbol": null,
+        //             "handle": null,
+        //             "otcTradeId": null,
+        //             "otcMatchId": null,
+        //             "orderId": "862407873644725249",
+        //             "quantity": "0.10000000",
+        //             "publishedAtTimestamp": "1751914859843",
+        //             "side": "SELL",
+        //             "createdAtDatetime": "2025-07-07T19:00:59.840Z",
+        //             "symbol": "ETHUSDT"
+        //         }
+        //     }
+        //
+        const type = this.safeString (message, 'type');
+        let rawTrades: Dict[] = [];
+        if (type === 'update') {
+            const data = this.safeDict (message, 'data', {});
+            rawTrades.push (data); // update is a single trade
+        } else {
+            rawTrades = this.safeList (message, 'data', []); // snapshot is a list of trades
+        }
+        const numRawTrades = rawTrades.length; // hoisted - inline .length within conditionals becomes strlen for php, fatal on arrays
+        if (numRawTrades > 0) {
+            if (this.myTrades === undefined) {
+                const limit = this.safeInteger (this.options, 'tradesLimit', 1000);
+                this.myTrades = new ArrayCacheBySymbolById (limit);
+            }
+            const trades = this.myTrades;
+            const symbols: Dict = {};
+            for (let i = 0; i < rawTrades.length; i++) {
+                const parsedTrade = this.parseTrade (rawTrades[i]);
+                trades.append (parsedTrade);
+                const symbol = this.safeString (parsedTrade, 'symbol');
+                if (symbol !== undefined) {
+                    symbols[symbol] = true;
+                }
+            }
+            const messageHash = 'myTrades';
+            client.resolve (trades, messageHash);
+            const keys = Object.keys (symbols);
+            for (let i = 0; i < keys.length; i++) {
+                const hashSymbol = keys[i];
+                const symbolMessageHash = messageHash + '::' + hashSymbol;
+                client.resolve (this.myTrades, symbolMessageHash);
+            }
+        }
+    }
+
+    /**
+     * @method
+     * @name bullish#watchBalance
+     * @description watch balance and get the amount of funds available for trading or funds locked in orders
+     * @see https://api.exchange.bullish.com/docs/api/rest/trading-api/v2/#overview--private-data-websocket-authenticated
+     * @param {object} [params] extra parameters specific to the exchange API endpoint
+     * @param {string} [params.tradingAccountId] the trading account id to fetch entries for
+     * @returns {object} a [balance structure]{@link https://docs.ccxt.com/?id=balance-structure}
+     */
+    override async watchBalance (params: Dict = {}): Promise<Balances> {
+        if (this.markets === undefined) {
+            await this.loadMarkets ();
+        }
+        const request: Dict = {
+            'topic': 'assetAccounts',
+        };
+        let messageHash = 'balance';
+        const tradingAccountId = this.safeString (params, 'tradingAccountId');
+        const paramsOmitted = (tradingAccountId !== undefined) ? this.omit (params, 'tradingAccountId') : params;
+        if (tradingAccountId !== undefined) {
+            request['tradingAccountId'] = tradingAccountId;
+            messageHash += '::' + tradingAccountId;
+        }
+        return await this.watchPrivate (messageHash, messageHash, request, paramsOmitted);
+    }
+
+    handleBalance (client: Client, message: Dict) {
+        //
+        // snapshot
+        //     {
+        //         "type": "snapshot",
+        //         "tradingAccountId": "111309424211255",
+        //         "dataType": "V1TAAssetAccount",
+        //         "data": [
+        //             {
+        //                 "updatedAtTimestamp": "1751989627509",
+        //                 "borrowedQuantity": "0.0000",
+        //                 "tradingAccountId": "111309424211255",
+        //                 "loanedQuantity": "0.0000",
+        //                 "lockedQuantity": "0.0000",
+        //                 "assetId": "5",
+        //                 "assetSymbol": "USDC",
+        //                 "publishedAtTimestamp": "1751989627512",
+        //                 "availableQuantity": "999672939.8767",
+        //                 "updatedAtDatetime": "2025-07-08T15:47:07.509Z"
+        //             }
+        //         ]
+        //     }
+        //
+        // update
+        //     {
+        //         "type": "update",
+        //         "tradingAccountId": "111309424211255",
+        //         "dataType": "V1TAAssetAccount",
+        //         "data": {
+        //             "updatedAtTimestamp": "1751989627509",
+        //             "borrowedQuantity": "0.0000",
+        //             "tradingAccountId": "111309424211255",
+        //             "loanedQuantity": "0.0000",
+        //             "lockedQuantity": "0.0000",
+        //             "assetId": "5",
+        //             "assetSymbol": "USDC",
+        //             "publishedAtTimestamp": "1751989627512",
+        //             "availableQuantity": "999672939.8767",
+        //             "updatedAtDatetime": "2025-07-08T15:47:07.509Z"
+        //         }
+        //     }
+        //
+        const tradingAccountId = this.safeString (message, 'tradingAccountId');
+        if (tradingAccountId === undefined) {
+            return;
+        }
+        if (!(tradingAccountId in this.balance)) {
+            this.balance[tradingAccountId] = {};
+        }
+        const messageType = this.safeString (message, 'type');
+        if (messageType === 'snapshot') {
+            const data = this.safeList (message, 'data', []);
+            const parsed = this.parseBalanceList (data);
+            const parsedKeys = Object.keys (parsed);
+            for (let i = 0; i < parsedKeys.length; i++) {
+                const parsedKey = parsedKeys[i];
+                this.balance[tradingAccountId][parsedKey] = parsed[parsedKey];
+            }
+            this.balance[tradingAccountId] = this.safeBalance (this.balance[tradingAccountId]);
+        } else {
+            const data = this.safeDict (message, 'data', {});
+            const assetId = this.safeString (data, 'assetSymbol');
+            const account = this.account ();
+            account['total'] = this.safeString (data, 'availableQuantity');
+            account['used'] = this.safeString (data, 'lockedQuantity');
+            const code = this.safeCurrencyCode (assetId);
+            if ((tradingAccountId !== undefined) && (code !== undefined)) {
+                this.balance[tradingAccountId][code] = account;
+            }
+            this.balance[tradingAccountId]['info'] = message;
+            this.balance[tradingAccountId] = this.safeBalance (this.balance[tradingAccountId]);
+        }
+        const messageHash = 'balance';
+        const tradingAccountIdHash = '::' + tradingAccountId;
+        client.resolve (this.balance[tradingAccountId], messageHash);
+        client.resolve (this.balance[tradingAccountId], messageHash + tradingAccountIdHash);
+    }
+
+    /**
+     * @method
+     * @name bullish#watchPositions
+     * @see https://api.exchange.bullish.com/docs/api/rest/trading-api/v2/#overview--private-data-websocket-authenticated
+     * @description watch all open positions
+     * @param {string[]} [symbols] list of unified market symbols
+     * @param {int} [since] the earliest time in ms to fetch positions for
+     * @param {int} [limit] the maximum number of positions to retrieve
+     * @param {object} params extra parameters specific to the exchange API endpoint
+     * @returns {object[]} a list of [position structure]{@link https://docs.ccxt.com/en/latest/manual.html#position-structure}
+     */
+    override async watchPositions (symbols: Strings = undefined, since: Int = undefined, limit: Int = undefined, params: Dict = {}): Promise<Position[]> {
+        if (this.markets === undefined) {
+            await this.loadMarkets ();
+        }
+        const subscribeHash = 'positions';
+        let messageHash = subscribeHash;
+        const hasSymbols = (symbols !== undefined) && !this.isEmpty (symbols);
+        let symbolsNormalized = symbols;
+        if (hasSymbols) {
+            symbolsNormalized = this.marketSymbols (symbols);
+        }
+        if (hasSymbols && (symbolsNormalized !== undefined)) {
+            messageHash += '::' + symbolsNormalized.join (',');
+        }
+        const request: Dict = {
+            'topic': 'derivativesPositionsV2',
+        };
+        const positions = await this.watchPrivate (messageHash, subscribeHash, request, params);
+        if (this.newUpdates) {
+            return positions;
+        }
+        return this.filterBySymbolsSinceLimit (positions, symbolsNormalized, since, limit, true);
+    }
+
+    /**
+     * @method
+     * @name bullish#unWatchPositions
+     * @description unsubscribes from the positions channel, the subscription is account-wide so all symbols are unsubscribed
+     * @see https://docs.exchange.bullish.com/websocket/api/ws-private-data/operation-send-unsubscribe
+     * @param {string[]} [symbols] not used by bullish unWatchPositions
+     * @param {object} [params] extra parameters specific to the exchange API endpoint
+     * @param {string} [params.tradingAccountId] the trading account id the subscription was opened with
+     * @returns {any} status of the unwatch request
+     */
+    override async unWatchPositions (symbols: Strings = undefined, params: Dict = {}): Promise<any> {
+        if (this.markets === undefined) {
+            await this.loadMarkets ();
+        }
+        const request: Dict = {
+            'topic': 'derivativesPositionsV2',
+        };
+        return await this.unsubscribePrivate ('positions', 'positions', request, params);
+    }
+
+    handlePositions (client: Client, message: Dict) {
+        // exchange does not return messages for sandbox mode
+        // current method is implemented blindly
+        // todo: check if this works with not-sandbox mode
+        const messageType = this.safeString (message, 'type');
+        let rawPositions: Dict[] = [];
+        if (messageType === 'update') {
+            const data = this.safeDict (message, 'data', {});
+            rawPositions.push (data);
+        } else {
+            rawPositions = this.safeList (message, 'data', []);
+        }
+        if (this.positions === undefined) {
+            this.positions = new ArrayCacheBySymbolBySide ();
+        }
+        const positions = this.positions;
+        const newPositions: List = [];
+        for (let i = 0; i < rawPositions.length; i++) {
+            const position = this.parsePosition (rawPositions[i]);
+            positions.append (position);
+            newPositions.push (position);
+        }
+        const messageHashes = this.findMessageHashes (client, 'positions::');
+        for (let i = 0; i < messageHashes.length; i++) {
+            const messageHash = messageHashes[i];
+            const parts = messageHash.split ('::');
+            const symbolsString = parts[1];
+            const symbols = symbolsString.split (',');
+            const symbolPositions = this.filterByArray (newPositions, 'symbol', symbols, false);
+            if (!this.isEmpty (symbolPositions)) {
+                client.resolve (symbolPositions, messageHash);
+            }
+        }
+        client.resolve (positions, 'positions');
+    }
+
+    handleErrorMessage (client: Client, message: Dict) {
+        //
+        //     {
+        //         "data": {
+        //             "errorCode": 401,
+        //             "errorCodeName": "UNAUTHORIZED",
+        //             "message": "Unable to authenticate; JWT is missing/invalid or unauthorised to access account"
+        //         },
+        //         "dataType": "V1TAErrorResponse",
+        //         "type": "error"
+        //     }
+        //
+        const data = this.safeDict (message, 'data', {});
+        const feedback = this.id + ' ' + this.json (data);
+        try {
+            const errorCode = this.safeString (data, 'errorCode');
+            const errorCodeName = this.safeString (data, 'errorCodeName');
+            this.throwExactlyMatchedException (this.exceptions['exact'], errorCode, feedback);
+            this.throwBroadlyMatchedException (this.exceptions['broad'], errorCodeName, feedback);
+            throw new ExchangeError (feedback); // unknown message
+        } catch (e) {
+            client.reject (e);
+        }
+    }
+
+    handleUnSubscriptionError (client: Client, message: Dict) {
+        //
+        //     {
+        //         "jsonrpc": "2.0",
+        //         "id": "1",
+        //         "error": {
+        //             "code": "-32602",
+        //             "errorCode": "29013",
+        //             "errorCodeName": "'abcde' is not a valid topic"
+        //         }
+        //     }
+        //
+        const messageId = this.safeString (message, 'id');
+        if ((messageId === undefined) || !(messageId in client.subscriptions)) {
+            return;
+        }
+        const subscription = this.safeDict (client.subscriptions, messageId);
+        if ((subscription === undefined) || !this.safeBool (subscription, 'unsubscribe', false)) {
+            return;
+        }
+        // the subscription stays active, only the pending unsubscription is dropped and rejected
+        delete client.subscriptions[messageId];
+        const unsubHash = this.safeString (subscription, 'messageHash');
+        const errorResponse = this.safeDict (message, 'error', {});
+        const feedback = this.id + ' ' + this.json (errorResponse);
+        try {
+            const errorCode = this.safeString (errorResponse, 'errorCode');
+            const errorCodeName = this.safeString (errorResponse, 'errorCodeName');
+            this.throwExactlyMatchedException (this.exceptions['exact'], errorCode, feedback);
+            this.throwBroadlyMatchedException (this.exceptions['broad'], errorCodeName, feedback);
+            throw new ExchangeError (feedback);
+        } catch (e) {
+            client.reject (e, unsubHash);
+        }
+    }
+
+    override handleMessage (client: Client, message: Dict) {
+        const dataType = this.safeString (message, 'dataType');
+        const result = this.safeDict (message, 'result');
+        const errorResponse = this.safeDict (message, 'error');
+        if (result !== undefined) {
+            const response = this.safeString (result, 'message');
+            if (response === 'Keep alive pong') {
+                this.handlePong (client, message);
+            }
+            const messageId = this.safeString (message, 'id');
+            if ((messageId !== undefined) && (messageId in client.subscriptions)) {
+                const subscription = this.safeDict (client.subscriptions, messageId);
+                if ((subscription !== undefined) && this.safeBool (subscription, 'unsubscribe', false)) {
+                    this.handleUnSubscription (client, subscription);
+                }
+            }
+        } else if (errorResponse !== undefined) {
+            this.handleUnSubscriptionError (client, message);
+        } else if (dataType !== undefined) {
+            if (dataType === 'V1TAAnonymousTradeUpdate') {
+                this.handleTrades (client, message);
+            }
+            if (dataType === 'V1TATickerResponse') {
+                this.handleTicker (client, message);
+            }
+            if (dataType === 'V1TALevel2') {
+                this.handleOrderBook (client, message);
+            }
+            if (dataType === 'V1TAOrder') {
+                this.handleOrders (client, message);
+            }
+            if (dataType === 'V1TATrade') {
+                this.handleMyTrades (client, message);
+            }
+            if (dataType === 'V1TAAssetAccount') {
+                this.handleBalance (client, message);
+            }
+            if (dataType === 'V1TAErrorResponse') {
+                this.handleErrorMessage (client, message);
+            }
+        }
+    }
+}

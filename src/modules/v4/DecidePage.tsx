@@ -3,14 +3,52 @@ import type { ModuleTab } from '../../stores/useAppStore';
 import { ObservationList } from './components/ObservationList';
 import { StrategyPage } from '../strategy/StrategyPage';
 import { FlowPage } from '../flow/FlowPage';
+import { MarketPulse } from './components/MarketPulse';
+import { SidecarFeed } from '../../shared/components/SidecarFeed';
 
-type DecideTab = 'observe' | 'flow' | 'toolbox';
+type DecideTab = 'observe' | 'flow' | 'project-data' | 'toolbox';
 
 const TABS: { id: DecideTab; label: string; hint: string }[] = [
   { id: 'observe', label: '观察清单', hint: '价格与指标提醒，只留意不下单' },
   { id: 'flow', label: '资金流分析', hint: '大盘情绪带 + 个股主力资金' },
+  { id: 'project-data', label: '项目数据', hint: 'AkShare 龙虎榜 / 两融 / 基金净值，逐条标项目名与可得性' },
   { id: 'toolbox', label: '工具箱', hint: '日内工具（默认折叠）' },
 ];
+
+/** 业务页里的开源项目数据线：主源缺失时由备源补，侧车不可用时显示「缺」。 */
+function ProjectDataPanel() {
+  const today = new Date().toISOString().slice(0, 10);
+  return (
+    <div className="space-y-3 p-3">
+      <div>
+        <h2 className="text-[1.0625rem] font-bold text-[#d8dce6]">项目数据 · AkShare 直供备源线</h2>
+        <p className="mt-1 text-[0.8125rem] leading-relaxed text-[#636878]">
+          龙虎榜与两融主源是 Tushare（需 Key）；这里展示 AkShare 备源，缺库或源站改版时显示「缺」，不与主源混算。
+        </p>
+      </div>
+      <SidecarFeed
+        project="AkShare" stability="S4" title="A 股龙虎榜（备源）"
+        caliber="新浪龙虎榜日榜（东财源站改版时自动回退）；席位口径与 Tushare 主源分列，不做合并统计"
+        method="akshare.stock_lhb" params={{ date: today }} maxRows={25}
+      />
+      <SidecarFeed
+        project="AkShare" stability="S4" title="A 股两融（备源）"
+        caliber="上交所融资融券，T-1 18:00 后完整；与 Tushare 两融主源分列展示"
+        method="akshare.margin" params={{}} maxRows={25}
+      />
+      <SidecarFeed
+        project="AkShare" stability="S4" title="行业资金流（备源）"
+        caliber="同花顺行业资金流（东财 push2 限流时自动回退）；与腾讯行业榜（主源）口径不同，分列展示"
+        method="akshare.sector_flow" params={{ indicator: '今日', sectorType: '行业资金流' }} maxRows={25}
+      />
+      <SidecarFeed
+        project="AkShare" stability="S4" title="基金净值"
+        caliber="open_fund_info_em 单位净值走势；主源即 AkShare 侧车，缺库显示「缺」"
+        method="akshare.fund_nav" params={{ code: '000001' }} maxRows={25}
+      />
+    </div>
+  );
+}
 
 /** 旧入口（配置/纪律/持仓）已按要求移除，统一回到观察清单。 */
 function tabOf(initial: ModuleTab): DecideTab {
@@ -44,12 +82,17 @@ export const DecidePage = memo(function DecidePage({ initialTab }: Props) {
       </div>
 
       {tab === 'observe' && (
-        <div className="p-3">
-          <ObservationList />
+        <div>
+          <MarketPulse />
+          <div className="border-t border-[#1a1d26] p-3">
+            <ObservationList />
+          </div>
         </div>
       )}
 
       {tab === 'flow' && <FlowPage />}
+
+      {tab === 'project-data' && <ProjectDataPanel />}
 
       {tab === 'toolbox' && (
         <div>

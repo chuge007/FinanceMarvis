@@ -1,0 +1,170 @@
+import { useCallback, useMemo } from "react";
+import { Box } from "../../../ui";
+import { useAsyncResource, useAutoRefresh, usePaneSettingValue, usePluginPaneState, useUpdatedAgo } from "../../../public/react";
+import { ChartTableHeader, CompositeChart, CurveSurface, curveGhostColors, EmptyState, formatPercentAxis, MarketBoardStack, PaneStatusBody, useChartTableSelection, usePaneNoticeFooter, usePaneStatusLinkFooter, usePaneTabs, type ChartTableChart, type MarketBoardRow, type StatItem } from "../../../components";
+import { ageFooterSegment } from "../../../components/layout/pane/footer";
+import { curveStrip, curveSurfaceMinRows } from "../../../components/chart/curve";
+import { colors } from "../../../theme/colors";
+import { useThemeColors } from "../../../theme/theme-context";
+import { isAccessDenied } from "../../../api-client/errors";
+import type { MoneyMarketRow } from "../../../api-client/money-markets";
+import { staticSeries } from "../../../components/chart/static/series";
+import { StatChartDetail } from "../../../components/market-board";
+import type { PaneProps } from "../../../types/plugin";
+import { MISSING_VALUE, formatPercentileRank } from "../../../utils/format";
+import { usePaneRefreshKey } from "../../../components/data-table/table-pane";
+import { useResearchCloudSession } from "../shared/research-cloud-session";
+import { getCachedHongKongMoneyMarkets, getCachedMoneyMarkets, loadHongKongMoneyMarkets, loadMoneyMarkets } from "./client";
+import { moneyMarketReport, moneyMarketsHeadless } from "./headless";
+import { reportFooterSegment } from "../shared/source-footer";
+import { isHongKongTab, MONEY_MARKET_TABS, moneyMarketAxis, moneyMarketChange, moneyMarketBoardNotices, moneyMarketCurves, moneyMarketObservations, moneyMarketRateChange, moneyMarketRowNote, moneyMarketRows, moneyMarketValue } from "./model";
+
+const TABS = MONEY_MARKET_TABS.map(({ value, label }) => ({ value, label }));
+const PANELS = [{ id: "main" }];
+const BILLS_CAPTION = "Discount yield % by bill tenor";
+const formatRate = (value: number) => moneyMarketValue(value, "percent");
+interface BoardRow extends MarketBoardRow { observation: MoneyMarketRow }
+const boardKey = (row: BoardRow) => row.id;
+function boardRow(row: MoneyMarketRow): BoardRow {
+  return { id: row.id, label: row.label, value: row.value, valueText: moneyMarketValue(row.value, row.unit),
+    change: row.change, changeText: moneyMarketChange(row.change, row.changeUnit), percentile: row.percentile.value,
+    asOf: row.asOf, status: row.status, observation: row,
+    history: moneyMarketObservations(row).map((point) => ({ date: new Date(point.date), close: point.value })),
+  };
+}
+
+/** The year the board's rank and range come from, named like its row. */
+function observationSeries(row: MoneyMarketRow) {
+  return [staticSeries(moneyMarketObservations(row).map((point) => ({ date: new Date(point.date), observedAt: new Date(point.date), value: point.value })),
+    { id: row.id, label: row.label, color: colors.positive, calendarSpaced: true })];
+}
+
+function ObservationChart({ row, width, height, focused = false }: { row: MoneyMarketRow; width: number; height: number; focused?: boolean }) {
+  const series = useMemo(() => observationSeries(row), [row]);
+  if (row.history.every((point) => point.value == null)) return <Box width={width} height={height}><EmptyState title="No history available." /></Box>;
+  return <CompositeChart series={series} panels={PANELS} width={width} height={height} focused={focused} showLegend={false}
+    navigable={false} showTimeAxis formatAxisValue={moneyMarketAxis(row.unit)} remoteKind="money-market-history" />;
+}
+
+function ObservationDetail({ row, width, height, focused = false }: { row: MoneyMarketRow; width: number; height: number; focused?: boolean }) {
+  const p = row.percentile;
+  // The chart below shows the 1Y window, so the range carries no sample count or window dates.
+  const items: StatItem[] = [
+    { id: "level", label: row.unit === "percent" ? "Rate" : "USD billions", value: moneyMarketValue(row.value, row.unit),
+      detail: `${formatPercentileRank(p.value, "1Y")} · ${row.asOf ?? MISSING_VALUE}` },
+    { id: "change", label: "Change", value: moneyMarketChange(row.change, row.changeUnit), detail: `since ${row.previousAsOf ?? MISSING_VALUE}` },
+    { id: "range", label: "1Y range", value: `${moneyMarketValue(p.min, row.unit)} to ${moneyMarketValue(p.max, row.unit)}` },
+    // A bill yield is HKMA's; a US bill read from Treasury's daily file says so; the other US rows name their FRED series.
+    row.group === "efb" ? { id: "series", label: "Source", value: "HKMA", detail: "closing yield, 16:00 HKT" }
+      : row.sourceName === "U.S. Treasury" ? { id: "series", label: "Source", value: "U.S. Treasury", detail: "daily bill rates" }
+      : { id: "series", label: "FRED", value: row.sourceSeriesIds.join(", "), detail: row.frequency },
+  ];
+  // A bill's discount rate understates what it pays: its coupon equivalent is the rate to set beside a fund's yield.
+  if (row.couponEquivalent != null) {
+    items.splice(1, 0, { id: "coupon", label: "Coupon eq", value: moneyMarketValue(row.couponEquivalent, "percent"),
+      detail: row.couponEquivalentAsOf ?? MISSING_VALUE });
+  }
+  return <StatChartDetail items={items} width={width} height={height} empty={row.history.every((point) => point.value == null)}
+    emptySubject="history" emptyTitle="No history available."
+    renderChart={(chartHeight) => <ObservationChart row={row} width={width} height={chartHeight} focused={focused} />} />;
+}
+
+export function MoneyMarketsPane({ width, height, focused }: PaneProps) {
+  const colors = useThemeColors();
+  const session = useResearchCloudSession();
+  const [tab, setTab] = usePaneSettingValue("tab", "rates");
+  // Hong Kong's bill yields are their own payload: each payload is read only on its own tabs.
+  const hongKong = isHongKongTab(tab);
+  const loader = useCallback((force: boolean) => loadMoneyMarkets(force), [session.requestKey]);
+  const resource = useAsyncResource(hongKong ? null : loader, { initialData: getCachedMoneyMarkets, clearOnError: isAccessDenied });
+  const hongKongLoader = useCallback((force: boolean) => loadHongKongMoneyMarkets(force), [session.requestKey]);
+  const hongKongResource = useAsyncResource(hongKong ? hongKongLoader : null, { initialData: getCachedHongKongMoneyMarkets, clearOnError: isAccessDenied });
+  const active = hongKong ? hongKongResource : resource;
+  const [selectedId, setSelectedId] = usePluginPaneState<string | null>("selected", null);
+  const [openId, setOpenId] = usePluginPaneState<string | null>("open", null);
+  const data = resource.data?.payload;
+  const hongKongData = hongKongResource.data?.payload;
+  const shown = hongKong ? hongKongData : data;
+  const rows = useMemo(() => hongKong ? hongKongData?.rows.map(boardRow) ?? []
+    : data ? moneyMarketRows(data, tab).map(boardRow) : [], [data, hongKong, hongKongData, tab]);
+  const curves = useMemo(() => data ? moneyMarketCurves(data, { current: colors.positive, ghosts: curveGhostColors(colors) }) : [], [data, colors]);
+  const openRow = rows.find((row) => row.id === openId);
+  const selectedRow = rows.find((row) => row.id === selectedId) ?? rows[0];
+  const selected = openRow ?? selectedRow;
+  const slope = data?.billsCurve.slope;
+  // The curve's slope is the Bills tab's summary figure.
+  const billsItems: StatItem[] = slope ? [{ id: "slope", label: "1Y-4W",
+    value: slope.valueBps == null ? MISSING_VALUE : `${slope.valueBps > 0 ? "+" : ""}${slope.valueBps.toFixed(1)}bp`,
+    detail: [formatPercentileRank(slope.percentile.value, "1Y"),
+      slope.asOf && slope.asOf !== data?.billsCurve.asOf ? slope.asOf : null].filter(Boolean).join(" · ") }] : [];
+  // A bill row and its tenor on the curve are one selection, matched by FRED series.
+  const bills = useMemo(() => {
+    const tenors = new Map<string, { tenor: string; years: number }>();
+    for (const snapshot of data ? [data.billsCurve, ...data.billsCurve.comparisons] : []) {
+      for (const point of snapshot.points) {
+        const row = rows.find((entry) => entry.observation.seriesId === point.seriesId);
+        if (row && !tenors.has(row.id)) tenors.set(row.id, { tenor: point.tenor, years: point.maturityYears });
+      }
+    }
+    return tenors;
+  }, [data, rows]);
+  const billRowOf = (tenor: string) => [...bills].find(([, bill]) => bill.tenor === tenor)?.[0];
+  const billsTab = tab === "bills";
+  // Left and Right step along the maturities, the way the curve reads.
+  const billDate = useCallback((row: BoardRow) => {
+    const years = bills.get(row.id)?.years;
+    return years == null ? null : new Date(years * 365.25 * 86_400_000);
+  }, [bills]);
+  useChartTableSelection({ rows, getId: boardKey, getDate: billDate, selectedId: selectedRow?.id ?? null, onSelect: setSelectedId,
+    focused: focused && !openRow, enabled: billsTab });
+  const selectedTenor = selectedRow ? bills.get(selectedRow.id)?.tenor ?? null : null;
+  const billsStrip = billsTab ? curveStrip(curves, formatRate, { caption: "Discount yield", selectedPointId: selectedTenor }) : null;
+  // Rates and Liquidity chart the selected row's year; the legend names the row.
+  const boardSeries = useMemo(() => selectedRow ? observationSeries(selectedRow.observation) : [], [selectedRow]);
+  const chart: ChartTableChart | null = billsTab ? billsStrip ? {
+    render: (size) => <CurveSurface series={curves} width={size.width} height={size.height} display="chart"
+      caption={BILLS_CAPTION} xScale="log" formatValue={formatRate} formatChange={moneyMarketRateChange}
+      formatAxisValue={formatPercentAxis} selectedPointId={selectedTenor}
+      onSelectedPointChange={(tenor) => { const id = billRowOf(tenor); if (id) setSelectedId(id); }} />,
+    minRows: curveSurfaceMinRows({ series: curves, width, caption: BILLS_CAPTION }),
+    strip: billsStrip,
+  } : null : selectedRow ? {
+    series: boardSeries, formatValue: (value) => moneyMarketValue(value, selectedRow.observation.unit),
+    formatAxisValue: moneyMarketAxis(selectedRow.observation.unit), remoteKind: "money-market-history",
+    // A rate without a history keeps the band, so the board does not jump as the cursor passes it.
+    empty: `No history for ${selectedRow.label}`,
+  } : null;
+  const figures = billsTab ? billsItems : [];
+  const updatedAgo = useUpdatedAgo(active.updatedAt);
+  const sourceLine = useMemo(() => {
+    if (!shown) return null;
+    const report = moneyMarketReport(hongKong ? hongKongData?.rows ?? [] : data ? moneyMarketRows(data, tab) : [], hongKong);
+    return reportFooterSegment(moneyMarketsHeadless, { ...report.freshness ? { freshness: report.freshness } : {},
+      sections: [{ title: "", columns: [], rows: report.rows }] });
+  }, [data, hongKong, hongKongData, shown, tab]);
+  const { strip: tabStrip, rows: tabRows } = usePaneTabs({ tabs: TABS, activeValue: tab, onSelect: setTab, focused, dense: true });
+  const bodyHeight = Math.max(3, height - tabRows);
+  useAutoRefresh(active.updatedAt, active.load);
+  usePaneRefreshKey(() => active.reload(), { focused });
+  usePaneNoticeFooter({ registrationId: "money-markets:notices", focused,
+    // The board's own; a rate with no figure or an old one says so on its row (`rowNote`).
+    notices: [...(!hongKong && data ? moneyMarketBoardNotices(data) : []),
+      ...(active.data?.refreshError ? [active.data.refreshError] : [])] });
+  usePaneStatusLinkFooter({ registrationId: "money-markets", focused, loading: active.loading, error: active.error,
+    url: selected?.observation.sourceUrl ?? null, showOpenHint: true,
+    // Its source and the rows' dates, as `fn BTMM` ends; how long ago it loaded goes first on a narrow row.
+    info: shown ? [sourceLine!, ...(updatedAgo ? [ageFooterSegment(updatedAgo)] : [])] : [],
+    stale: !!shown && active.data?.stale,
+  });
+  return <Box width={width} height={height} flexDirection="column">
+    {tabStrip}
+    <PaneStatusBody loading={active.loading && !shown} error={!shown ? active.error : null}
+      empty={!active.loading && !active.error && !shown} subject={hongKong ? "Hong Kong money markets" : "money markets"}>
+      {shown ? <MarketBoardStack rows={rows} width={width} height={bodyHeight} focused={focused}
+        selectedId={selectedRow?.id ?? null} onSelectedIdChange={setSelectedId} openId={openId} onOpenIdChange={setOpenId}
+        changeLabel="Δ OBS" rowNote={(row) => moneyMarketRowNote(row.observation)} renderDetail={(row) => <ObservationDetail row={row.observation} width={width} height={Math.max(5, bodyHeight - 2)} focused={focused} />}
+        rootBefore={({ columns }) => <ChartTableHeader width={width} height={bodyHeight} figures={figures} chart={chart}
+          tableRows={rows.length} tableColumns={columns} />} /> : null}
+    </PaneStatusBody>
+  </Box>;
+}

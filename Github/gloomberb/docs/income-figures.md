@@ -1,0 +1,9 @@
+# Reading income and earnings figures
+
+`DVD`'s **Payout** is trailing twelve-month dividends over trailing twelve-month diluted EPS: the distributions paid in the last 12 months over the EPS the P/E is on, both in the quote's currency, so a ratio the source states on another currency, unit or date never shows beside them (the source's ratio stands only where either cannot be read in that currency, and a stated 0% beside cash paid in the year is withheld). Every place it is shown names that basis: `Payout (TTM diluted EPS)` in the report, `TTM diluted EPS` under the pane's figure, and `payout is over TTM diluted EPS` above a ranking. The source does not date the ratio, and the history's retrieval time does not date it either. It is not `EQS`'s dated annual cash payout and must not be compared directly with that fiscal-year figure. `EQS` uses the latest annual common cash dividends (all cash dividends if common dividends are unavailable), as a positive outflow, divided by positive parent net income for that annual statement. A non-positive denominator is not meaningful, not a zero payout.
+
+An `EQS` dividend-growth streak marked `+` is a proven lower bound: the increases extend to the start of stored dividend history. A count without that coverage boundary is not automatically a lifetime record either.
+
+`ERN` and `EE` name an earnings period by its supplied fiscal month when no company-named fiscal quarter is available; they never turn a calendar month into a fiscal quarter. A statement period ending in the following month remains available in the detail without renaming the earnings calendar's period. Missing old statement matches leave revenue unavailable, not a failure of the whole history.
+
+A limited `ERN` market report states how many reports were returned and how to request the full result. Check `complete` and the count before treating a JSON result as the full board.

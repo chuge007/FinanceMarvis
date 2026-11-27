@@ -1,0 +1,128 @@
+import json
+
+import msgspec
+import pytest
+
+from pysdmx.io.json.sdmxjson2.messages import JsonDataStructuresMessage
+from pysdmx.model import (
+    Component,
+    Components,
+    Concept,
+    DataStructureDefinition,
+    DataType,
+    ItemReference,
+)
+
+
+@pytest.fixture
+def body():
+    with open(
+        "tests/io/json/sdmxjson2/deser/samples/dsd/dsd_only.json", "rb"
+    ) as f:
+        return f.read()
+
+
+@pytest.fixture
+def body_two_cubes():
+    with open(
+        "tests/io/json/sdmxjson2/deser/samples/dsd/dsd_two_cubes.json", "rb"
+    ) as f:
+        return f.read()
+
+
+@pytest.fixture
+def body_missing_cs():
+    with open(
+        "tests/io/json/sdmxjson2/deser/samples/dsd/dsd_missing_cs.json", "rb"
+    ) as f:
+        return f.read()
+
+
+@pytest.fixture
+def body_bug_617():
+    with open(
+        "tests/io/json/sdmxjson2/deser/samples/dsd/bug_617.json", "rb"
+    ) as f:
+        return f.read()
+
+
+def test_dsd_only(body):
+    res = msgspec.json.Decoder(JsonDataStructuresMessage).decode(body)
+    dsds = res.to_model()
+
+    assert len(dsds) == 1
+    dsd = dsds[0]
+    assert isinstance(dsd, DataStructureDefinition)
+    assert dsd.agency == "BIS"
+    assert dsd.id == "BIS_CBS"
+    assert dsd.version == "1.42"
+    assert isinstance(dsd.components, Components)
+    assert len(dsd.components) == 24
+    for comp in dsd.components:
+        assert isinstance(comp, Component)
+        assert comp.id is not None
+        assert comp.name is None
+        assert comp.concept is not None
+        assert comp.concept.id is not None
+        assert comp.id == comp.concept.item_id
+        assert comp.required is not None
+        assert comp.role is not None
+        assert comp.dtype is not None
+
+
+def test_dsd_two_cubes(body_two_cubes):
+    res = msgspec.json.Decoder(JsonDataStructuresMessage).decode(
+        body_two_cubes
+    )
+    dsds = res.to_model()
+
+    assert len(dsds) == 1
+    dsd = dsds[0]
+    assert isinstance(dsd, DataStructureDefinition)
+    assert dsd.agency == "BIS"
+    assert dsd.id == "BIS_CBS"
+    assert dsd.version == "1.0"
+    assert len(dsd.components) == 24
+    for comp in dsd.components:
+        if comp.id == "CBS_BANK_TYPE":
+            assert len(comp.enumeration) == 249
+        elif comp.id == "CURR_TYPE_BOOK":
+            assert len(comp.enumeration) == 4
+
+
+def test_dsd_cube_with_plain_string_values(body_two_cubes):
+    data = json.loads(body_two_cubes)
+    data["data"]["dataConstraints"][0]["cubeRegions"] = [
+        {"keyValues": [{"id": "CURR_TYPE_BOOK", "values": ["FC1", "LC1"]}]}
+    ]
+    modified_body = json.dumps(data).encode()
+
+    res = msgspec.json.Decoder(JsonDataStructuresMessage).decode(modified_body)
+    dsds = res.to_model()
+
+    ctb = dsds[0].components["CURR_TYPE_BOOK"]
+    assert [c.id for c in ctb.enumeration] == ["FC1", "LC1"]
+
+
+def test_dsd_missing_cs(body_missing_cs):
+    res = msgspec.json.Decoder(JsonDataStructuresMessage).decode(
+        body_missing_cs
+    )
+    dsds = res.to_model()
+
+    assert len(dsds) == 1
+    dsd = dsds[0]
+    tf = dsd.components["TIME_FORMAT"]
+    assert isinstance(tf.concept, ItemReference)
+    freq = dsd.components["FREQ"]
+    assert isinstance(freq.concept, Concept)
+
+
+def test_bug_617(body_bug_617):
+    res = msgspec.json.Decoder(JsonDataStructuresMessage).decode(body_bug_617)
+    dsds = res.to_model()
+
+    assert len(dsds) == 1
+    dsd = dsds[0]
+    bp = dsd.components["BASE_PER"]
+    assert bp.dtype == DataType.REP_TIME_PERIOD

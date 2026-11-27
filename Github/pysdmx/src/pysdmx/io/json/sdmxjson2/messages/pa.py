@@ -1,0 +1,90 @@
+"""Collection of SDMX-JSON schemas for provision agreements."""
+
+from typing import Sequence
+
+from msgspec import Struct
+
+from pysdmx import errors
+from pysdmx.io.json.sdmxjson2.messages.core import (
+    JsonAnnotation,
+    MaintainableType,
+    _self_link,
+    _self_link_href,
+)
+from pysdmx.model import Agency, ProvisionAgreement
+from pysdmx.util import ensure_tz_aware, is_final
+
+
+class JsonProvisionAgreement(
+    MaintainableType, frozen=True, omit_defaults=True
+):
+    """SDMX-JSON payload for a provision agreement."""
+
+    dataflow: str = ""
+    dataProvider: str = ""
+
+    def to_model(self) -> ProvisionAgreement:
+        """Converts a FusionPA to a standard provision agreement."""
+        return ProvisionAgreement(
+            id=self.id,
+            agency=self.agency,
+            name=self.name,
+            description=self.description,
+            version=self.version,
+            valid_from=ensure_tz_aware(self.validFrom),
+            valid_to=ensure_tz_aware(self.validTo),
+            dataflow=self.dataflow,
+            provider=self.dataProvider,
+            annotations=tuple([a.to_model() for a in self.annotations]),
+            is_external_reference=self.isExternalReference,
+            structure_url=_self_link_href(self.links),
+            is_final=is_final(self.version),
+        )
+
+    @classmethod
+    def from_model(self, pa: ProvisionAgreement) -> "JsonProvisionAgreement":
+        """Converts a pysdmx provision agreement to an SDMX-JSON one."""
+        if not pa.name:
+            raise errors.Invalid(
+                "Invalid input",
+                "SDMX-JSON provision agreements must have a name",
+                {"provision_agreement": pa.id},
+            )
+        return JsonProvisionAgreement(
+            agency=(
+                pa.agency.id if isinstance(pa.agency, Agency) else pa.agency
+            ),
+            id=pa.id,
+            name=pa.name,
+            version=pa.version,
+            isExternalReference=pa.is_external_reference,
+            links=_self_link(pa.structure_url),
+            validFrom=ensure_tz_aware(pa.valid_from),
+            validTo=ensure_tz_aware(pa.valid_to),
+            description=pa.description,
+            annotations=tuple(
+                [JsonAnnotation.from_model(a) for a in pa.annotations]
+            ),
+            dataflow=pa.dataflow,
+            dataProvider=pa.provider,
+        )
+
+
+class JsonProvisionAgreements(Struct, frozen=True, omit_defaults=True):
+    """SDMX-JSON payload for provision agreements."""
+
+    provisionAgreements: Sequence[JsonProvisionAgreement]
+
+    def to_model(self) -> Sequence[ProvisionAgreement]:
+        """Returns the requested provision agreements."""
+        return [pa.to_model() for pa in self.provisionAgreements]
+
+
+class JsonProvisionAgreementsMessage(Struct, frozen=True, omit_defaults=True):
+    """SDMX-JSON payload for /provisionagreement queries."""
+
+    data: JsonProvisionAgreements
+
+    def to_model(self) -> Sequence[ProvisionAgreement]:
+        """Returns the requested provision agreements."""
+        return self.data.to_model()

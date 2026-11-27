@@ -1,0 +1,470 @@
+import { withBalanceSheetRate } from "../../../market-data/quotes/balance-sheet-rate";
+import { formatPriceEarnings } from "../../../utils/price-earnings";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { TextAttributes } from "../../../ui";
+import {
+  DataTableView,
+  usePaneStatusFooter,
+  type DataTableCell,
+  type DataTableColumn,
+  type DataTableKeyEvent,
+  type PaneFooterSegment,
+} from "../../../components";
+import type { PaneProps } from "../../../types/plugin";
+import { useAppSelector, usePaneInstance, usePaneTitle, useUpdatePaneSettings } from "../../../state/app/context";
+import { getSharedMarketDataCoordinator, resolveEntryValue } from "../../../market-data/coordinator";
+import { buildQuoteKey } from "../../../market-data/selectors";
+import { useLiveQuoteEntries } from "../../../state/hooks/quote-streaming";
+import { useSampledValue } from "../../../state/hooks/live-ticker-financials";
+import type { QuoteSubscriptionTarget } from "../../../types/data-provider";
+import type { TickerFinancials } from "../../../types/financials";
+import { canonicalTickerKey, normalizeSymbol } from "../../../utils/exchanges";
+import { colors, priceColor, shownPriceColor } from "../../../theme/colors";
+import { notMeaningfulCell } from "../../../components/ui/not-meaningful";
+import { extendedSessionStateLabel, type ExtendedSession } from "../../../market-data/market/status";
+import { compareSortValues, nextHeaderSort, type SortDirection } from "../../../utils/sort-values";
+import { MISSING_VALUE, formatCompact, formatLevelPercent, formatNumber, formatPercent, formatPercentRaw, displayWidth } from "../../../utils/format";
+import { parseDisplayDate } from "../../../utils/datetime-format";
+import { convertMarketCapitalization } from "../../../utils/market-capitalization";
+import { useAssetData, usePluginTickerActions } from "../../runtime";
+import { apiClient } from "../../../api-client";
+import { formatTickerListInput } from "../../../tickers/list";
+import { handleRefreshKey, useClampSelectedIndex } from "../../../components/data-table/table-pane";
+import { useAsyncResource } from "../../../react/async-resource";
+import { useCloudDisplayScope } from "../../../api-client/plan-access";
+import { useBoundTicker as useSymbolBinding } from "../shared/ticker-request";
+import { useFxRatesMap } from "../../../market-data/hooks";
+import { useRemoteUiNode } from "../../../remote/semantic-tree";
+import { quoteFreshnessFields } from "../shared/report-freshness";
+import { RELATIVE_VALUATION_STALE_FUNDAMENTALS_NOTICE, formatRelativePrice, relativeValuationValues, withLiveQuote } from "./relative-valuation-model";
+import { conversionNote, conversionPairText, convertMarketCaps, relativeCapCurrency, usdRateFromEntry } from "./relative-valuation-currency";
+import { fundamentalsBasisParts, fundamentalsThroughText, revenueGrowthHalfTag, revenueGrowthHeader } from "./relative-valuation-basis";
+import {
+  AUTO_PEERS_SETTING, findPeers, PEER_SELECTION_SETTING, PeerPickError, peerSelectionOf, relativeValuationTitle,
+} from "./relative-valuation-peers";
+import { relativeSymbolsFromPane } from "./relative-valuation-settings";
+
+type ExtendedColumnId = "preMarket" | "afterHours" | "overnight";
+type RelativeColumnId = "symbol" | "name" | "price" | "changePercent" | ExtendedColumnId | "marketCap" | "trailingPE" | "forwardPE" | "evSales" | "fcfYield" | "revenueGrowth" | "operatingMargin";
+type RelativeColumn = DataTableColumn & { id: RelativeColumnId };
+type RelativeRow = ReturnType<typeof relativeValuationValues> & {
+  symbol: string;
+  error?: string;
+};
+
+const EXTENDED_COLUMN_IDS: Record<ExtendedSession, ExtendedColumnId> = { PRE: "preMarket", POST: "afterHours", OVERNIGHT: "overnight" };
+
+/** The latest quarter's revenue against the same quarter a year earlier; the footer names the quarter. */
+const REVENUE_GROWTH_LABEL = "Q REV%";
+/** Once a peer reports half-yearly, the column holds a half's growth too (`H1`), named in the footer. */
+const PERIOD_REVENUE_GROWTH_LABEL = "REV%";
+
+/**
+ * The footer's word on the figures, longest first: the rates MCAP was
+ * converted at with their times, the statement period the trailing figures
+ * run through and the quarter Q REV% compares, as `fn RV` ends; shorter forms
+ * keep the rates without their times, then the period alone after them, then
+ * the rates alone.
+ */
+function basisFooterSegment(conversions: Parameters<typeof conversionNote>[1], baseCurrency: string, basis: readonly string[], through: string | null): PaneFooterSegment | null {
+  const column = `MCAP ${baseCurrency}`;
+  const rates = conversions.length > 0 ? `${column} at ${conversions.map(conversionPairText).join(", ")}` : null;
+  const forms = [
+    [conversionNote(baseCurrency, conversions, column), ...basis],
+    [rates, ...basis],
+    [rates, through],
+    [rates ?? through],
+  ].map((form) => form.filter((part): part is string => !!part).join(" · "));
+  if (!forms[0]) return null;
+  const variants = [...new Set(forms.slice(1))].filter((form) => form && form !== forms[0]);
+  return {
+    id: "basis",
+    parts: [{ text: forms[0], tone: "muted" }],
+    ...(variants.length > 0 ? { variants: variants.map((text) => [{ text, tone: "muted" as const }]) } : {}),
+  };
+}
+
+/** The extended sessions some peer has a print for, in the order their columns go. */
+function extendedSessionsOf(rows: readonly RelativeRow[]): ExtendedSession[] {
+  return (["PRE", "POST", "OVERNIGHT"] as const).filter((session) => rows.some((row) => row.extendedSession === session));
+}
+
+/** A peer's move in the extended-session column `columnId`, from the close in LAST. */
+function extendedMove(row: RelativeRow, columnId: ExtendedColumnId): number | null {
+  return row.extendedSession != null && EXTENDED_COLUMN_IDS[row.extendedSession] === columnId ? row.extendedChangePercent : null;
+}
+
+/**
+ * LAST and CHG% are the regular session, as `quote` reads them; a PRE-MKT,
+ * AFTER-HRS or OVERNIGHT column, named as BI and MOST name it, follows CHG%
+ * for each session in `extendedSessions`.
+ */
+const SYMBOL_WIDTH = 8;
+const MAX_SYMBOL_WIDTH = 22;
+
+function buildRelativeColumns(
+  baseCurrency: string,
+  extendedSessions: readonly ExtendedSession[],
+  marginNamesYear: boolean,
+  peNamesYear = false,
+  growthLabel = REVENUE_GROWTH_LABEL,
+  symbolWidth = SYMBOL_WIDTH,
+  forwardNamesYear = false,
+): RelativeColumn[] {
+  // The name gives back what a wide ticker takes, so the figures keep their place.
+  const nameWidth = Math.max(10, 16 - (symbolWidth - SYMBOL_WIDTH));
+  const priceWidth = 10;
+  const pctWidth = 8;
+  const capWidth = 12;
+  const metricWidth = 8;
+  return [
+    { id: "symbol", label: "TICKER", width: symbolWidth, align: "left" },
+    // The company each ticker was read as (MTN is Vail Resorts in New York); it takes the room the figures leave.
+    { id: "name", label: "NAME", width: nameWidth, flexGrow: 1, align: "left" },
+    { id: "price", label: "LAST", width: priceWidth, align: "right" },
+    { id: "changePercent", label: "CHG%", width: pctWidth, align: "right" },
+    ...extendedSessions.map((session): RelativeColumn => ({
+      id: EXTENDED_COLUMN_IDS[session], label: extendedSessionStateLabel(session), width: 9, align: "right",
+    })),
+    { id: "marketCap", label: `MCAP ${baseCurrency}`, width: capWidth, align: "right" },
+    // Wider while a peer's P/E is on its latest fiscal year's EPS and names it ("24.6 FY Mar-26").
+    { id: "trailingPE", label: "P/E", width: peNamesYear ? 14 : metricWidth, align: "right" },
+    // Wider while a peer's forward P/E names the fiscal year of its consensus ("24.8 FY28").
+    { id: "forwardPE", label: "FWD", width: forwardNamesYear ? 10 : metricWidth, align: "right" },
+    { id: "evSales", label: "EV/S", width: metricWidth, align: "right" },
+    { id: "fcfYield", label: "FCF%", width: metricWidth, align: "right" },
+    // Latest quarter against the year before, and a trailing-twelve-month margin.
+    // Wider while a peer's figure is a half's and says so ("+23.80% H1").
+    { id: "revenueGrowth", label: growthLabel, width: growthLabel === REVENUE_GROWTH_LABEL ? metricWidth : 11, align: "right" },
+    // Wider while a peer's margin is of its latest fiscal year and names it ("16.83% FY25").
+    { id: "operatingMargin", label: "TTM OP%", width: marginNamesYear ? 12 : metricWidth, align: "right" },
+  ];
+}
+
+/**
+ * What a narrow desktop pane gives up first: the extended session's move, the
+ * name each ticker already stands for, then the day's move. The multiples the
+ * pane compares leave after those, from the last column back.
+ */
+const RELATIVE_COLUMN_DROP_ORDER: readonly RelativeColumnId[] = [...Object.values(EXTENDED_COLUMN_IDS), "name", "changePercent"];
+
+interface RelativeSortPreference {
+  columnId: RelativeColumnId;
+  direction: SortDirection;
+}
+
+const DEFAULT_RELATIVE_SORT: RelativeSortPreference = { columnId: "marketCap", direction: "desc" };
+
+function relativeSortValue(row: RelativeRow, columnId: RelativeColumnId): string | number | null {
+  if (columnId === "symbol") return row.symbol.toLocaleLowerCase();
+  if (columnId === "name") return row.name?.toLocaleLowerCase() ?? null;
+  if (columnId === "preMarket" || columnId === "afterHours" || columnId === "overnight") return extendedMove(row, columnId);
+  return row[columnId];
+}
+
+function sortRelativeRowIndices(
+  rows: readonly RelativeRow[],
+  preference: RelativeSortPreference,
+): number[] {
+  return rows
+    .map((row, index) => ({ row, index }))
+    .sort((left, right) => (
+      compareSortValues(
+        relativeSortValue(left.row, preference.columnId),
+        relativeSortValue(right.row, preference.columnId),
+        preference.direction,
+      ) || left.index - right.index
+    ))
+    .map((entry) => entry.index);
+}
+
+const NO_SYMBOLS: string[] = [];
+
+/** Live values keep moving; the row order follows them at most this often. */
+const RELATIVE_ORDER_SAMPLE_MS = 5_000;
+
+interface PeerSnapshot {
+  symbol: string;
+  financials: TickerFinancials | null;
+  error?: string;
+}
+
+/** What concerns one peer's row, each a sentence: why its figures failed or are old, and why its EV/Sales reads as it does. */
+function relativeRowNotes(row: RelativeRow): string[] {
+  return [
+    row.error ? `${row.error.replace(/\.$/, "")}.` : null,
+    row.quoteStale ? "Its quote is stale." : null,
+    row.fundamentalsProvenance?.stale ? `${RELATIVE_VALUATION_STALE_FUNDAMENTALS_NOTICE}.` : null,
+    row.evSalesUnavailable ?? null,
+    row.evSalesNote ?? null,
+  ].filter((note): note is string => !!note);
+}
+
+function peerQuoteKey(symbol: string): string {
+  return buildQuoteKey({ symbol: normalizeSymbol(symbol), exchange: "", instrument: null });
+}
+
+export function RelativeValuationPane({ focused, width, height }: PaneProps) {
+  const pane = usePaneInstance();
+  const { symbol } = useSymbolBinding();
+  // Keyed on the list itself, so a settings write that leaves the peers alone
+  // does not start the snapshot over.
+  const symbolList = relativeSymbolsFromPane(symbol, pane?.settings).join(",");
+  const listed = useMemo(() => (symbolList ? symbolList.split(",") : []), [symbolList]);
+  const settings = pane?.settings;
+  // A pane opened on one ticker compares it with the peers `fn RV <ticker> --peers` picks, by the same
+  // method, and keeps them in its settings with how they were chosen.
+  const configuredPeers = useMemo(() => peerSelectionOf(settings?.[PEER_SELECTION_SETTING], listed), [listed, settings]);
+  const peerSubject = settings?.[AUTO_PEERS_SETTING] === true && listed.length === 1 && !configuredPeers ? listed[0]! : null;
+  const dataProvider = useAssetData();
+  const scope = useCloudDisplayScope();
+  const updateSettings = useUpdatePaneSettings();
+  const controller = useRef<AbortController | null>(null);
+  const find = useCallback(() => {
+    controller.current?.abort();
+    const current = new AbortController();
+    controller.current = current;
+    return findPeers(peerSubject!, { marketData: dataProvider!, apiClient, signal: current.signal }).catch((error: unknown) => {
+      if (error instanceof PeerPickError) throw new Error(error.reason, { cause: error });
+      throw error;
+    });
+  }, [dataProvider, peerSubject, scope]);
+  useEffect(() => () => controller.current?.abort(), [find]);
+  const discovery = useAsyncResource(peerSubject && dataProvider ? find : null, {
+    savedCopy: scope && dataProvider ? { key: ["relative-valuation-peer-selection", scope, dataProvider.id, peerSubject] } : null,
+  });
+  const peerError = discovery.error && (discovery.error.startsWith("No peers") ? discovery.error : `No peers: ${discovery.error}`);
+  const discoveredSymbols = useMemo(() => discovery.data ? [discovery.data.subject, ...discovery.data.peers] : null, [discovery.data]);
+  useEffect(() => {
+    if (!discovery.data || discovery.savedAt != null || !discoveredSymbols) return;
+    updateSettings({ symbols: discoveredSymbols, symbolsText: formatTickerListInput(discoveredSymbols), [PEER_SELECTION_SETTING]: discovery.data });
+  }, [discovery.data, discovery.savedAt, discoveredSymbols, updateSettings]);
+  // The table waits for the peers, so it fills once; without any it shows the ticker alone.
+  const pickingPeers = peerSubject != null && !discoveredSymbols && peerError == null;
+  const comparison = discoveredSymbols?.join(",") ?? symbolList;
+  const symbols = useMemo(() => comparison ? comparison.split(",") : NO_SYMBOLS, [comparison]);
+  // The title says how the peers were chosen, or lists the tickers; a title the user gave the pane stays.
+  const ownsTitle = /^RV(?:\s|$)/.test(pane?.title ?? "");
+  usePaneTitle(ownsTitle && listed.length > 0 && !peerSubject ? relativeValuationTitle(listed, configuredPeers) : null);
+  const { navigateTicker } = usePluginTickerActions();
+  const loadPeers = useCallback(async (forceRefresh: boolean): Promise<PeerSnapshot[]> => {
+    const coordinator = getSharedMarketDataCoordinator();
+    if (!coordinator) throw new Error("Market data unavailable");
+    // One batched snapshot request instead of one request per peer.
+    const entries = await coordinator.loadSnapshotsBatch(symbols.map((peer) => ({ symbol: peer })), { forceRefresh });
+    // A withdrawn EV's bridge converts a balance sheet in another currency at our close on its date, as `fundamentals` does.
+    return Promise.all(symbols.map(async (peer, index) => {
+      const entry = entries[index];
+      const financials = entry?.data ?? entry?.lastGoodData ?? null;
+      return {
+        symbol: peer,
+        financials: financials ? await withBalanceSheetRate({ ...financials, priceHistory: [] }) : null,
+        error: entry?.error?.message,
+      };
+    }));
+  }, [symbols]);
+  // Fundamentals come from one batched snapshot; prices stream on top of it.
+  const peerSnapshot = useAsyncResource(symbols.length > 0 ? loadPeers : null, {
+    keepPreviousData: scope,
+    savedCopy: scope && dataProvider ? { key: ["relative-valuation", scope, dataProvider.id, symbols] } : null,
+    deferLoad: pickingPeers,
+  });
+  const { data: peers, updatedAt, reload: reloadSnapshot } = peerSnapshot;
+  const loading = peerSnapshot.loading || (pickingPeers && peers === null);
+  const error = symbols.length > 0 ? peerSnapshot.error : pickingPeers ? null : "No tickers selected";
+  // Refreshing asks for the peers again when picking them failed.
+  const reload = useCallback(() => {
+    if (peerError) discovery.reload();
+    reloadSnapshot();
+  }, [discovery.reload, peerError, reloadSnapshot]);
+  const [selectedIdx, setSelectedIdx] = useState(0);
+  const [sortPreference, setSortPreference] = useState<RelativeSortPreference>(DEFAULT_RELATIVE_SORT);
+  const appBaseCurrency = useAppSelector((state) => state.config.baseCurrency);
+  // `--currency` on a capture asks for another currency than the app's.
+  const capCurrency = typeof pane?.settings?.capCurrency === "string" ? pane.settings.capCurrency : null;
+  const quoteTargets = useMemo<QuoteSubscriptionTarget[]>(() => symbols.map((peer) => ({
+    symbol: peer,
+    exchange: "",
+    surface: "screener",
+    visible: true,
+    weight: 60,
+  })), [symbols]);
+  const { entries: liveQuotes } = useLiveQuoteEntries(quoteTargets);
+  // Each peer's snapshot with its live quote laid over it.
+  const snapshots = useMemo(() => (peers ?? []).map((peer) => {
+    const entry = liveQuotes.get(peerQuoteKey(peer.symbol));
+    return { peer, financials: withLiveQuote(peer.financials, entry ? resolveEntryValue(entry) : null) };
+  }), [liveQuotes, peers]);
+  const rows = useMemo<RelativeRow[]>(() => snapshots.map(({ peer, financials }) => ({
+    symbol: peer.symbol,
+    ...relativeValuationValues(financials),
+    error: peer.error,
+  })), [snapshots]);
+  // The peers' own currency when they share one, as `fn RV` compares them; else the app's.
+  const capCurrenciesKey = rows.map((row) => row.marketCapCurrency ?? "").join(",");
+  const baseCurrency = useMemo(() => relativeCapCurrency(capCurrency, capCurrenciesKey.split(","), appBaseCurrency),
+    [appBaseCurrency, capCurrenciesKey, capCurrency]);
+  // TICKER grows to the longest key, so VOW3:XETRA shows whole; the name gives way.
+  const symbolWidth = Math.min(MAX_SYMBOL_WIDTH, Math.max(SYMBOL_WIDTH, ...rows.map((row) => displayWidth(row.symbol))));
+  const fxRates = useFxRatesMap([baseCurrency, ...rows.map((row) => row.marketCapCurrency)]);
+  // A pre-market or after-hours print gets its own column when a peer has one.
+  const extendedSessionsKey = extendedSessionsOf(rows).join(",");
+  const marginNamesYear = rows.some((row) => row.operatingMarginPeriod != null);
+  const peNamesYear = rows.some((row) => row.trailingPEPeriod != null);
+  const forwardNamesYear = rows.some((row) => row.forwardPEPeriod != null);
+  const growthLabel = revenueGrowthHeader(rows, REVENUE_GROWTH_LABEL, PERIOD_REVENUE_GROWTH_LABEL);
+  const columns = useMemo(
+    () => buildRelativeColumns(baseCurrency, extendedSessionsKey ? extendedSessionsKey.split(",") as ExtendedSession[] : [], marginNamesYear, peNamesYear,
+      growthLabel, symbolWidth, forwardNamesYear),
+    [baseCurrency, extendedSessionsKey, marginNamesYear, peNamesYear, growthLabel, symbolWidth, forwardNamesYear],
+  );
+
+  const comparableRows = useMemo(() => rows.map((row) => ({
+    ...row, marketCap: convertMarketCapitalization(row.marketCap, row.marketCapCurrency, baseCurrency, fxRates),
+  })), [rows, baseCurrency, fxRates]);
+  const missingFx = rows.some((row, index) => row.marketCap != null && comparableRows[index]?.marketCap == null);
+  // The rates the converted caps were read at, each with when it was observed, as `fn RV --currency` names them.
+  const conversions = useMemo(() => {
+    const coordinator = getSharedMarketDataCoordinator();
+    const legs = new Map([...fxRates].flatMap(([currency, rate]) => (
+      currency === "USD" ? [] : [[currency, usdRateFromEntry(rate, coordinator?.getFxEntry(currency))] as const]
+    )));
+    const converted = rows.filter((row, index) => row.marketCapCurrency !== baseCurrency && comparableRows[index]?.marketCap != null);
+    return convertMarketCaps(converted, baseCurrency, legs).conversions;
+  }, [baseCurrency, comparableRows, fxRates, rows]);
+  const basis = useMemo(() => fundamentalsBasisParts(rows, growthLabel, "FCF%"), [growthLabel, rows]);
+  const through = useMemo(() => fundamentalsThroughText(rows), [rows]);
+  const basisSegment = useMemo(() => basisFooterSegment(conversions, baseCurrency, basis, through), [baseCurrency, basis, conversions, through]);
+  const footerInfo = useMemo(() => (basisSegment ? [basisSegment] : []), [basisSegment]);
+  // A capture of the pane ends as `fn RV` does: each venue's session, the feed's delay, then the footer's word on
+  // the figures. The pane draws the session part nowhere; its footer keeps the rest.
+  useRemoteUiNode(rows.length > 0 ? {
+    role: "report-freshness",
+    label: "Peer freshness",
+    getMetadata: () => ({
+      datesEachVenue: true,
+      ...(basisSegment ? {
+        note: basisSegment.parts[0]!.text,
+        noteVariants: (basisSegment.variants ?? []).map((variant) => variant[0]!.text),
+      } : {}),
+      observations: snapshots.map(({ financials }, index) => ({
+        ...quoteFreshnessFields(financials?.quote),
+        quoteAsOf: rows[index]?.quoteAsOf ?? null,
+      })),
+    }),
+  } : null);
+  // Sorting by a live column would reshuffle rows under the cursor on every
+  // tick; the order is taken from values sampled every few seconds instead,
+  // and at once when the sort or the peer set changes.
+  const orderRows = useSampledValue(
+    comparableRows,
+    RELATIVE_ORDER_SAMPLE_MS,
+    `${updatedAt}:${sortPreference.columnId}:${sortPreference.direction}`,
+  );
+  const order = useMemo(() => sortRelativeRowIndices(orderRows, sortPreference), [orderRows, sortPreference]);
+  const sortedRows = useMemo(
+    () => order.flatMap((index) => (comparableRows[index] ? [comparableRows[index]] : [])),
+    [comparableRows, order],
+  );
+
+  // The footer says what concerns the whole comparison; what concerns one peer is on its row (its symbol
+  // in the warning colour) and, for the selected row, under the table (`rowNote`).
+  const status = [error, peerError, missingFx ? "Market-cap FX unavailable" : null].filter(Boolean).join(" · ") || null;
+
+  useClampSelectedIndex(rows.length, selectedIdx, setSelectedIdx);
+
+  const renderCell = useCallback((row: RelativeRow, column: RelativeColumn): DataTableCell => {
+    switch (column.id) {
+      case "symbol":
+        // The listing as the CLI names it (ASML:AMS), not the key it is stored under (ASML:XAMS).
+        return { text: canonicalTickerKey(row.symbol), color: row.error || row.quoteStale || row.fundamentalsProvenance?.stale ? colors.warning : colors.textBright, attributes: TextAttributes.BOLD };
+      case "name":
+        return { text: row.name ?? MISSING_VALUE, color: row.name ? colors.text : colors.textDim };
+      case "price":
+        return { text: formatRelativePrice(row.price, row.currency), color: colors.text };
+      case "changePercent":
+        return { text: row.changePercent != null ? formatPercentRaw(row.changePercent) : MISSING_VALUE, color: shownPriceColor(row.changePercent ?? 0, 2) };
+      case "preMarket":
+      case "afterHours":
+      case "overnight": {
+        const move = extendedMove(row, column.id);
+        return { text: move != null ? formatPercentRaw(move) : MISSING_VALUE, value: move, color: move == null ? colors.textDim : shownPriceColor(move, 2) };
+      }
+      case "marketCap":
+        return { text: formatCompact(row.marketCap ?? undefined, { fixedDecimals: true }), color: colors.textDim };
+      case "trailingPE":
+        // A P/E over a loss: N/M in the colour every pane draws N/M in (notMeaningfulColor).
+        if (row.notMeaningful.trailingPE) return notMeaningfulCell();
+        return { text: `${formatPriceEarnings(row.reportedMultiples.trailingPE)}${row.trailingPEPeriod ? ` ${row.trailingPEPeriod}` : ""}`, color: colors.text };
+      case "forwardPE":
+        if (row.notMeaningful.forwardPE) return notMeaningfulCell();
+        return { text: `${formatPriceEarnings(row.reportedMultiples.forwardPE)}${row.forwardPEPeriod ? ` ${row.forwardPEPeriod}` : ""}`, color: colors.text };
+      case "evSales":
+        // A withdrawn EV says so, one at or below zero reads N/M as a P/E over a loss does; the row's note says why.
+        if (row.evSales == null && row.notMeaningful.evSales) return notMeaningfulCell();
+        return row.evSales == null && row.evSalesUnavailable
+          ? { text: "EV n/a", color: colors.textDim }
+          : { text: formatNumber(row.evSales ?? undefined, 1), color: colors.text };
+      case "fcfYield":
+        return { text: formatLevelPercent(row.fcfYield ?? undefined), color: priceColor(row.fcfYield ?? 0) };
+      case "revenueGrowth": {
+        // A half-year reporter's growth is its half's, which the cell says beside the figure.
+        if (row.revenueGrowth == null && row.notMeaningful.revenueGrowth) return notMeaningfulCell();
+        const half = row.revenueGrowth != null ? revenueGrowthHalfTag(row.revenueGrowthHalf) : null;
+        return { text: `${formatPercent(row.revenueGrowth ?? undefined)}${half ? ` ${half}` : ""}`, color: shownPriceColor((row.revenueGrowth ?? 0) * 100, 2) };
+      }
+      case "operatingMargin":
+        if (row.operatingMargin == null && row.notMeaningful.operatingMargin) return notMeaningfulCell();
+        return { text: `${formatLevelPercent(row.operatingMargin ?? undefined)}${row.operatingMargin != null && row.operatingMarginPeriod ? ` ${row.operatingMarginPeriod}` : ""}`, color: colors.text };
+    }
+  }, []);
+
+  const handleKeyDown = useCallback((event: DataTableKeyEvent) => {
+    return handleRefreshKey(event, reload, { stopPropagation: true });
+  }, [reload]);
+
+  const handleHeaderClick = useCallback((columnId: string) => {
+    setSortPreference((current) => nextHeaderSort(current, columnId as RelativeColumnId, {
+      firstDirection: columnId === "symbol" || columnId === "name" ? "asc" : "desc",
+    }));
+  }, []);
+
+  usePaneStatusFooter({ registrationId: "relative-valuation", loading, error: status, info: footerInfo });
+
+  return (
+    <DataTableView<RelativeRow, RelativeColumn>
+      focused={focused}
+      selection={{
+        kind: "index",
+        selectedIndex: rows.length > 0 ? selectedIdx : -1,
+        onChange: (index) => setSelectedIdx(index),
+      }}
+      onActivate={(row) => navigateTicker(row.symbol)}
+      onRootKeyDown={handleKeyDown}
+      rootWidth={width}
+      rootHeight={height}
+      columns={columns}
+      columnDropOrder={RELATIVE_COLUMN_DROP_ORDER}
+      items={sortedRows}
+      sortColumnId={sortPreference.columnId}
+      sortDirection={sortPreference.direction}
+      onHeaderClick={handleHeaderClick}
+      getItemKey={(row) => row.symbol}
+      renderCell={renderCell}
+      rowNote={(row) => {
+        const notes = relativeRowNotes(row);
+        return notes.length ? `${canonicalTickerKey(row.symbol)}: ${notes.join(" ")}` : null;
+      }}
+      selectedTextOverridesCellColor
+      getExportMetadata={() => sortedRows.flatMap((row) => [
+        [row.symbol, "Quote as of", parseDisplayDate(row.quoteAsOf)?.toISOString() ?? "unavailable", "Stale", String(row.quoteStale ?? "unknown")],
+        ...(row.extendedSession && row.extendedUpdatedAt != null
+          ? [[row.symbol, `${extendedSessionStateLabel(row.extendedSession)} as of`, new Date(row.extendedUpdatedAt).toISOString()]] : []),
+        [row.symbol, "Fundamentals retrieved", row.fundamentalsProvenance?.retrievedAt ?? "unavailable",
+          "Stale", String(row.fundamentalsProvenance?.stale ?? "unknown")],
+        ...(row.fundamentalsProvenance?.stale ? [[row.symbol, RELATIVE_VALUATION_STALE_FUNDAMENTALS_NOTICE]] : []),
+      ])}
+      emptyStateTitle={loading ? "Loading peers..." : error ?? "No peers"}
+    />
+  );
+}

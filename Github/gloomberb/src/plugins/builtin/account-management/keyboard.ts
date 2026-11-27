@@ -1,0 +1,123 @@
+import type { RefObject } from "react";
+import { useFieldRing, type FieldRing } from "../../../components";
+import { useShortcut } from "../../../react/input";
+import type { ScrollBoxRenderable } from "../../../ui";
+import { isPlainKey } from "../../../utils/keyboard";
+import { logFailure } from "../../../utils/log-failure";
+import type { AccountDraft, AccountFieldKey } from "./model";
+
+const SCOPE = "account-management:fields";
+
+/** Checkboxes: Enter or Space flips them. */
+const TOGGLE_FIELDS = [
+  "profilePublic",
+  "acceptUnknownDms",
+  "showLocalTime",
+  "showDesks",
+  "weeklyRoundupEnabled",
+  "chatEmailNotificationsEnabled",
+  "positionAlertsEnabled",
+] as const satisfies readonly (AccountFieldKey & keyof AccountDraft)[];
+
+export function useAccountManagementKeyboard({
+  activeField,
+  cyclePortfolio,
+  draftRef,
+  fieldOrder,
+  focused,
+  openAssistants,
+  openDeskPicker,
+  openPasswordDialog,
+  openPortfolioDialog,
+  openUpgrade,
+  saveProfile,
+  scrollRef,
+  setActiveField,
+  setDraftValue,
+  deleteAccount,
+  endTrial,
+  cancelPro,
+  copyInvite,
+  turnOffEmailAlerts,
+  yearlyPlanAction,
+  dismissYearlyReview,
+}: {
+  activeField: AccountFieldKey;
+  cyclePortfolio: (delta: number) => void;
+  draftRef: { current: AccountDraft };
+  /** The active tab's ring, in reading order. */
+  fieldOrder: readonly AccountFieldKey[];
+  focused: boolean;
+  openAssistants: () => void;
+  openDeskPicker: () => void;
+  openPasswordDialog: () => void;
+  openPortfolioDialog: () => Promise<void>;
+  openUpgrade: () => void;
+  saveProfile: () => Promise<void>;
+  scrollRef: RefObject<ScrollBoxRenderable | null>;
+  setActiveField: (field: AccountFieldKey) => void;
+  setDraftValue: <K extends keyof AccountDraft>(key: K, value: AccountDraft[K]) => void;
+  deleteAccount: () => Promise<void>;
+  endTrial: () => Promise<void>;
+  cancelPro: () => Promise<void>;
+  copyInvite: () => void;
+  turnOffEmailAlerts: () => Promise<void>;
+  /** The yearly row's action: review, pay or open the invoice. */
+  yearlyPlanAction: () => void;
+  /** Closes the yearly review while it is open, else null. */
+  dismissYearlyReview: (() => void) | null;
+}): FieldRing<AccountFieldKey> {
+  const actions: Partial<Record<AccountFieldKey, () => void>> = {
+    sharedPortfolioId: () => { void openPortfolioDialog(); },
+    desks: openDeskPicker,
+    passwordAction: openPasswordDialog,
+    upgradeAction: openUpgrade,
+    cancelTrialAction: () => { void endTrial(); },
+    cancelProAction: () => { cancelPro().catch(logFailure("account-management.keyboard", "Cancel Pro failed")); },
+    inviteCopyAction: copyInvite,
+    assistantsAction: openAssistants,
+    deleteAccountAction: () => { void deleteAccount(); },
+    emailAlertsOffAction: () => { void turnOffEmailAlerts(); },
+    yearlyPlanAction,
+    yearlyPlanDismissAction: () => dismissYearlyReview?.(),
+  };
+  for (const key of TOGGLE_FIELDS) actions[key] = () => setDraftValue(key, !draftRef.current[key]);
+
+  const ring = useFieldRing({
+    ids: fieldOrder,
+    activeId: activeField,
+    onActivate: setActiveField,
+    enabled: focused,
+    scope: SCOPE,
+    actions,
+    scrollRef,
+  });
+
+  useShortcut((event) => {
+    const consume = () => {
+      event.preventDefault?.();
+      event.stopPropagation?.();
+    };
+    if (event.ctrl && event.name === "s") {
+      consume();
+      void saveProfile();
+      return;
+    }
+    // Esc closes the yearly review, as Cancel does a form.
+    if (dismissYearlyReview && !event.targetEditable && isPlainKey(event, "escape")) {
+      consume();
+      dismissYearlyReview();
+      return;
+    }
+    if (event.targetEditable || activeField !== "sharedPortfolioId") return;
+    if (isPlainKey(event, "left", "h", "[")) {
+      consume();
+      cyclePortfolio(-1);
+    } else if (isPlainKey(event, "right", "l", "]")) {
+      consume();
+      cyclePortfolio(1);
+    }
+  }, { allowEditable: true, phase: "before", scope: SCOPE, enabled: focused });
+
+  return ring;
+}

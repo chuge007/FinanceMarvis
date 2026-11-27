@@ -1,0 +1,16 @@
+import { MISSING_VALUE } from "../../../utils/format";
+export function formatWeight(weight: number | null): string {
+  if (weight == null || !Number.isFinite(weight)) return MISSING_VALUE;
+  return `${(weight * 100).toFixed(1)}%`;
+}
+
+export function formatReturn(value: number): string {
+  const pct = value * 100;
+  return `${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%`;
+}
+
+export function renderBar(weight: number | null, maxWidth: number): string {
+  if (weight == null || !Number.isFinite(weight) || weight <= 0) return "";
+  const filled = Math.round(weight * maxWidth);
+  return "█".repeat(Math.min(filled, maxWidth));
+}

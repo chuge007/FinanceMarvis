@@ -1,0 +1,284 @@
+import { apiClient } from "../../api-client";
+import type { NewsArticle } from "../../news/types";
+import { ENERGY_NEWS_TOPIC, mapCloudNewsArticle, METALS_NEWS_TOPIC } from "../../sources/gloomberb-cloud/news";
+import { centralBankNewsQueries, centralBankNewsTopic, storyNamesCentralBank, type CentralBank } from "../../utils/central-banks";
+import { cliStyles } from "../../utils/cli-output";
+import { logFailure } from "../../utils/log-failure";
+import { commodityNamedIn, commoditySearchName, isCommodityName } from "../../market-data/commodity-names";
+import { futuresBoardContract, type FuturesContract } from "../../market-data/futures-board";
+
+/** What the service accepts of a search: two characters to two hundred, with a letter or a number in them. */
+const MIN_TEXT_LENGTH = 2;
+const MAX_TEXT_LENGTH = 200;
+const MIN_FALLBACK_LENGTH = 3;
+
+/**
+ * The text `news` was asked to search for rather than a symbol: several words,
+ * quoted or not (`news "european gas"`, `news european gas`), or one word that
+ * still carries its quotes (`news '"gold"'`: a shell drops one pair, so the
+ * word keeps the inner pair). A bare word is a symbol until nothing answers
+ * to it (`newsFallbackText`).
+ */
+export function newsSearchText(args: readonly string[]): string | null {
+  const text = args.join(" ").trim().replace(/\s+/g, " ");
+  const quoted = args.length === 1 ? /^(["'“‘])(.+)(["'”’])$/u.exec(text) : null;
+  if (quoted) return quoted[2]!.trim();
+  return args.length > 1 || /\s/.test(text) ? text : null;
+}
+
+/** How to type a word as text to search from a shell: `'"gold"'` keeps the quotes a shell would drop. */
+export const quotedSearchCommand = (word: string) => `gloom news '"${word}"'`;
+
+/**
+ * The words of a company's name, lower-cased, each run of letters split where
+ * its case changes from lower to upper: "PesoRama Inc." is peso, rama and inc.
+ */
+function companyNameWords(companyName: string): string[] {
+  return companyName
+    .replace(/(\p{Ll})(\p{Lu})/gu, "$1 $2")
+    .toLowerCase()
+    .split(/[^a-z]+/)
+    .filter(Boolean);
+}
+
+/**
+ * Whether a word typed for `news` may mean more than the listing it found:
+ * a plain word (letters only, three or more, typed with a lower-case letter,
+ * as a word is and a ticker rarely is) that is a whole word of the company's
+ * name, the name split at its case changes too ("gold" for Gold.com Inc.,
+ * "gap" for The Gap, "peso" for PesoRama Inc.); a word a name only starts
+ * with ("cost" in Costco, "app" in AppLovin) is not. The stories then decide
+ * (`wordMeansMore`).
+ */
+export function commonWordCandidate(typed: string, companyName: string | null | undefined): boolean {
+  const word = typed.trim();
+  if (!/^[A-Za-z]{3,}$/.test(word) || !/[a-z]/.test(word) || !companyName) return false;
+  return companyNameWords(companyName).includes(word.toLowerCase());
+}
+
+/**
+ * Whether the stories that mention a word are mostly about something else
+ * than the ticker it resolved to: three or more stories, fewer than half of
+ * them filed under the ticker. "gold" is mostly the metal's market; "meta"
+ * is mostly Meta Platforms.
+ */
+export function wordMeansMore(stories: readonly NewsArticle[], symbol: string, key = symbol): boolean {
+  if (stories.length < 3) return false;
+  // A listing outside the US is tagged with its venue (PESO:TSXV), a US one bare.
+  const tickers = new Set([symbol.toUpperCase(), key.toUpperCase()]);
+  const filed = stories.filter((story) => (story.tickers ?? []).some((entry) => tickers.has(entry.toUpperCase()))).length;
+  return filed * 2 < stories.length;
+}
+
+/** Why the service would refuse the text, or null when it can search it. */
+export function newsSearchTextProblem(text: string): string | null {
+  if (text.length < MIN_TEXT_LENGTH || !/[\p{L}\p{N}]/u.test(text)) return "Search text needs at least two characters, with a letter or a number.";
+  if (text.length > MAX_TEXT_LENGTH) return `Search text is limited to ${MAX_TEXT_LENGTH} characters.`;
+  return null;
+}
+
+/**
+ * A word typed as one, not as a symbol: letters, three or more, hyphened
+ * between words ("spin-off", "lock-up"), with a lower-case letter, as a
+ * word is and a ticker rarely is. BRK-B and CORN are symbols, and so is a
+ * hyphened code that is the listing it found, typed in lower case (btc-usd
+ * is BTC-USD).
+ */
+export function isTypedNewsWord(text: string, symbol?: string): boolean {
+  if (text.length < MIN_FALLBACK_LENGTH || !/^[A-Za-z]+(?:-[A-Za-z]{2,})*$/.test(text) || !/[a-z]/.test(text)) return false;
+  return !(text.includes("-") && symbol != null && text.toUpperCase() === symbol.toUpperCase());
+}
+
+/**
+ * The word a symbol lookup found no stories for, as text to search stories for.
+ * Null under three characters, where the word is mostly a piece of other
+ * names (ZN in Telomir-Zn) and the lookup's own answer is the better one.
+ */
+export function newsFallbackText(symbol: string): string | null {
+  const text = symbol.trim().replace(/^\$/, "");
+  return text.length < MIN_FALLBACK_LENGTH || newsSearchTextProblem(text) ? null : text;
+}
+
+/**
+ * Stories newest first, as `news <words>` lists them. The service picks the
+ * best matches (every word in the headline before words only in the summary);
+ * the list is then read by date, which its help promises. A story with no
+ * date goes last; equal dates keep the service's order.
+ */
+export function newestFirst(articles: readonly NewsArticle[]): NewsArticle[] {
+  const time = (article: NewsArticle) => {
+    const at = new Date(article.publishedAt as Date | string | number).getTime();
+    return Number.isFinite(at) ? at : -Infinity;
+  };
+  return articles.map((article, index) => ({ article, index, at: time(article) }))
+    .sort((left, right) => right.at - left.at || left.index - right.index)
+    .map(({ article }) => article);
+}
+
+/**
+ * The stories matching the text, newest first (`newestFirst`): the service
+ * chooses them, stories with every word in the headline ahead of the ones with
+ * some only in the summary. The service holds stories back from an account
+ * without real-time access, as every other news request.
+ */
+export async function searchNewsStories(text: string, limit: number, topics?: readonly string[]): Promise<NewsArticle[]> {
+  const response = await apiClient.searchCloudNews(text, limit, topics);
+  return newestFirst(response.items.map((item) => mapCloudNewsArticle(item)));
+}
+
+/** A search's stories, and whether they are its closest ones because no story has every word. */
+export interface NewsSearchAnswer {
+  found: NewsArticle[];
+  closest: boolean;
+}
+
+/**
+ * The stories matching the text; when no story has every word of a search of
+ * several, the ones with the most of them, most words first. Spellings of
+ * one word are one word to the service: lockup, lock-up and lock up;
+ * spinoff and spin-off; expiry and expiration.
+ */
+export async function searchClosestNewsStories(text: string, limit: number): Promise<NewsSearchAnswer> {
+  const response = await apiClient.searchCloudNews(text, limit, undefined, { closest: true });
+  const found = response.items.map((item) => mapCloudNewsArticle(item));
+  // The closest stories stay most words first, as their heading says; a match of every word is read by date.
+  const closest = response.match === "closest";
+  return { found: closest ? found : newestFirst(found), closest };
+}
+
+/** What the heading says of a search no story has every word of. */
+export function closestStoriesReason(text: string): string {
+  return `no story has every word of "${text}"; the closest, most words first`;
+}
+
+
+/** A metal's market news, for what `news` was given: its name, its future, or its board code. */
+export interface MetalNewsRoute {
+  /** The metal the stories are searched for, in METALS: "gold"; for oil, in ENERGY. */
+  metal: string;
+  contract: FuturesContract;
+  /** Why what was typed reads as the metal, under the heading; null for the metal's own name. */
+  reason: string | null;
+  /** The name as typed, which in capitals may be a ticker too ("gold", GOLD for Gold.com Inc.). */
+  word: string | null;
+  /** The market's stories the search is kept to: METALS, or ENERGY for oil. */
+  topic: string;
+  /** What the heading calls those stories: "Metals", "Energy". */
+  label: string;
+}
+
+/**
+ * The words that are the oil market, searched in its energy stories as a
+ * metal's name is in METALS: "oil" otherwise found Oil India's stories under
+ * the iPath ETN that trades as OIL, and stories that name oil are mostly
+ * companies'. Brent, gas and the rest keep their futures route.
+ */
+const ENERGY_MARKET_WORDS: ReadonlySet<string> = new Set(["oil", "crude"]);
+
+/**
+ * A metal's market news for a metal's future (GC=F, SI=F, HG=F, PL=F, PA=F,
+ * ALI=F) or its name typed as a word (gold, Silver, copper): news filed under
+ * companies has none of the metal's own, and the stories that merely name it
+ * are mostly miners' releases. A word with no lower-case letter (GOLD) is a
+ * ticker and keeps its company news; a board code typed bare (GC) is read once
+ * no listing answers to it (`metalCodeNewsRoute`).
+ */
+export function metalNewsRoute(typed: string): MetalNewsRoute | null {
+  const text = typed.trim();
+  if (/=F$/i.test(text)) {
+    const contract = futuresBoardContract(text);
+    const metal = contract?.sector === "metals" ? commoditySearchName(contract) : null;
+    return contract && metal ? { metal, contract, reason: `the commodity ${contract.symbol} trades`, word: null, ...METALS_MARKET } : null;
+  }
+  if (!/^\p{L}{3,}$/u.test(text) || !/\p{Ll}/u.test(text)) return null;
+  // One word of letters: the metal's names are one word each (gold, aluminium).
+  const contract = commodityNamedIn(text);
+  if (contract?.sector === "metals") return { metal: text.toLowerCase(), contract, reason: null, word: text, ...METALS_MARKET };
+  return contract?.sector === "energy" && ENERGY_MARKET_WORDS.has(text.toLowerCase())
+    ? { metal: text.toLowerCase(), contract, reason: null, word: text, ...ENERGY_MARKET } : null;
+}
+
+const METALS_MARKET = { topic: METALS_NEWS_TOPIC, label: "Metals" } as const;
+const ENERGY_MARKET = { topic: ENERGY_NEWS_TOPIC, label: "Energy" } as const;
+
+/** A metal's market news for its board code typed bare (GC, SI, HG) where no listing answers to it. */
+export function metalCodeNewsRoute(typed: string): MetalNewsRoute | null {
+  const code = typed.trim().toUpperCase();
+  const contract = /^[A-Z]{2,3}$/.test(code) ? futuresBoardContract(code) : null;
+  const metal = contract?.sector === "metals" ? commoditySearchName(contract) : null;
+  return contract && metal ? { metal, contract, reason: `${code} is the futures board's code for ${contract.name}`, word: null, ...METALS_MARKET } : null;
+}
+
+/** The line above a metal's market news: "Metals news matching "gold"", with why what was typed reads as the metal. */
+export function metalNewsHeading(route: MetalNewsRoute): string {
+  return `${cliStyles.bold(`${route.label} news matching "${route.metal}"`)}${route.reason ? cliStyles.muted(`  ·  ${route.reason}`) : ""}`;
+}
+
+/** What a metal's market news says when no story is tagged METALS: every story that names it is one search away. */
+export function noMetalStoriesMessage(route: MetalNewsRoute): string {
+  return `No ${route.label.toLowerCase()} stories match "${route.metal}". For every story that mentions it, try: ${quotedSearchCommand(route.metal)}`;
+}
+
+/**
+ * A central bank's latest decision stories, for its name or the committee and
+ * rate its decisions go by (`centralBankInNews`): the text as typed and every
+ * name it is reported under (`centralBankNewsQueries`), each with what else
+ * the text asks (`centralBankNewsTopic`: "rate cut" of "fed rate cut"),
+ * searched at once, newest first, and only the stories that name the bank.
+ * "banxico" alone found May's cut, not November's, reported as the Bank of
+ * Mexico's. Fails only when every search failed.
+ */
+export async function searchCentralBankStories(bank: CentralBank, limit: number, typed = ""): Promise<NewsArticle[]> {
+  const topic = centralBankNewsTopic(bank, typed);
+  const queries = new Map<string, string>();
+  for (const query of [typed.trim(), ...centralBankNewsQueries(bank).map((name) => topic ? `${name} ${topic}` : name)]) {
+    if (query && !queries.has(query.toLowerCase())) queries.set(query.toLowerCase(), query);
+  }
+  const answers = await Promise.allSettled([...queries.values()].map((query) => searchNewsStories(query, limit)));
+  const found = answers.flatMap((answer) => answer.status === "fulfilled" ? answer.value : []);
+  const failed = answers.find((answer): answer is PromiseRejectedResult => answer.status === "rejected");
+  if (failed && answers.every((answer) => answer.status === "rejected")) throw failed.reason;
+  const seen = new Set<string>();
+  const unique = found.filter((article) => {
+    const key = article.id || article.url;
+    if (seen.has(key) || !storyNamesCentralBank(bank, `${article.title} ${article.summary ?? ""}`)) return false;
+    seen.add(key);
+    return true;
+  });
+  return newestFirst(unique).slice(0, limit);
+}
+
+/** What the heading says of a central bank's stories: "the Bank of Mexico's stories, under each name it is reported by". */
+export function centralBankNewsReason(bank: CentralBank): string {
+  return `the ${bank.name}'s stories, under each name it is reported by`;
+}
+
+/** The futures news route a search offers when no story matches it: `gloom news KC=F` for "arabica". */
+export interface CommodityNewsRoute {
+  contract: FuturesContract;
+  command: string;
+}
+
+/**
+ * The future of the commodity a search names, offered when no story matched:
+ * `news KC=F` searches the stories of coffee, so it is offered only when
+ * those are not what just found nothing and they have a story to show.
+ */
+export async function commodityNewsRoute(text: string): Promise<CommodityNewsRoute | null> {
+  const contract = commodityNamedIn(text);
+  const name = contract ? commoditySearchName(contract) : null;
+  if (!contract || !name || isCommodityName(text, name)) return null;
+  const stories = await searchNewsStories(name, 1).catch(logFailure("cli.news-search", "Search a commodity's stories failed", []));
+  return stories.length > 0 ? { contract, command: `gloom news ${contract.symbol}` } : null;
+}
+
+/** What a search that matched no story says: never a near miss, and the commodity's futures news where it has some. */
+export function noStoriesMessage(text: string, route: CommodityNewsRoute | null): string {
+  const none = `No stories match "${text}".`;
+  return route ? `${none} For the ${route.contract.name} future, try: ${route.command}` : none;
+}
+
+/** The line above the stories: "Stories matching "european gas"", with why a word typed as a symbol is searched. */
+export function newsSearchHeading(text: string, reason?: string): string {
+  return `${cliStyles.bold(`Stories matching "${text}"`)}${reason ? cliStyles.muted(`  ·  ${reason}`) : ""}`;
+}

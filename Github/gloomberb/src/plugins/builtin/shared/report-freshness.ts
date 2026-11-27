@@ -1,0 +1,191 @@
+import { logFailure } from "../../../utils/log-failure";
+import type { HeadlessPaneContext, HeadlessPaneFreshness } from "../../../types/headless";
+import type { Quote, QuoteIndexSession } from "../../../types/financials";
+import { isQuoteBeforeLatestSession, isQuoteStaleForCurrentSession } from "../../../market-data/quotes/freshness";
+import { quoteFeedDelayMinutes, readIndexSession } from "../../../market-data/market/freshness";
+import { quoteHeadlineTime } from "../../../market-data/market/status";
+import { indexLevelMarketState } from "../../../market-data/market/index-level";
+import { isOutsideFuturesProductHours } from "../../../market-data/market/futures-product-hours";
+import { barSizeFromGap, medianBarGap } from "../../../time-series/bar-spacing";
+import { apiClient } from "../../../api-client";
+import { CLOUD_NEWS_DELAY_HOURS, hasProAccess, type PlanAccessUser } from "../../../api-client/plan-rules";
+import { savedCopyMark } from "../../../data/saved-copies";
+import { CLOUD_SOURCE, quotesSourceName, type BrokerNameOf } from "../../../market-data/quotes/export-identity";
+
+/**
+ * Freshness declarations shared by built-in reports. Each `fn` report ends
+ * with the source, as-of and status line these feed; see
+ * docs/usage.md#how-current-a-report-is.
+ */
+
+/** A broker's quote names the broker as its source, by the adapters a report reads its account through. */
+export function brokerNameOf(ctx: Pick<HeadlessPaneContext, "resolveBroker">): BrokerNameOf {
+  return (providerId) => ctx.resolveBroker?.(providerId)?.name;
+}
+
+/**
+ * The source of a book (a portfolio or watchlist) valued at its quotes: where its holdings are from, then where
+ * the prices are (`Local portfolio and Gloom Cloud`, `Local watchlist and Interactive Brokers`), the prices'
+ * source left out when one of them has no name to give. A book with no quote read is Gloom Cloud's, as a report
+ * with nothing to name says.
+ */
+export function bookSource(holdings: string, quotes: Iterable<Quote | null | undefined>, brokerName?: BrokerNameOf): string {
+  const shown = [...quotes].filter((quote): quote is Quote => quote != null);
+  const prices = shown.length > 0 ? quotesSourceName(shown, brokerName) : CLOUD_SOURCE;
+  return prices ? `${holdings} and ${prices}` : holdings;
+}
+
+/** Analyses over end-of-day history: not a feed, but stale once the closes stop arriving. */
+export const DAILY_CLOSES: HeadlessPaneFreshness = { status: "not-a-feed", basis: "daily closes", cadence: "daily" };
+
+const DAY_MINUTES = 24 * 60;
+
+/**
+ * Price bars: a history, not a feed, stale once the bars stop arriving for
+ * their size. Intraday and daily bars follow the US trading sessions; a
+ * weekly or monthly bar is dated by the start of its period. Their
+ * screenshot is dated by the listing's quote (`prices`).
+ */
+export function barHistoryFreshness(resolution: string | null | undefined): HeadlessPaneFreshness {
+  if (resolution === "1wk") return { status: "not-a-feed", basis: "weekly bars", maxAgeMinutes: 14 * DAY_MINUTES, prices: true };
+  if (resolution === "1mo") return { status: "not-a-feed", basis: "monthly bars", maxAgeMinutes: 45 * DAY_MINUTES, prices: true };
+  if (resolution === "1d") return { ...DAILY_CLOSES, prices: true };
+  return { status: "not-a-feed", basis: "intraday bars", cadence: "daily", prices: true };
+}
+
+/**
+ * The bar size of a dated history, read from the typical gap between its bars
+ * (medianBarGap), as `history` reads it, so a holiday's gap before the last
+ * daily bar does not make them weekly. Daily when there is no gap to read.
+ */
+export function barResolutionFromDates(dates: readonly (string | number | Date)[]): "1d" | "1wk" | "1mo" {
+  const gap = medianBarGap(dates.map((date) => new Date(date).getTime()));
+  return gap == null ? "1d" : barSizeFromGap(gap);
+}
+
+/** Company filings read from EDGAR. Old filings are not stale; there is no schedule to miss. */
+export const SEC_FILINGS: HeadlessPaneFreshness = { source: "SEC EDGAR", status: "not-a-feed", basis: "filed data", oldest: null };
+
+/**
+ * A list of filings, dated by its newest one's filing date and by when it was
+ * read: `newest filing Tue 27 Oct 2026 · retrieved Wed 28 Oct 2026 19:07 UTC`.
+ */
+export const SEC_FILING_ROWS: HeadlessPaneFreshness = {
+  ...SEC_FILINGS, observedKey: "filingDate", asOfLabel: "newest filing", retrievedToo: true,
+};
+
+/**
+ * What a filings view opened inside a pane that hosts others (Issuer Debt in
+ * Fixed Income) declares as its template's `reportFreshness`, so a capture
+ * dates the filings rather than the issuer's stock quote.
+ */
+export const SEC_FILINGS_VIEW: Pick<HeadlessPaneFreshness, "source" | "status" | "basis"> = {
+  source: "SEC EDGAR",
+  status: "not-a-feed",
+  basis: "filed data",
+};
+
+/** Places and listings that change only when someone edits them: venues, ports, pipelines. */
+export const REFERENCE_DATA: HeadlessPaneFreshness = { status: "not-a-feed", basis: "reference data", oldest: null };
+
+/** Company fundamentals, estimates and calendars: reported figures, not a feed. */
+export const REPORTED_DATA: HeadlessPaneFreshness = { status: "not-a-feed", basis: "reported data" };
+
+/** What a news list's as-of is: its newest story, not the time it was read. */
+const NEWEST_STORY = "newest story";
+
+interface QuoteFreshnessFields {
+  dataSource?: "live" | "delayed";
+  stale?: boolean;
+  /** At its venue's nominal price, nothing having traded (Quote.nominalPrice): reports count it apart from stale rows. */
+  nominal?: true;
+  /** How far a delayed Gloom Cloud quote runs behind its venue's trades. */
+  delayMinutes?: number;
+  /** The venue whose sessions the quote follows, so the report can say whether its market is open. */
+  sessionExchange?: string;
+  marketState?: Quote["marketState"];
+  /** An index's own regular sessions, for the open and the close its publisher's name does not place. */
+  sessionCalendar?: QuoteIndexSession;
+}
+
+/**
+ * The standard freshness fields of one quote, spread into a report row so the
+ * report can say whether that row is live, delayed (and by how much) or stale
+ * for its session, and where its market stands.
+ */
+export function quoteFreshnessFields(
+  quote: Quote | null | undefined,
+  now = Date.now(),
+): QuoteFreshnessFields {
+  if (!quote) return {};
+  const exchange = quote.listingExchangeName || quote.exchangeName;
+  const delayMinutes = quoteFeedDelayMinutes(quote);
+  const sessionCalendar = readIndexSession(quote.indexSession);
+  // A print older than its venue's latest session says nothing of where that market stands now (no "markets open" beside it);
+  // a nominal price is that session's, its last trade older.
+  const session = !!quote.nominalPrice || !isQuoteBeforeLatestSession(quote, now);
+  return {
+    // A quote served from its saved copy, its refresh having failed, marks the row drawn from it.
+    ...savedCopyMark(quote),
+    ...(quote.dataSource === "live" || quote.dataSource === "delayed" ? { dataSource: quote.dataSource } : {}),
+    stale: isQuoteStaleForCurrentSession(quote, now),
+    ...(quote.nominalPrice ? { nominal: true as const } : {}),
+    ...(delayMinutes != null ? { delayMinutes } : {}),
+    ...(exchange && session ? { sessionExchange: exchange } : {}),
+    // An index's final close reads as a close, not after hours; a grain or a soft outside its own hours, as closed.
+    ...(quote.marketState && session
+      ? { marketState: isOutsideFuturesProductHours(quote, now) ? "CLOSED" as const : indexLevelMarketState(quote) }
+      : {}),
+    ...(sessionCalendar && session ? { sessionCalendar } : {}),
+  };
+}
+
+/**
+ * One quote as a report reads it among the observations behind a view: its
+ * freshness fields and when the price it headlines was observed
+ * (quoteHeadlineTime: in a pre-market nothing has traded in, the close it
+ * stands at). A nominal price is dated by the session it is the venue's price
+ * for (`asOfDate`), not by the older last trade. A board publishes one per
+ * quote it shows, so `fn` and `shot` date it as `quote` dates the same quotes.
+ */
+export function quoteObservation(quote: Quote, now = Date.now()): QuoteFreshnessFields & {
+  quoteSymbol: string; updatedAt: number; asOfDate?: string; futuresPriceKind?: Quote["futuresPriceKind"];
+} {
+  return {
+    ...quoteFreshnessFields(quote, now),
+    quoteSymbol: quote.symbol,
+    updatedAt: quoteHeadlineTime(quote),
+    ...(quote.futuresPriceKind ? { futuresPriceKind: quote.futuresPriceKind } : {}),
+    ...(quote.nominalPrice ? { asOfDate: quote.nominalPrice.session } : {}),
+  };
+}
+
+/** Null when there is no known entitlement, rather than assuming Free. */
+export function cloudPlanRealtimeAccess(user: PlanAccessUser | null): boolean | null {
+  if (!user) return null;
+  if (hasProAccess(user)) return true;
+  return user.emailVerified === false || user.plan != null || user.effectivePlan != null ? false : null;
+}
+
+/** Signed-out reports read as Free; a signed-in account needs a known plan. */
+export async function cloudRealtimeAccess(): Promise<boolean | null> {
+  if (!apiClient.isSignedIn()) return false;
+  try {
+    return cloudPlanRealtimeAccess(apiClient.getCurrentUser() ?? await apiClient.getSession());
+  } catch (error) {
+    return logFailure("shared.report-freshness", "Read Cloud plan for report freshness failed", null)(error);
+  }
+}
+
+/**
+ * Gloom Cloud news stories, dated by the newest, which the line names
+ * (`newest story Tue 29 Sep 2026 20:17 UTC`) so it is not read as the time
+ * now: held back `CLOUD_NEWS_DELAY_HOURS` without real-time access, the live
+ * wire with it. The list is a history, so its last story is not stale data.
+ */
+export function cloudNewsFreshness(realtime: boolean | null): HeadlessPaneFreshness {
+  const stories: HeadlessPaneFreshness = { observedKey: "publishedAt", oldest: null, asOfLabel: NEWEST_STORY };
+  if (realtime === true) return { ...stories, status: "live" };
+  if (realtime === false) return { ...stories, status: "delayed", delayMinutes: CLOUD_NEWS_DELAY_HOURS * 60 };
+  return { ...stories, status: "unreported" };
+}

@@ -1,0 +1,177 @@
+import httpx
+
+from pysdmx.api.fmr import AsyncRegistryClient, RegistryClient
+from pysdmx.model import (
+    Component,
+    Components,
+    Concept,
+    DataStructureDefinition,
+)
+from pysdmx.model.dataflow import AttributeRelationship
+
+
+def check_dsd(mock, fmr: RegistryClient, query, body):
+    """get_data_structures() should return a DSD."""
+    mock.get(query).mock(return_value=httpx.Response(200, content=body))
+
+    dsds = fmr.get_data_structures("BIS", "BIS_CBS", "1.0")
+
+    assert len(mock.calls) == 1
+
+    __check_content(dsds)
+
+
+def check_dsd_partial_cs(mock, fmr: RegistryClient, query, body):
+    """get_data_structures() return a DSD, even if concepts are missing."""
+    mock.get(query).mock(return_value=httpx.Response(200, content=body))
+
+    dsds = fmr.get_data_structures("BIS", "BIS_CBS", "1.0")
+
+    assert len(mock.calls) == 1
+
+    __check_content(dsds, True)
+
+
+async def check_dsd_async(mock, fmr: AsyncRegistryClient, query, body):
+    """get_data_structures() should return a DSD (async)."""
+    mock.get(query).mock(return_value=httpx.Response(200, content=body))
+
+    dsds = await fmr.get_data_structures("BIS", "BIS_CBS", "1.0")
+
+    assert len(mock.calls) == 1
+
+    __check_content(dsds)
+
+
+def check_multi_meas(mock, fmr: RegistryClient, query, body):
+    """Multiple measures are extracted, including attachment level."""
+    mock.get(query).mock(return_value=httpx.Response(200, content=body))
+
+    dsds = fmr.get_data_structures("TEST", "TEST_MM", "1.0")
+
+    assert len(mock.calls) == 1
+    dsd = dsds[0]
+
+    assert len(dsd.components.attributes) == 3
+    for a in dsd.components.attributes:
+        if a.id == "TO_STATUS":
+            assert a.attachment_level == "TO"
+        elif a.id == "OI_STATUS":
+            assert a.attachment_level == "OI"
+        else:
+            assert a.id == "OBS_CONF"
+            assert a.attachment_level == "OI,TO"
+
+
+def check_measureless_dsd(mock, fmr: RegistryClient, query, body):
+    """Check obs-level attachment of measureless DSDs."""
+    mock.get(query).mock(return_value=httpx.Response(200, content=body))
+
+    dsds = fmr.get_data_structures("TEST", "NM_DSD", "1.0")
+
+    assert len(mock.calls) == 1
+    dsd = dsds[0]
+
+    assert len(dsd.components.attributes) == 1
+    for a in dsd.components.attributes:
+        assert a.id == "MIC"
+        assert a.attachment_level == "O"
+
+
+def check_attr_relationships(mock, fmr: RegistryClient, query, body):
+    mock.get(query).mock(return_value=httpx.Response(200, content=body))
+    expected = {
+        "DATAFLOW_ATTR": AttributeRelationship.DATAFLOW,
+        "GROUP_ATTR": AttributeRelationship.GROUP,
+        "DIM_GROUP_ATTR": AttributeRelationship.GROUP,
+        "DIM_NOGROUP_ATTR": AttributeRelationship.DIMENSIONS,
+        "SERIES_ATTR": AttributeRelationship.SERIES,
+        "OBS_ATTR": AttributeRelationship.OBSERVATION,
+        "GROUP_ATTR_M": AttributeRelationship.GROUP,
+        "DIM_GROUP_ATTR_M": AttributeRelationship.GROUP,
+        "DIM_NOGROUP_ATTR_M": AttributeRelationship.DIMENSIONS,
+        "SERIES_ATTR_M": AttributeRelationship.SERIES,
+        "OBS_ATTR_M": AttributeRelationship.OBSERVATION,
+    }
+
+    dsds = fmr.get_data_structures("TEST", "TEST_MEASURE_REL", "1.0")
+
+    assert len(mock.calls) == 1
+    dsd = dsds[0]
+
+    assert len(dsd.components.attributes) == 11
+    rels = dsd.attribute_relationships
+    for a in dsd.components.attributes:
+        assert rels[a.id] == expected[a.id], f"Test failed for {a.id}"
+
+
+def check_measure_relationships(mock, fmr: RegistryClient, query, body):
+    mock.get(query).mock(return_value=httpx.Response(200, content=body))
+    expected = {
+        "DATAFLOW_ATTR": None,
+        "GROUP_ATTR": None,
+        "DIM_GROUP_ATTR": None,
+        "DIM_NOGROUP_ATTR": None,
+        "SERIES_ATTR": None,
+        "OBS_ATTR": ["MEAS1", "MEAS2", "MEAS3"],
+        "GROUP_ATTR_M": ["MEAS2", "MEAS3"],
+        "DIM_GROUP_ATTR_M": ["MEAS1", "MEAS3"],
+        "DIM_NOGROUP_ATTR_M": ["MEAS1", "MEAS2"],
+        "SERIES_ATTR_M": ["MEAS2", "MEAS3"],
+        "OBS_ATTR_M": ["MEAS1", "MEAS3"],
+    }
+
+    dsds = fmr.get_data_structures("TEST", "TEST_MEASURE_REL", "1.0")
+
+    assert len(mock.calls) == 1
+    dsd = dsds[0]
+
+    assert len(dsd.components.attributes) == 11
+    rels = dsd.measure_relationships
+    for a in dsd.components.attributes:
+        if expected[a.id] is not None:
+            ids = [m.id for m in rels[a.id]]
+            assert sorted(ids) == sorted(expected[a.id])
+        else:
+            assert not rels[a.id]
+
+
+def __check_content(dsds, partial_cs: bool = False):
+    assert len(dsds) == 1
+    dsd = dsds[0]
+    assert isinstance(dsd, DataStructureDefinition)
+    assert dsd.agency == "BIS"
+    assert dsd.id == "BIS_CBS"
+    assert dsd.version == "1.0"
+    assert isinstance(dsd.components, Components)
+    assert len(dsd.components) == 24
+    for comp in dsd.components:
+        assert isinstance(comp, Component)
+        assert comp.id is not None
+        if not partial_cs:
+            assert comp.name is not None
+        assert comp.concept is not None
+        assert comp.concept.id is not None
+        if isinstance(comp.concept, Concept):
+            assert comp.id == comp.concept.id
+        else:
+            assert comp.id == comp.concept.item_id
+        assert comp.required is not None
+        assert comp.role is not None
+        assert comp.dtype is not None
+    assert dsd.groups is not None
+    assert len(dsd.groups) == 1
+    grp = dsd.groups[0]
+    assert grp.id == "Sibling"
+    assert grp.dimensions == (
+        "L_MEASURE",
+        "L_REP_CTY",
+        "CBS_BANK_TYPE",
+        "CBS_BASIS",
+        "L_POSITION",
+        "L_INSTR",
+        "REM_MATURITY",
+        "CURR_TYPE_BOOK",
+        "L_CP_SECTOR",
+        "L_CP_COUNTRY",
+    )

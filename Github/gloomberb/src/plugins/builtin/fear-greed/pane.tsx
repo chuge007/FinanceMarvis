@@ -1,0 +1,132 @@
+import { useMemo } from "react";
+import type { ThemeColors } from "../../../theme/colors";
+import { blendForContrast, higherContrast } from "../../../theme/color-utils";
+import { useThemeColors } from "../../../theme/theme-context";
+import { TONE_TEXT_MIN } from "../../../theme/themes";
+import { usePaneSurface } from "../../../components/layout/pane/surface";
+import {
+  EmptyState,
+  PaneStatusBody,
+  SectionHeading,
+  SpeedometerGauge,
+  StatGrid,
+  usePaneStatusFooter,
+  type StatItem,
+} from "../../../components";
+import { ageFooterSegment, savedCopyFooterSegment } from "../../../components/layout/pane/footer";
+import { isTransientFailure } from "../../../api-client/errors";
+import { usePaneRefreshKey } from "../../../components/data-table/table-pane";
+import { useAsyncResource } from "../../../react/async-resource";
+import type { PaneProps } from "../../../types/plugin";
+import { Box, ScrollBox, useUiHost } from "../../../ui";
+import { useAutoRefresh, useUpdatedAgo, useUtcDay } from "../../../react/auto-refresh";
+import { reportFooterSegment } from "../shared/source-footer";
+import { fearGreedHeadless, fearGreedReport } from "./headless";
+import { getCachedFearGreedData, loadFearGreed, type FearGreedLoadResult } from "./cache";
+import { IndexHistoryChart, IndicatorChart } from "./charts";
+import type { FearGreedData } from "./data";
+import {
+  fearGreedGaugeSegments,
+  formatScore,
+  ratingColor,
+  ratingLabel,
+} from "./format";
+
+function previousScoreItems(data: FearGreedData, palette: ThemeColors): StatItem[] {
+  return [
+    { id: "close", label: "Prev close", value: data.overall.previousClose },
+    { id: "week", label: "1 week ago", value: data.overall.previousWeek },
+    { id: "month", label: "1 month ago", value: data.overall.previousMonth },
+    { id: "year", label: "1 year ago", value: data.overall.previousYear },
+  ].map(({ id, label, value }) => ({
+    id,
+    label,
+    value: formatScore(value),
+    ...(value == null
+      ? { tone: "muted" as const }
+      : { color: ratingColor(value < 25 ? "extreme fear" : value < 45 ? "fear" : value <= 55 ? "neutral" : "greed", palette) }),
+  }));
+}
+
+export function FearGreedPane({ paneId, focused, width, height }: PaneProps) {
+  const isDesktopWeb = useUiHost().kind === "desktop-web";
+  const theme = useThemeColors();
+  const surface = usePaneSurface() ?? theme.bg;
+  const palette = useMemo(() => {
+    const fallback = higherContrast(theme.text, theme.textBright, surface);
+    const readable = (color: string) => blendForContrast(color, surface, fallback, TONE_TEXT_MIN);
+    return { ...theme, positive: readable(theme.positive), negative: readable(theme.negative),
+      neutral: readable(theme.neutral), warning: readable(theme.warning) };
+  }, [surface, theme]);
+  const segments = useMemo(() => fearGreedGaugeSegments(palette), [palette]);
+  const resource = useAsyncResource<FearGreedLoadResult>(loadFearGreed, { initialData: getCachedFearGreedData });
+  const { loading, reload: refresh } = resource;
+  const data = resource.data?.data ?? null;
+  const stale = resource.data?.stale ?? false;
+  // A copy kept because the refresh could not get through says when it was saved, as other panes' copies do.
+  const savedAt = resource.data?.source === "stale-fallback" && isTransientFailure(resource.data.error) ? resource.data.fetchedAt : null;
+  const error = resource.error ?? (savedAt == null ? resource.data?.refreshError : null) ?? null;
+  const lastRefreshed = resource.data?.fetchedAt ?? null;
+
+  const updatedAgo = useUpdatedAgo(lastRefreshed);
+  useAutoRefresh(stale ? null : lastRefreshed, refresh);
+
+  usePaneRefreshKey(refresh, { focused });
+
+  const utcDay = useUtcDay();
+  const loaded = resource.data;
+  const footerInfo = useMemo(() => [
+    ...(data ? [{
+      id: "score",
+      parts: [
+        { text: `${formatScore(data.overall.score)} ${ratingLabel(data.overall.rating)}`, color: ratingColor(data.overall.rating, palette), bold: true },
+      ],
+    }] : []),
+    // Its source and when CNN published the reading, as `fn FNG` ends, a stale one with its warning beside it;
+    // a saved copy says when it was saved instead.
+    ...(savedAt != null ? [savedCopyFooterSegment("saved-copy", savedAt)] : [
+      ...(loaded?.data ? [reportFooterSegment(fearGreedHeadless, fearGreedReport({ ...loaded, stale: false }))] : []),
+      ...(stale ? [{ id: "stale", parts: [{ text: "stale", tone: "warning" as const }] }] : []),
+    ]),
+    ...(updatedAgo ? [ageFooterSegment(updatedAgo, { id: "age", verb: "updated", tone: "value" })] : []),
+  ], [data, loaded, savedAt, stale, updatedAgo, utcDay, palette]);
+  usePaneStatusFooter({ registrationId: paneId, loading, error, info: footerInfo });
+
+  const previousScores = useMemo(() => (data ? previousScoreItems(data, palette) : []), [data, palette]);
+
+  if (loading && !data) {
+    return (
+      <Box flexDirection="column" width={width} height={height}>
+        <PaneStatusBody loading align="center" loadingLabel="Loading Fear & Greed..." />
+      </Box>
+    );
+  }
+
+  if (!data) {
+    return <EmptyState status={error ? "error" : "empty"} title="Fear & Greed unavailable." message={error ?? undefined} />;
+  }
+
+  return (
+    <Box flexDirection="column" width={width} height={height}>
+      <StatGrid items={previousScores} width={width} />
+      <ScrollBox flexGrow={1} flexBasis={0} minHeight={0} scrollY focusable={false}>
+        <Box flexDirection="column" paddingBottom={1}>
+          <SpeedometerGauge
+            value={data.overall.score}
+            valueLabel={ratingLabel(data.overall.rating)}
+            width={width}
+            segments={segments}
+            minWidth={isDesktopWeb ? Math.min(34, Math.max(1, width - 2)) : undefined}
+          />
+          <IndexHistoryChart data={data} width={width} focused={focused} />
+          <Box paddingX={1} marginTop={2}>
+            <SectionHeading title="Indicators" />
+          </Box>
+          {data.indicators.map((indicator) => (
+            <IndicatorChart key={indicator.definition.id} indicator={indicator} width={width} />
+          ))}
+        </Box>
+      </ScrollBox>
+    </Box>
+  );
+}

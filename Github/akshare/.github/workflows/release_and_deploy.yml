@@ -1,0 +1,70 @@
+# release_and_deploy
+name: Release and Deploy
+
+on:
+  push:
+    tags:
+      # 1.20.0 及以前的 tag 为 release-vX.Y.Z，之后改为通行的 vX.Y.Z；旧 tag 保留不改
+      - 'v*.*.*'
+
+# 默认只读；发布所需的权限在 job 中单独声明
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # PyPI Trusted Publishing：PyPI 端登记的可信发布者须与这里的
+    # 仓库 akfamily/akshare、工作流 release_and_deploy.yml、环境 pypi 完全一致
+    environment:
+      name: pypi
+      url: https://pypi.org/p/akshare
+    permissions:
+      id-token: write  # 向 PyPI 换取临时上传令牌（OIDC），无需保存 PyPI 密码
+      contents: write  # 创建 GitHub Release
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+
+      # 必须在 build 与 upload 之前：PyPI 的版本号一经占用即不可重用，
+      # 发错版本号无法撤回，只能改用下一个号。
+      # 脚本只依赖标准库，因此放在安装依赖之前也能跑。
+      - name: Verify release metadata
+        run: python scripts/check_release.py "${{ github.ref_name }}"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install build twine
+
+      - name: Build package
+        run: python -m build
+
+      # 上一步校验的是仓库内的版本声明，这一步校验真正要上传的产物文件名。
+      # 两者分开是有意的：构建后端若取错版本号，只有看产物才能发现。
+      - name: Verify built artifacts carry the tagged version
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          echo "期望版本: ${version}"
+          ls -1 dist/
+          for f in dist/*; do
+            case "$(basename "$f")" in
+              akshare-${version}-*.whl|akshare-${version}.tar.gz) ;;
+              *) echo "[release] 产物 $(basename "$f") 与 tag 版本 ${version} 不匹配"; exit 1 ;;
+            esac
+          done
+          twine check dist/*
+
+      # 使用 Trusted Publishing 上传，同时为产物生成 PEP 740 数字证明（attestations）
+      - name: Publish package to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v3
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

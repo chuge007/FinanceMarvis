@@ -1,0 +1,34 @@
+import type { PluginModule } from "../plugin-module";
+import { createTickerSurfacePaneTemplate } from "../shared/ticker-surface";
+import { realizedVolHeadless } from "./headless";
+import { ESTIMATOR_OPTIONS, WINDOW_OPTIONS } from "./settings";
+
+export const realizedVolModule: PluginModule = {
+  panes: [{
+    id: "realized-vol", name: "Realized Volatility", icon: "V", get component(): typeof import("./pane").RealizedVolPane { const { RealizedVolPane } = require("./pane"); return RealizedVolPane; },
+    defaultPosition: "right", shareItem: { ticker: true }, tickerFollower: true, defaultMode: "floating", defaultFloatingSize: { width: 112, height: 36 },
+    tableExport: true,
+    quickSettings: [{ type: "toggle", key: "showIv", icon: "marker", label: "Current ATM IV" }],
+    // The pane draws the IV until it is turned off, so its header control and settings read it as on.
+    settings: (context) => ({ title: "Realized Volatility Settings", values: { showIv: context.settings.showIv !== false }, fields: [
+      { key: "estimator", label: "Estimator", type: "select", options: ESTIMATOR_OPTIONS },
+      { key: "windows", label: "Graph windows", type: "multi-select", options: WINDOW_OPTIONS },
+      { key: "lookbackYears", label: "Lookback", type: "select", options: [{ value: "1", label: "1 year" }, { value: "2", label: "2 years" }] },
+      { key: "showIv", label: "Current ATM IV", type: "toggle" },
+    ] }),
+  }],
+  paneTemplates: [
+    { ...createTickerSurfacePaneTemplate({
+      id: "realized-vol-graph-pane", paneId: "realized-vol", label: "Realized Volatility Graph",
+      description: "Rolling realized volatility, price and a dated current ATM IV reference.",
+      keywords: ["hvg", "realized", "historical", "volatility", "vol", "gv"], shortcut: "HVG", publicShare: true,
+      viewKey: "graph", settings: () => ({ initialView: "graph" }),
+    }), headless: realizedVolHeadless("graph") },
+    { ...createTickerSurfacePaneTemplate({
+      id: "realized-vol-table-pane", paneId: "realized-vol", label: "Realized Volatility Cone",
+      description: "Current realized volatility against its historical range and percentile.",
+      keywords: ["hvt", "volatility", "vol", "cone", "percentile"], shortcut: "HVT", publicShare: true,
+      viewKey: "cone", settings: () => ({ initialView: "cone" }),
+    }), headless: realizedVolHeadless("cone") },
+  ],
+};

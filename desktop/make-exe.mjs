@@ -68,10 +68,34 @@ if (!fs.existsSync(path.join(DIST, 'index.html'))) throw new Error('dist/index.h
 // 2. 生成资源清单与 SEA 配置
 console.log('[2/6] 生成资源清单 ...')
 const files = walk(DIST)
+// 服务端源码也要进内嵌资源：SEA 不能 require 外部 ESM，
+// launcher 启动时把它们解压到临时目录再 import（详见 desktop/launcher.cjs）。
+const SERVER_DIR = path.join(ROOT, 'server')
+const serverFiles = walk(SERVER_DIR).filter((f) => f.endsWith('.mjs'))
+// Python 侧车随包分发：富途 OpenD（stdio）与数据侧车（HTTP）两套独立进程/依赖。
+const SIDECAR_DIR = path.join(ROOT, 'sidecar')
+const sidecarFiles = fs.existsSync(SIDECAR_DIR)
+  ? walk(SIDECAR_DIR).filter(
+      (f) => f.endsWith('.py') || f === 'requirements.txt' || f === 'requirements-data.txt',
+    )
+  : []
+// 共享领域内核：server 与 exe 引用同一份，必须和内嵌服务端一起打包
+const DOMAIN_DIR = path.join(ROOT, 'core', 'domain')
+const domainFiles = fs.existsSync(DOMAIN_DIR) ? walk(DOMAIN_DIR).filter((f) => f.endsWith('.mjs')) : []
+const assetKeys = [
+  ...files,
+  ...serverFiles.map((f) => 'server/' + f),
+  ...domainFiles.map((f) => 'core/domain/' + f),
+  ...sidecarFiles.map((f) => 'sidecar/' + f),
+]
+
 // sea-config 里的路径按进程 cwd 解析，统一用绝对路径避免歧义
 const assets = { 'assets-manifest.json': path.join(DESKTOP, 'assets-manifest.json') }
 for (const f of files) assets[f] = path.join(DIST, f)
-fs.writeFileSync(path.join(DESKTOP, 'assets-manifest.json'), JSON.stringify(files))
+for (const f of serverFiles) assets['server/' + f] = path.join(SERVER_DIR, f)
+for (const f of domainFiles) assets['core/domain/' + f] = path.join(DOMAIN_DIR, f)
+for (const f of sidecarFiles) assets['sidecar/' + f] = path.join(SIDECAR_DIR, f)
+fs.writeFileSync(path.join(DESKTOP, 'assets-manifest.json'), JSON.stringify(assetKeys))
 fs.writeFileSync(path.join(DESKTOP, 'sea-config.json'), JSON.stringify({
   type: 'sea',
   main: path.join(DESKTOP, 'launcher.cjs'),
@@ -81,7 +105,9 @@ fs.writeFileSync(path.join(DESKTOP, 'sea-config.json'), JSON.stringify({
   useCodeCache: false,
   assets,
 }, null, 2))
-console.log(`      内嵌 ${files.length} 个静态文件`)
+console.log(
+  `      内嵌 ${files.length} 静态 + ${serverFiles.length} 服务端 + ${domainFiles.length} 领域内核 + ${sidecarFiles.length} 侧车`,
+)
 
 // 3. 生成 SEA blob
 console.log('[3/6] 生成 SEA blob ...')

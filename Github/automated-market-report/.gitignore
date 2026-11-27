@@ -1,0 +1,11 @@
+*.pyc
+__pycache__/
+\.vscode/
+temp/
+.env
+*.ini
+*.png
+test.ipynb
+backup.ipynb
+.DS_Store
+workspace.code-workspace

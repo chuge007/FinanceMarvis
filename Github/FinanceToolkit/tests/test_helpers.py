@@ -1,0 +1,960 @@
+# ruff: noqa
+
+"""Helpers Tests"""
+
+from unittest.mock import patch
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from financetoolkit import helpers
+
+
+def test_enrich_historical_data_basic():
+    """Test basic enrichment of historical data."""
+    data = pd.DataFrame(
+        {"Adj Close": [100, 110, 121, 133]},
+        index=pd.date_range("2020-01-01", periods=4, freq="D"),
+    )
+
+    result = helpers.enrich_historical_data(data)
+
+    # Check new columns
+    assert "Return" in result.columns
+    assert "Cumulative Return" in result.columns
+
+    # Volatility lives in the Risk module now (risk_model.get_volatility).
+    assert "Volatility" not in result.columns
+
+    # Check return calculation
+    assert pd.isna(result["Return"].iloc[0])
+    assert abs(result["Return"].iloc[1] - 0.1) < 0.01
+
+
+def test_enrich_historical_data_with_date_range():
+    """Test enrichment with start and end dates."""
+    data = pd.DataFrame(
+        {"Adj Close": [100, 110, 121, 133, 146]},
+        index=pd.date_range("2020-01-01", periods=5, freq="D"),
+    )
+
+    result = helpers.enrich_historical_data(data, start="2020-01-02", end="2020-01-04")
+
+    # Should still have all rows but calculations based on subset
+    assert len(result) == 5
+    assert "Return" in result.columns
+
+
+def test_enrich_historical_data_custom_return_column():
+    """Test enrichment with custom return column."""
+    data = pd.DataFrame(
+        {"Close": [100, 110, 121, 133], "Adj Close": [90, 99, 109, 120]},
+        index=pd.date_range("2020-01-01", periods=4, freq="D"),
+    )
+
+    result = helpers.enrich_historical_data(data, return_column="Close")
+
+    # Should use Close for calculations
+    assert abs(result["Return"].iloc[1] - 0.1) < 0.01
+
+
+def test_handle_portfolio_decorator_basic():
+    """Test handle_portfolio decorator basic functionality."""
+
+    class MockSelf:
+        def __init__(self):
+            self._tickers = ["AAPL", "MSFT", "Portfolio"]
+            self._rounding = 4
+            self._quarterly = False
+            self._portfolio_weights = {
+                "yearly": pd.DataFrame(
+                    {"AAPL": [0.6, 0.6, 0.6], "MSFT": [0.4, 0.4, 0.4]},
+                    index=pd.PeriodIndex(["2020", "2021", "2022"], freq="Y"),
+                )
+            }
+
+    @helpers.handle_portfolio
+    def test_function(self):
+        return pd.DataFrame(
+            {"AAPL": [10, 20, 30], "MSFT": [15, 25, 35]},
+            index=pd.PeriodIndex(["2020", "2021", "2022"], freq="Y"),
+        )
+
+    mock_self = MockSelf()
+    result = test_function(mock_self)
+
+    # Should have Portfolio column
+    assert "Portfolio" in result.columns
+
+    # Check weighted average calculation
+    expected_portfolio = 0.6 * 10 + 0.4 * 15  # First row: 0.6*10 + 0.4*15 = 12
+    assert abs(result["Portfolio"].iloc[0] - expected_portfolio) < 0.01
+
+
+def test_handle_portfolio_decorator_with_benchmark():
+    """Test handle_portfolio decorator excludes benchmark."""
+
+    class MockSelf:
+        def __init__(self):
+            self._tickers = ["AAPL", "MSFT", "Portfolio"]
+            self._rounding = 4
+            self._quarterly = False
+            self._portfolio_weights = {
+                "yearly": pd.DataFrame(
+                    {"AAPL": [0.6, 0.6], "MSFT": [0.4, 0.4]},
+                    index=pd.PeriodIndex(["2020", "2021"], freq="Y"),
+                )
+            }
+
+    @helpers.handle_portfolio
+    def test_function(self):
+        return pd.DataFrame(
+            {"AAPL": [10, 20], "MSFT": [15, 25], "Benchmark": [12, 22]},
+            index=pd.PeriodIndex(["2020", "2021"], freq="Y"),
+        )
+
+    mock_self = MockSelf()
+    result = test_function(mock_self)
+
+    # Should have Portfolio column
+    assert "Portfolio" in result.columns
+    # Should still have Benchmark column
+    assert "Benchmark" in result.columns
+
+    # Portfolio calculation should exclude benchmark
+    expected_portfolio = 0.6 * 10 + 0.4 * 15  # Should be 12
+    assert abs(result["Portfolio"].iloc[0] - expected_portfolio) < 0.01
+
+
+def test_handle_portfolio_decorator_no_portfolio():
+    """Test handle_portfolio decorator when Portfolio not in tickers."""
+
+    class MockSelf:
+        def __init__(self):
+            self._tickers = ["AAPL", "MSFT"]
+            self._rounding = 4
+
+    @helpers.handle_portfolio
+    def test_function(self):
+        return pd.DataFrame({"AAPL": [10, 20], "MSFT": [15, 25]})
+
+    mock_self = MockSelf()
+    result = test_function(mock_self)
+
+    # Should not have Portfolio column
+    assert "Portfolio" not in result.columns
+    assert len(result.columns) == 2
+
+
+def test_handle_portfolio_decorator_quarterly():
+    """Test handle_portfolio decorator with quarterly data."""
+
+    class MockSelf:
+        def __init__(self):
+            self._tickers = ["AAPL", "MSFT", "Portfolio"]
+            self._rounding = 4
+            self._quarterly = True
+            self._portfolio_weights = {
+                "quarterly": pd.DataFrame(
+                    {"AAPL": [0.6, 0.6], "MSFT": [0.4, 0.4]},
+                    index=pd.PeriodIndex(["2020Q1", "2020Q2"], freq="Q"),
+                )
+            }
+
+    @helpers.handle_portfolio
+    def test_function(self):
+        return pd.DataFrame(
+            {"AAPL": [10, 20], "MSFT": [15, 25]},
+            index=pd.PeriodIndex(["2020Q1", "2020Q2"], freq="Q"),
+        )
+
+    mock_self = MockSelf()
+    result = test_function(mock_self)
+
+    # Should have Portfolio column
+    assert "Portfolio" in result.columns
+
+
+def test_handle_portfolio_decorator_with_growth_warning():
+    """Test handle_portfolio decorator shows warning for growth with multiple lags."""
+
+    class MockSelf:
+        def __init__(self):
+            self._tickers = ["AAPL", "MSFT", "Portfolio"]
+            self._rounding = 4
+            self._quarterly = False
+            self._portfolio_weights = {
+                "yearly": pd.DataFrame(
+                    {"AAPL": [0.6], "MSFT": [0.4]},
+                    index=pd.PeriodIndex(["2020"], freq="Y"),
+                )
+            }
+
+    @helpers.handle_portfolio
+    def test_function(self, growth=False, lag=1):
+        return pd.DataFrame(
+            {"AAPL": [10], "MSFT": [15]}, index=pd.PeriodIndex(["2020"], freq="Y")
+        )
+
+    mock_self = MockSelf()
+
+    with patch("financetoolkit.helpers.logger") as mock_logger:
+        result = test_function(mock_self, growth=True, lag=[1, 2])
+
+        mock_logger.warning.assert_called_once()
+        assert "multiple lags" in mock_logger.warning.call_args[0][0]
+
+
+def test_handle_portfolio_decorator_non_dataframe_result():
+    """Test handle_portfolio decorator with non-DataFrame result."""
+
+    class MockSelf:
+        def __init__(self):
+            self._tickers = ["AAPL", "MSFT", "Portfolio"]
+            self._rounding = 4
+
+    @helpers.handle_portfolio
+    def test_function(self):
+        return "Not a DataFrame"
+
+    mock_self = MockSelf()
+    result = test_function(mock_self)
+
+    # Should return original result unchanged
+    assert result == "Not a DataFrame"
+
+
+def test_handle_portfolio_decorator_multiindex_columns():
+    """Test handle_portfolio decorator with MultiIndex columns."""
+
+    class MockSelf:
+        def __init__(self):
+            self._tickers = ["AAPL", "MSFT", "Portfolio"]
+            self._rounding = 4
+            self._quarterly = False
+            self._portfolio_weights = {
+                "yearly": pd.DataFrame(
+                    {"AAPL": [0.6], "MSFT": [0.4]},
+                    index=pd.PeriodIndex(["2020"], freq="Y"),
+                )
+            }
+
+    @helpers.handle_portfolio
+    def test_function(self):
+        columns = pd.MultiIndex.from_tuples([("AAPL", "Value"), ("MSFT", "Value")])
+        return pd.DataFrame(
+            {("AAPL", "Value"): [10], ("MSFT", "Value"): [15]},
+            index=pd.PeriodIndex(["2020"], freq="Y"),
+            columns=columns,
+        )
+
+    mock_self = MockSelf()
+    result = test_function(mock_self)
+
+    # Should not add Portfolio column for MultiIndex columns
+    assert len(result.columns) == 2
+
+
+def test_run_in_parallel_preserves_order():
+    """Test that results come back in the same order as the argument tuples."""
+    result = helpers.run_in_parallel(
+        lambda base, exponent: base**exponent,
+        [(2, 3), (3, 2), (10, 0)],
+    )
+
+    assert result == [8, 9, 1]
+
+
+def test_run_in_parallel_empty_items():
+    """Test that an empty collection returns an empty list without spawning a pool."""
+    assert helpers.run_in_parallel(lambda: None, []) == []
+
+
+def test_run_in_parallel_collects_into_shared_dict():
+    """Test the pattern the data collection functions use: workers mutate a shared dict."""
+    collected: dict[str, int] = {}
+
+    def worker(ticker, dataset_dictionary):
+        dataset_dictionary[ticker] = len(ticker)
+
+    helpers.run_in_parallel(
+        worker, [(ticker, collected) for ticker in ["AAPL", "MSFT", "GOOGL"]]
+    )
+
+    assert collected == {"AAPL": 4, "MSFT": 4, "GOOGL": 5}
+
+
+def test_run_in_parallel_propagates_worker_defects():
+    """Test that a defect inside a worker surfaces instead of dying in its thread."""
+
+    def worker(ticker):
+        raise TypeError(f"unsupported type for {ticker}")
+
+    with pytest.raises(TypeError):
+        helpers.run_in_parallel(worker, [("AAPL",), ("MSFT",)])
+
+
+@pytest.mark.parametrize("error", [KeyError, ValueError, IndexError, ZeroDivisionError])
+def test_run_in_parallel_keeps_the_others_when_one_worker_fails(error, caplog):
+    """Test that a worker failing on its data is logged and the other results are kept."""
+
+    def worker(ticker, api_key):  # noqa: ARG001
+        if ticker == "MSFT":
+            raise error(f"https://example.com/quote?symbol={ticker}&apikey={api_key}")
+
+        return ticker, len(ticker)
+
+    with caplog.at_level("ERROR"):
+        result = helpers.run_in_parallel(
+            worker, [(ticker, "SECRET") for ticker in ["AAPL", "MSFT", "GOOGL"]]
+        )
+
+    assert result == [("AAPL", 4), ("GOOGL", 5)]
+    assert "No data could be retrieved for MSFT" in caplog.text
+    assert "SECRET" not in caplog.text
+
+
+def test_run_in_parallel_raises_every_error_in_strict_mode(monkeypatch):
+    """Test that strict error handling raises a worker's data error as well."""
+    monkeypatch.setenv("FINANCETOOLKIT_STRICT_ERRORS", "1")
+
+    def worker(ticker):
+        raise KeyError(f"no data for {ticker}")
+
+    with pytest.raises(KeyError):
+        helpers.run_in_parallel(worker, [("AAPL",)])
+
+
+def test_determine_max_workers_default():
+    """Test the default when the environment variable is not set."""
+    with patch.dict("os.environ", {}, clear=True):
+        assert helpers.determine_max_workers() == helpers.DEFAULT_MAX_WORKERS
+
+
+def test_determine_max_workers_environment_variable():
+    """Test that a positive integer in the environment variable is used."""
+    with patch.dict(
+        "os.environ", {helpers.MAX_WORKERS_ENVIRONMENT_VARIABLE: "3"}, clear=True
+    ):
+        assert helpers.determine_max_workers() == 3
+
+
+def test_determine_max_workers_invalid_environment_variable():
+    """Test that a non-positive or non-integer value falls back to the default."""
+    for invalid in ["0", "-4", "many", "2.5"]:
+        with patch.dict(
+            "os.environ",
+            {helpers.MAX_WORKERS_ENVIRONMENT_VARIABLE: invalid},
+            clear=True,
+        ):
+            assert helpers.determine_max_workers() == helpers.DEFAULT_MAX_WORKERS
+
+
+def test_handle_portfolio_weighs_the_tickers_with_a_value_by_the_result_period():
+    """The portfolio row uses the weights of the result's period and skips missing values."""
+    import numpy as np
+
+    daily = pd.period_range("2024-01-01", periods=3, freq="D")
+    yearly = pd.period_range("2024", periods=1, freq="Y")
+
+    class Module:
+        _tickers = ["A", "B", "Portfolio"]
+        _rounding = 4
+        _portfolio_weights = {
+            "daily": pd.DataFrame({"A": 0.25, "B": 0.75}, index=daily),
+            "yearly": pd.DataFrame({"A": 0.5, "B": 0.5}, index=yearly),
+        }
+
+        @helpers.handle_portfolio
+        def get_metric(self, period: str | None = None):  # noqa: ARG002
+            # Most risk metrics default to daily results.
+            return pd.DataFrame(
+                {"A": [1.0, 1.0, 1.0], "B": [3.0, np.nan, 3.0]}, index=daily
+            )
+
+    result = Module().get_metric()
+
+    assert result["Portfolio"].tolist() == [2.5, 1.0, 2.5]
+
+
+def test_enriching_a_response_without_prices_adds_no_row():
+    """
+    An empty response (a range before the listing) stays empty: it once gained a row
+    labelled 0, which was cached and merged into the dates of the real prices.
+    """
+    columns = ["Open", "High", "Low", "Close", "Adj Close", "Volume", "Dividends"]
+    empty = pd.DataFrame(columns=columns, index=pd.PeriodIndex([], freq="D"))
+
+    enriched = helpers.enrich_historical_data(empty, "1980-01-01", "1984-12-31")
+
+    assert enriched.empty
+
+
+def test_availability_dates_use_real_filings_and_otherwise_the_deadline():
+    periods = pd.PeriodIndex(["2023Q1", "2023Q2", "2023Q3"], freq="Q")
+    period_end_dates = pd.DataFrame(
+        [pd.to_datetime(["2023-03-31", "2023-06-30", "2023-09-30"])] * 2,
+        index=["SEC", "NONSEC"],
+        columns=periods,
+    )
+    statistics = pd.DataFrame(
+        [
+            ["2023-04-28 06:01:00", "2023-08-04 16:30:00", None],
+            [None, None, "2023-10-25"],
+            ["2023-03-30 19:00:00", "2023-07-02 19:00:00", "2023-09-29 20:00:00"],
+            ["2023-03-31", "2023-07-02", "2023-09-30"],
+        ],
+        index=pd.MultiIndex.from_tuples(
+            [
+                ("SEC", "Accepted Date"),
+                ("SEC", "Filing Date"),
+                ("NONSEC", "Accepted Date"),
+                ("NONSEC", "Filing Date"),
+            ]
+        ),
+        columns=periods.astype(str),
+    )
+
+    availability = helpers.determine_availability_dates(
+        period_end_dates, statistics, quarter=True
+    )
+
+    # Accepted before the close counts that day, after the close the next day, and a
+    # filing date without a time from the day after it.
+    assert availability.loc["SEC"].tolist() == list(
+        pd.to_datetime(["2023-04-28", "2023-08-05", "2023-10-26"])
+    )
+    # Dates around the period end are not filings, so the quarterly deadline is used.
+    assert availability.loc["NONSEC"].tolist() == list(
+        pd.to_datetime(["2023-06-29", "2023-09-28", "2023-12-29"])
+    )
+
+
+def test_availability_dates_without_statistics_use_the_annual_deadline():
+    period_end_dates = pd.DataFrame(
+        [pd.to_datetime(["2022-12-31"])],
+        index=["AAPL"],
+        columns=pd.PeriodIndex(["2022"], freq="Y"),
+    )
+
+    availability = helpers.determine_availability_dates(
+        period_end_dates, None, quarter=False
+    )
+
+    assert availability.loc["AAPL"].tolist() == [pd.Timestamp("2023-04-30")]
+
+
+def test_availability_of_the_quarter_closing_a_fiscal_year_uses_the_annual_deadline():
+    periods = pd.PeriodIndex(["2023Q3", "2023Q4"], freq="Q")
+    period_end_dates = pd.DataFrame(
+        [
+            pd.to_datetime(["2023-09-30", "2023-12-31"]),
+            pd.to_datetime(["2023-09-30", "2023-12-31"]),
+        ],
+        index=["SEPTEMBER", "DECEMBER"],
+        columns=periods,
+    )
+    statistics = pd.DataFrame(
+        [["Q4", "Q1"]],
+        index=pd.MultiIndex.from_tuples([("SEPTEMBER", "Period")]),
+        columns=periods.astype(str),
+    )
+
+    availability = helpers.determine_availability_dates(
+        period_end_dates, statistics, quarter=True
+    )
+
+    # The fiscal Q4 label decides where the source reports it, December otherwise.
+    assert availability.loc["SEPTEMBER"].tolist() == list(
+        pd.to_datetime(["2024-01-28", "2024-03-30"])
+    )
+    assert availability.loc["DECEMBER"].tolist() == list(
+        pd.to_datetime(["2023-12-29", "2024-04-29"])
+    )
+
+
+def test_importing_the_package_keeps_runtime_warnings_visible():
+    import subprocess  # noqa: PLC0415
+    import sys  # noqa: PLC0415
+
+    # A fresh interpreter, as the test session itself may already have imported it.
+    code = (
+        "import warnings, financetoolkit.toolkit_controller, "
+        "financetoolkit.ratios.ratios_controller, financetoolkit.risk.risk_controller, "
+        "financetoolkit.performance.performance_controller\n"
+        "assert not [f for f in warnings.filters if f[0] == 'ignore' and f[2] is RuntimeWarning]\n"
+        "print('ok')"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=False
+    )
+    assert result.stdout.strip() == "ok", result.stderr
+
+
+def test_round_half_up_rounds_a_half_away_from_zero():
+    from decimal import Decimal
+
+    # round() rounds these to even or misses them on the binary float.
+    assert helpers.round_half_up(2.675, 2) == 2.68
+    assert helpers.round_half_up(0.125, 2) == 0.13
+    assert helpers.round_half_up(Decimal("17015150") / 1000, 1) == 17015.2
+    assert pd.isna(helpers.round_half_up(float("nan"), 2))
+
+
+@pytest.mark.parametrize(
+    ("values", "expected"),
+    [
+        (None, []),
+        ("", []),
+        (" a ,, b ,", ["a", "b"]),
+        ([" a", "b ", "", None], ["a", "b"]),
+        (("a",), ["a"]),
+        ([1, 5, 10], [1, 5, 10]),
+        (5, [5]),
+        (0.5, [0.5]),
+        (pd.Index(["a", "b"]), ["a", "b"]),
+    ],
+)
+def test_split_values_returns_a_list_of_the_given_values(values, expected):
+    assert helpers.split_values(values) == expected
+
+
+# Fiscal period ends as FinancialModelingPrep reports them (the actual last day) next to the
+# month end Yahoo Finance reports for the same period, with the calendar label both get.
+FISCAL_PERIOD_ENDS = [
+    # ticker, quarter, FinancialModelingPrep, Yahoo Finance, label
+    ("AAPL", False, "2025-09-27", "2025-09-30", "2025"),
+    ("NVDA", False, "2026-01-25", "2026-01-31", "2025"),
+    ("MSFT", False, "2025-06-30", "2025-06-30", "2025"),
+    ("WMT", False, "2026-01-31", "2026-01-31", "2025"),
+    ("COST", False, "2023-09-03", "2023-08-31", "2023"),
+    ("WDC", False, "2022-07-01", "2022-06-30", "2022"),
+    ("HD", False, "2026-02-01", "2026-01-31", "2025"),
+    ("TGT", False, "2024-02-03", "2024-01-31", "2023"),
+    ("AAPL", True, "2025-12-27", "2025-12-31", "2025Q4"),
+    ("NVDA", True, "2025-10-26", "2025-10-31", "2025Q3"),
+    ("COST", True, "2025-05-11", "2025-05-31", "2025Q2"),
+    ("WDC", True, "2026-01-02", "2025-12-31", "2025Q4"),
+    ("HD", True, "2025-08-03", "2025-07-31", "2025Q2"),
+    ("HD", True, "2026-05-03", "2026-04-30", "2026Q1"),
+    ("TGT", True, "2025-11-01", "2025-10-31", "2025Q3"),
+    ("TGT", True, "2026-08-01", "2026-07-31", "2026Q2"),
+    ("LOW", True, "2025-08-01", "2025-07-31", "2025Q2"),
+    ("DG", True, "2026-05-01", "2026-04-30", "2026Q1"),
+]
+
+
+@pytest.mark.parametrize(
+    "ticker, quarter, fmp_date, yahoo_date, label", FISCAL_PERIOD_ENDS
+)
+def test_both_sources_label_a_fiscal_period_alike(
+    ticker, quarter, fmp_date, yahoo_date, label
+):
+    fmp_label, yahoo_label = helpers.convert_period_end_dates_to_calendar_periods(
+        pd.to_datetime([fmp_date, yahoo_date]), quarter=quarter
+    )
+
+    assert str(fmp_label) == str(yahoo_label) == label, ticker
+
+
+def test_consecutive_52_53_week_quarters_keep_their_own_calendar_quarter():
+    # Home Depot's quarters end on a Sunday a few days into August, November, February and May.
+    dates = pd.to_datetime(["2020-05-03", "2020-08-02", "2020-11-01", "2021-01-31"])
+    adjustments = {}
+
+    labels = helpers.convert_period_end_dates_to_calendar_periods(
+        dates, quarter=True, ticker="HD", fiscal_year_adjustments=adjustments
+    )
+
+    assert [str(label) for label in labels] == ["2020Q1", "2020Q2", "2020Q3", "2020Q4"]
+    # Each quarter ends in the month after a calendar quarter (April, July, October, January).
+    assert adjustments["HD"] == [
+        {"fiscal_year": fiscal, "calendar_year": calendar}
+        for fiscal, calendar in [
+            ("2020Q2", "2020Q1"),
+            ("2020Q3", "2020Q2"),
+            ("2020Q4", "2020Q3"),
+            ("2021Q1", "2020Q4"),
+        ]
+    ]
+
+
+def test_twelve_week_quarters_ending_later_in_a_month_stay_in_that_month():
+    # Costco's 12-week quarters ending 12 February and 7 May 2023.
+    labels = helpers.convert_period_end_dates_to_calendar_periods(
+        pd.to_datetime(["2023-02-12", "2023-05-07"]), quarter=True
+    )
+
+    assert [str(label) for label in labels] == ["2023Q1", "2023Q2"]
+
+
+def test_a_fiscal_year_ending_in_the_first_days_of_june_belongs_to_the_previous_year():
+    labels = helpers.convert_period_end_dates_to_calendar_periods(
+        pd.to_datetime(["2023-06-05", "2023-06-06"]), quarter=False
+    )
+
+    assert [str(label) for label in labels] == ["2022", "2023"]
+
+
+def test_goodwill_and_intangible_assets_fall_back_on_the_separate_rows():
+    """
+    The combined row is used where it is reported; elsewhere goodwill and the other
+    intangibles are added up with a missing one counting as zero, and only a period
+    without any of the three is NaN.
+    """
+    nan = np.nan
+    periods = ["2021", "2022", "2023", "2024"]
+    rows = {
+        ("A", "Goodwill and Intangible Assets"): [100, nan, nan, nan],
+        ("A", "Goodwill"): [60, 70, nan, nan],
+        ("A", "Intangible Assets"): [40, 20, 15, nan],
+        ("B", "Goodwill and Intangible Assets"): [nan, nan, nan, 0],
+        ("B", "Goodwill"): [5, nan, 3, nan],
+        ("B", "Intangible Assets"): [nan, nan, 2, nan],
+    }
+    balance_sheet = pd.DataFrame.from_dict(rows, orient="index", columns=periods)
+    balance_sheet.index = pd.MultiIndex.from_tuples(balance_sheet.index)
+
+    result = helpers.get_goodwill_and_intangible_assets(balance_sheet)
+
+    assert result.loc["A"].tolist()[:3] == [100, 90, 15]
+    assert np.isnan(result.loc["A", "2024"])
+    assert result.loc["B", "2021"] == 5
+    assert np.isnan(result.loc["B", "2022"])
+    assert result.loc["B", "2023"] == 5
+    assert result.loc["B", "2024"] == 0
+
+
+def test_goodwill_and_intangible_assets_without_some_of_the_rows():
+    """
+    A supplied balance sheet can hold the combined row without the separate ones, or the
+    separate ones without the combined row: what is there is used.
+    """
+    periods = ["2022", "2023"]
+    combined_only = pd.DataFrame(
+        [[100.0, 110.0], [50.0, np.nan], [1000.0, 1100.0]],
+        index=pd.MultiIndex.from_tuples(
+            [
+                ("A", "Goodwill and Intangible Assets"),
+                ("B", "Goodwill and Intangible Assets"),
+                ("A", "Total Assets"),
+            ]
+        ),
+        columns=periods,
+    )
+
+    result = helpers.get_goodwill_and_intangible_assets(combined_only)
+
+    assert result.loc["A"].tolist() == [100.0, 110.0]
+    assert result.loc["B", "2022"] == 50.0
+    assert np.isnan(result.loc["B", "2023"])
+
+    separate_only = pd.DataFrame(
+        [[60.0, 70.0], [40.0, np.nan]],
+        index=pd.MultiIndex.from_tuples(
+            [("A", "Goodwill"), ("A", "Intangible Assets")]
+        ),
+        columns=periods,
+    )
+
+    assert helpers.get_goodwill_and_intangible_assets(separate_only).loc[
+        "A"
+    ].tolist() == [100.0, 70.0]
+
+
+def test_add_basket_total_is_empty_for_a_ticker_without_statements():
+    """A ticker with no statement at all leaves the Total empty, as a missing value does."""
+    statement = pd.DataFrame(
+        {"2023": [10.0, 30.0], "2024": [12.0, 33.0]},
+        index=pd.MultiIndex.from_product([["AAPL", "MSFT"], ["Revenue"]]),
+    )
+
+    result = helpers.add_basket_total(
+        statement, ["AAPL", "MSFT", "NVDA"], not_summed=[]
+    )
+
+    assert result.loc[("Total", "Revenue")].isna().all()
+    assert result.loc[("AAPL", "Revenue"), "2024"] == 12.0
+
+
+def test_add_basket_total_sums_the_tickers_per_item():
+    statement = pd.DataFrame(
+        {
+            "2023": [10.0, 2.0, 5.0, 30.0, 4.0, np.nan],
+            "2024": [12.0, 2.0, 6.0, 33.0, 4.0, 7.0],
+        },
+        index=pd.MultiIndex.from_product(
+            [["AAPL", "MSFT"], ["Revenue", "EPS", "Capex"]]
+        ),
+    )
+
+    result = helpers.add_basket_total(statement, ["AAPL", "MSFT"], not_summed=["EPS"])
+
+    # The tickers stay as they are and the Total follows them.
+    pd.testing.assert_frame_equal(result.loc[["AAPL", "MSFT"]], statement)
+    assert result.loc["Total"].index.tolist() == ["Revenue", "EPS", "Capex"]
+    assert result.loc[("Total", "Revenue")].tolist() == [40.0, 45.0]
+    # A per-share figure does not add up, and a missing value leaves the Total empty.
+    assert result.loc[("Total", "EPS")].isna().all()
+    assert np.isnan(result.loc[("Total", "Capex"), "2023"])
+    assert result.loc[("Total", "Capex"), "2024"] == 13.0
+
+
+def test_deflate_with_price_index_uses_the_latest_month_as_base():
+    months = pd.period_range("2024-01", "2024-04", freq="M")
+    values = pd.DataFrame({"Gold": [100.0, 100.0, 100.0, 100.0]}, index=months)
+    price_index = pd.Series([50.0, np.nan, 100.0], index=months[[0, 1, 2]])
+
+    real = helpers.deflate_with_price_index(values, price_index)
+
+    # January's prices were worth twice as much in March money; a month the index skipped
+    # has no real value and a month after its latest keeps its nominal value.
+    assert real["Gold"].iloc[0] == 200.0
+    assert np.isnan(real["Gold"].iloc[1])
+    assert real["Gold"].iloc[2:].tolist() == [100.0, 100.0]
+
+
+def test_change_over_periods_compares_the_same_period_a_year_earlier():
+    from financetoolkit.economics.helpers import change_over_periods
+
+    months = pd.period_range("2024-01", "2025-12", freq="M").delete(21)
+    index = pd.DataFrame({"Japan": range(100, 100 + len(months))}, index=months)
+
+    change = change_over_periods(index, 12)
+
+    # October 2025 is missing: it and the month a year later are not compared with
+    # whichever row is twelve places back.
+    assert pd.isna(change.loc[pd.Period("2025-10", "M"), "Japan"])
+    assert change.loc[pd.Period("2025-11", "M"), "Japan"] == pytest.approx(
+        121 / 110 - 1
+    )
+
+
+def test_add_score_zone_names_the_zone_of_each_score():
+    results = pd.DataFrame(
+        {"2024": [0.5, 1.5, 0.1, 3.0], "2025": [0.6, 2.99, 0.2, np.nan]},
+        index=pd.MultiIndex.from_product([["BA", "AAPL"], ["X1", "Altman Z-Score"]]),
+    )
+
+    zoned = helpers.add_score_zone(
+        results, "Altman Z-Score", [1.81, 2.99], ["Distress", "Grey", "Safe"]
+    )
+
+    assert zoned.index.tolist() == [
+        ("BA", "X1"),
+        ("BA", "Altman Z-Score"),
+        ("BA", "Zone"),
+        ("AAPL", "X1"),
+        ("AAPL", "Altman Z-Score"),
+        ("AAPL", "Zone"),
+    ]
+    assert zoned.loc[("BA", "Zone")].tolist() == ["Distress", "Safe"]
+    assert zoned.loc[("AAPL", "Zone"), "2024"] == "Safe"
+    # A period without a score has no zone.
+    assert pd.isna(zoned.loc[("AAPL", "Zone"), "2025"])
+
+
+def test_rank_across_tickers_compares_with_the_neighbour_toward_the_middle():
+    returns = pd.DataFrame(
+        {
+            "^KS11": [-0.162, 0.01],
+            "BTC-USD": [-0.073, 0.02],
+            "^HSI": [-0.054, np.nan],
+            "BZ=F": [0.136, 0.03],
+            "GC=F": [0.02, 0.01],
+        },
+        index=pd.PeriodIndex(["2026-10", "2026-11"], freq="M", name="Date"),
+    )
+
+    ranking = helpers.rank_across_tickers(returns)
+    october = ranking.loc["2026-10"]
+
+    assert october.index.tolist() == ["BZ=F", "GC=F", "^HSI", "BTC-USD", "^KS11"]
+    assert october["Rank"].tolist() == [1, 2, 3, 4, 5]
+    # The best is compared with the second, the worst with the next worst.
+    assert october.loc["BZ=F", "Compared With"] == "GC=F"
+    assert october.loc["^KS11", "Compared With"] == "BTC-USD"
+    assert october.loc["^KS11", "Difference"] == pytest.approx(-0.089)
+    assert october.loc["^KS11", "Multiple"] == pytest.approx(0.162 / 0.073)
+    # A gain against a loss has no multiple.
+    assert pd.isna(october.loc["GC=F", "Multiple"])
+    # A ticker without a value is left out of that period; ties share the higher rank.
+    november = ranking.loc["2026-11"]
+    assert "^HSI" not in november.index
+    assert november.loc[["^KS11", "GC=F"], "Rank"].tolist() == [3, 3]
+
+
+def test_round_half_up_returns_an_infinity_unchanged():
+    assert helpers.round_half_up(float("inf"), 2) == float("inf")
+    assert helpers.round_half_up("-inf", 2) == float("-inf")
+
+
+def test_a_may_year_end_spreads_its_quarters_over_two_year_labels():
+    from financetoolkit import helpers
+
+    # Oracle's fiscal 2024 runs from June 2023 to May 2024.
+    quarters = helpers.convert_period_end_dates_to_calendar_periods(
+        pd.to_datetime(["2023-08-31", "2023-11-30", "2024-02-29", "2024-05-31"]), True
+    )
+    year = helpers.convert_period_end_dates_to_calendar_periods(
+        pd.to_datetime(["2024-05-31"]), False
+    )
+
+    assert year.astype(str).tolist() == ["2023"]
+    assert quarters.astype(str).tolist() == ["2023Q3", "2023Q4", "2024Q1", "2024Q2"]
+
+
+def test_trailing_windows_count_calendar_periods():
+    # A company reporting half-yearly: the first and third quarters are not columns.
+    quarters = pd.PeriodIndex(["2023Q2", "2023Q4", "2024Q2", "2024Q4"], freq="Q")
+    frame = pd.DataFrame([[1.0, 2.0, 3.0, 4.0]], index=["XYZ"], columns=quarters)
+
+    pd.testing.assert_index_equal(
+        helpers.calendar_periods(frame).columns,
+        pd.period_range("2023Q2", "2024Q4", freq="Q"),
+    )
+
+    # Every window of four quarters holds an unreported quarter, rather than two years.
+    assert helpers.trailing_sum(frame, 4).isna().all().all()
+    pd.testing.assert_index_equal(helpers.trailing_sum(frame, 4).columns, quarters)
+    assert helpers.trailing_mean(frame, 2).isna().all().all()
+
+    # Without gaps the windows are the usual rolling ones.
+    full = pd.DataFrame(
+        [[1.0, 2.0, 3.0, 4.0, 5.0]],
+        index=["XYZ"],
+        columns=pd.period_range("2023Q1", periods=5, freq="Q"),
+    )
+    assert helpers.trailing_sum(full, 4).iloc[0].tolist()[3:] == [10.0, 14.0]
+    assert helpers.trailing_mean(full, 2).iloc[0].tolist()[1:] == [1.5, 2.5, 3.5, 4.5]
+    assert helpers.trailing_mean(full, 4).iloc[0].tolist()[3:] == [2.5, 3.5]
+    assert helpers.trailing_sum(full, None) is full
+
+    # A missing year: 2022 is not summed with 2020.
+    years = pd.PeriodIndex(["2019", "2020", "2022", "2023"], freq="Y")
+    annual = pd.DataFrame([[1.0, 2.0, 3.0, 4.0]], index=["XYZ"], columns=years)
+    summed = helpers.trailing_sum(annual, 2).iloc[0]
+    assert summed.isna().tolist() == [True, False, True, False]
+    assert summed.iloc[[1, 3]].tolist() == [3.0, 7.0]
+
+
+def test_handle_portfolio_keeps_the_portfolios_own_values():
+    """A Portfolio calculated from its own return series is not replaced by a weighted average."""
+
+    class MockSelf:
+        def __init__(self):
+            self._tickers = ["AAPL", "MSFT", "Portfolio"]
+            self._rounding = 4
+            self._quarterly = False
+            self._portfolio_weights = {
+                "yearly": pd.DataFrame(
+                    {"AAPL": [0.5, 0.5], "MSFT": [0.5, 0.5]},
+                    index=pd.PeriodIndex(["2020", "2021"], freq="Y"),
+                )
+            }
+
+    @helpers.handle_portfolio
+    def by_columns(self):
+        return pd.DataFrame(
+            {"AAPL": [0.2, 0.3], "MSFT": [0.2, 0.3], "Portfolio": [0.01, 0.02]},
+            index=pd.PeriodIndex(["2020", "2021"], freq="Y"),
+        )
+
+    @helpers.handle_portfolio
+    def by_rows(self):
+        return pd.DataFrame(
+            {"AAPL": [0.2, 0.2], "MSFT": [0.3, 0.3], "Portfolio": [0.01, np.nan]},
+            index=pd.PeriodIndex(["2020", "2021"], freq="Y"),
+        ).T
+
+    @helpers.handle_portfolio
+    def without_values(self):
+        return pd.DataFrame(
+            {"AAPL": [0.2, 0.3], "MSFT": [0.4, 0.5], "Portfolio": [np.nan, np.nan]},
+            index=pd.PeriodIndex(["2020", "2021"], freq="Y"),
+        )
+
+    assert by_columns(MockSelf())["Portfolio"].tolist() == [0.01, 0.02]
+    assert by_rows(MockSelf()).loc["Portfolio"].iloc[0] == 0.01
+    # Without values of its own (e.g. the ratios of financial statements) it is the weighted average.
+    assert without_values(MockSelf())["Portfolio"].tolist() == pytest.approx([0.3, 0.4])
+
+
+def test_fill_diluted_shares_uses_the_basic_shares_where_the_diluted_are_missing(
+    caplog,
+):
+    columns = pd.period_range("2021", periods=3, freq="Y")
+    statement = pd.DataFrame(
+        [
+            [10.0, 20.0, 30.0],
+            [9.0, 19.0, 29.0],
+            [11.0, np.nan, 31.0],
+            [1.0, 2.0, 3.0],
+            [5.0, 6.0, 7.0],
+        ],
+        index=pd.MultiIndex.from_tuples(
+            [
+                ("AAPL", "Revenue"),
+                ("AAPL", "Weighted Average Shares"),
+                ("AAPL", "Weighted Average Shares Diluted"),
+                ("MSFT", "Revenue"),
+                ("MSFT", "Weighted Average Shares"),
+            ]
+        ),
+        columns=columns,
+    )
+
+    filled = helpers.fill_diluted_shares(statement)
+
+    assert filled.loc[("AAPL", "Weighted Average Shares Diluted")].tolist() == [
+        11.0,
+        19.0,
+        31.0,
+    ]
+    assert filled.loc[("MSFT", "Weighted Average Shares Diluted")].tolist() == [
+        5.0,
+        6.0,
+        7.0,
+    ]
+    # The rows of a ticker stay together, and the statement itself is left as it is.
+    assert list(filled.index.get_level_values(0)) == ["AAPL"] * 3 + ["MSFT"] * 3
+    assert ("MSFT", "Weighted Average Shares Diluted") not in statement.index
+    assert "for AAPL, MSFT" in caplog.text
+
+    # Nothing missing: the same statement, without a log.
+    caplog.clear()
+    assert helpers.fill_diluted_shares(filled) is filled
+    assert caplog.text == ""
+
+
+def test_require_input_raises_for_an_empty_input():
+    helpers.require_input(pd.DataFrame({"A": [1.0]}), "market cap")
+
+    with pytest.raises(ValueError, match="The market cap is not available"):
+        helpers.require_input(pd.Series(dtype=object), "market cap")
+
+
+def test_fill_diluted_shares_keeps_the_statement_numeric():
+    statement = pd.DataFrame(
+        [[10.0, 20.0], [9.0, 19.0]],
+        index=pd.MultiIndex.from_tuples(
+            [("AAPL", "Revenue"), ("AAPL", "Weighted Average Shares")]
+        ),
+        columns=pd.period_range("2022", periods=2, freq="Y"),
+    )
+
+    filled = helpers.fill_diluted_shares(statement)
+
+    assert (filled.dtypes == "float64").all()
+
+
+def test_run_in_parallel_names_a_failed_fetch_without_its_function(caplog):
+    """A worker handed a function per source is named in words, not by its repr."""
+
+    def failing():
+        raise ValueError("The source answered with something other than JSON.")
+
+    assert helpers.run_in_parallel(lambda fetch: fetch(), [(failing,)]) == []
+    assert "No data could be retrieved for one of the requests" in caplog.text
+    assert "<function" not in caplog.text

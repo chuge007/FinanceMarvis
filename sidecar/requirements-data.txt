@@ -1,0 +1,11 @@
+# Marvis 数据侧车依赖（与 futu-api 分开，装一个失败不连坐另一个）
+# Python >= 3.11（AkShare 硬要求）
+akshare>=1.18.0
+edgartools>=2.0.0
+ccxt>=4.4.0
+baostock>=0.8.9
+# 通用白名单调用的额外库：efinance / yahooquery / adata
+setuptools>=68
+efinance>=0.5.9
+yahooquery>=2.4.1
+adata>=2.9.5

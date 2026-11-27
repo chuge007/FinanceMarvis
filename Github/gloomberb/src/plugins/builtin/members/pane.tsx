@@ -1,0 +1,266 @@
+import { dayCell, formatDay } from "../../../components/ui/day-cell";
+import { MISSING_VALUE } from "../../../utils/format";
+import { Breadth } from "./breadth-pane";
+import { useCallback, useMemo, useRef, useState } from "react";
+import type { FundChange, FundMember, MemberFundsPayload, StockFund } from "../../../api-client/members";
+import { delayedFooterSegment, DataTableStackView, DataTableView, DetailScrollBody, EmptyState, KeyValueRow, PaneFooterScope, PaneStatusBody, Prose, QueryBar, StatGrid,
+  isSectionedItemRow, renderSectionedRowHeader, useExternalLinkFooter, usePaneNoticeFooter, usePaneStatusFooter, usePaneTabs, useQueryBarSearch,
+  type DataTableCell, type DataTableColumn, type PaneFooterSegment, type SectionedRow } from "../../../components";
+import { usePaneRefreshKey } from "../../../components/data-table/table-pane";
+import { useAsyncResource, useAutoRefresh, usePaneInstance, usePaneTickerIdentity, usePaneTitle, usePluginPaneState, usePluginTickerActions } from "../../../public/react";
+import { shownPriceColor } from "../../../theme/colors";
+import { useThemeColors } from "../../../theme/theme-context";
+import type { PaneProps } from "../../../types/plugin";
+import { Box, type ScrollBoxRenderable } from "../../../ui";
+import { nextHeaderSort, type SortPreference } from "../../../utils/sort-values";
+import { stopSearchFocusNavigation } from "../../../utils/search-focus-navigation";
+import { useSearchFocusUp } from "../../../components/input-search-bar";
+import { useMembersMenu, type MemberList } from "../shared/members-menu";
+import { cachedChanges, cachedFunds, cachedMembers, cachedStockFunds, loadChanges, loadFunds, loadMembers, loadStockFunds } from "./client";
+import { canonicalFund, changeColumns, changeLabel, changeReason, coverageText, coveredFund, decimal, DEFAULT_SORT, holdingsBasisText, holdingsCaveats, indexNotCoveredMessage, isTab,
+  type MemberIndex, memberColumns, memberIndex, memberRows, membersFeed, membersTitle, noStockFundsMessage, percent, stockFundAsOf, stockFundAsOfFits, stockFundColumns, stockFundRows, stockListingInput, TABS,
+  type MembersTab } from "./model";
+
+type ViewProps = Pick<PaneProps, "width" | "height" | "focused"> & { fund: string; active: boolean };
+const rowKey = (row: SectionedRow<FundMember>) => row.key;
+/** How often live members are worth checking again: the server renews their prices every 15 seconds. */
+const LIVE_MEMBERS_REFRESH_MS = 15_000;
+
+function Holdings({ fund, tab, width, height, focused, active }: ViewProps & { tab: MembersTab }) {
+  const colors = useThemeColors();
+  const { pinTicker } = usePluginTickerActions();
+  const resource = useAsyncResource(useCallback((force: boolean) => loadMembers(fund, force), [fund]), { initialData: useCallback(() => cachedMembers(fund), [fund]) });
+  const data = resource.data?.payload;
+  const [sort, setSort] = usePluginPaneState<SortPreference<string>>(`sort:${fund}`, DEFAULT_SORT);
+  const [selected, setSelected] = usePluginPaneState<string | null>(`member:${fund}`, null);
+  const [query, setQuery] = useState("");
+  const isSearchUp = useSearchFocusUp();
+  const search = useQueryBarSearch();
+  const movers = tab === "movers";
+  const rows = useMemo(() => memberRows(data?.members ?? [], tab, query, sort), [data, tab, query, sort]);
+  const columns = useMemo(() => memberColumns(width, movers), [width, movers]);
+  // Movers is a ranked slice of the fund, not its members, so the entries stay on the Members tab.
+  const memberList = useMemo((): MemberList | null => {
+    if (!data || tab !== "members") return null;
+    const typed = query.trim();
+    return { title: fund, watchlistName: typed ? `${fund} ${typed}` : `${fund} members`,
+      search: typed ? { query: typed, total: data.members.filter((row) => row.symbol).length } : null,
+      members: rows.flatMap((row) => isSectionedItemRow(row) && row.item.symbol ? [{ symbol: row.item.symbol, name: row.item.name }] : []) };
+  }, [data, fund, query, rows, tab]);
+  useMembersMenu("members:members-menu", memberList);
+  // A Pro account's members are priced from the server's live read, renewed every 15 seconds.
+  const live = data?.access === "realtime";
+  useAutoRefresh(resource.updatedAt, () => { if (active) resource.load(live); }, { intervalMs: live ? LIVE_MEMBERS_REFRESH_MS : null });
+  usePaneRefreshKey(() => resource.reload(), { focused, enabled: active && !search.active });
+  const info = useMemo<PaneFooterSegment[]>(() => {
+    if (!data) return [];
+    // Outside the regular session a Pro account's members are the session's close, so the footer names it, not "live".
+    const feed = membersFeed(data.access, resource.updatedAt ?? Date.now());
+    const feedText = feed.kind === "close" ? feed.label : feed.kind === "live" ? "live" : "15m delayed";
+    const dates = [...new Set(data.members.flatMap((row) => row.changePercent !== null && row.dailyAsOf ? [row.dailyAsOf.slice(0, 10)] : []))].sort();
+    const date = dates.length === 1 ? dates[0] : dates.length ? `${dates[0]} to ${dates.at(-1)}` : data.fundDailyAsOf?.slice(0, 10);
+    // The close names its own date, so a quote date that is the same day is not said twice.
+    const dateSaid = feed.kind === "close" && dates.length === 1 && dates[0] === feed.date;
+    const partial = data.aggregate.fresh1D < data.aggregate.total;
+    // An N-PORT fund's holdings are a quarter's report: always said, with its date and filing day, never as today's.
+    const holdingsText = holdingsBasisText(data);
+    const nport = data.basis === "nport";
+    return [
+      { id: "coverage", parts: [{ text: coverageText(data.aggregate, width < 60), tone: partial ? "warning" : "muted" }] },
+      // A capture's status line says the quotes' date and delay too; it does not say returns are unavailable.
+      ...(data.quotesUnavailable
+        ? [{ id: "quote-date", title: `${date ?? "Quote date unavailable"} · ${feedText} · ${holdingsText}`, parts: [{ text: "returns unavailable", tone: "muted" as const }] }]
+        : [
+          feed.kind === "live" ? { id: "quote-live", quoteStatus: true, parts: [{ text: "live", tone: "positive" as const }] }
+            : feed.kind === "close" ? { id: "quote-close", title: `${feed.label} · ${holdingsText}`, quoteStatus: true, parts: [{ text: feed.label, tone: "muted" as const }] }
+            : delayedFooterSegment({ id: "quote-delay", detail: "15m delayed", delay: "15m", quoteStatus: true }),
+          ...(date && !dateSaid ? [{ id: "quote-date", title: `${date} · ${feedText} · ${holdingsText}`, quoteStatus: true,
+            parts: [{ text: width < 60 && dates.length === 1 ? date.slice(5) : date, tone: "muted" as const }] }] : []),
+        ]),
+      // A shot keeps an N-PORT fund's (capture): a picture of its rows cannot say they are a quarter's report.
+      ...(nport ? [{ id: "holdings-date", capture: true, title: holdingsText,
+        parts: [{ text: holdingsBasisText(data, width < 100), tone: "warning" as const }] }]
+        : width >= 60 ? [{ id: "holdings-date", asOf: true, parts: [{ text: holdingsText, tone: "muted" as const }] }] : []),
+    ];
+  }, [data, resource.updatedAt, width]);
+  usePaneStatusFooter({ registrationId: "members:status", loading: !!data && resource.loading,
+    stale: !!data && (data.stale || resource.data!.stale || !!resource.error), info });
+  usePaneNoticeFooter({ registrationId: "members:notices", focused, notices: [
+    ...(resource.error || resource.data?.refreshError ? [resource.error ?? resource.data!.refreshError!] : []),
+    ...(data && data.aggregate.fresh1D < data.aggregate.total ? [`Fresh 1D: ${data.aggregate.fresh1D}/${data.aggregate.total} holdings, ${decimal(data.aggregate.coveredWeight * 100, 1)}% of whole-fund weight. Missing returns are excluded.`] : []),
+    ...(data ? holdingsCaveats(data, movers) : []),
+  ] });
+  const renderCell = useCallback((item: SectionedRow<FundMember>, column: DataTableColumn): DataTableCell => {
+    if (!isSectionedItemRow(item)) return { text: "" };
+    const row = item.item;
+    if (column.id === "symbol") return { text: row.symbol ?? MISSING_VALUE, color: colors.textBright };
+    if (column.id === "name" || column.id === "sector") return { text: row[column.id] ?? MISSING_VALUE, color: colors.text };
+    if (column.id === "weight") return { text: row.weight == null ? MISSING_VALUE : decimal(row.weight * 100), value: row.weight == null ? null : row.weight * 100 };
+    if (column.id === "shares") return { text: decimal(row.shares, 0), value: row.shares };
+    if (column.id === "price") return { text: decimal(row.price), value: row.price };
+    const value = row[column.id as "changePercent"];
+    const digits = column.id === "contribution" ? 3 : 2;
+    return { text: percent(value, column.id === "contribution" ? "" : "%", digits), value, color: value === null ? colors.textMuted : shownPriceColor(value, digits, colors) };
+  }, [colors]);
+  return <PaneStatusBody subject="fund holdings" loading={!data && resource.loading} error={!data ? resource.error : null}>
+    {data && <DataTableView<SectionedRow<FundMember>> items={rows} columns={columns} rootWidth={width} rootHeight={height} focused={focused && !search.active}
+      rootBefore={<Box flexDirection="column"><QueryBar width={width} search={{ value: query, onChange: setQuery, placeholder: "ticker, name or sector", focused, ...search.searchProps }} />
+        {movers && <StatGrid width={width} items={[
+          { label: "Covered contrib.", value: percent(data.aggregate.sum, " pp"), color: shownPriceColor(data.aggregate.sum ?? 0, 2, colors) },
+          { label: `${fund} 1D`, value: percent(data.aggregate.fundReturn), color: shownPriceColor(data.aggregate.fundReturn ?? 0, 2, colors) },
+          { label: "Difference", value: percent(data.aggregate.residual, " pp"), tone: data.aggregate.withinTolerance === false ? "warning" : "muted" },
+        ]} />}</Box>}
+      selection={{ kind: "id", selectedId: selected, getId: rowKey, onChange: (id) => setSelected(String(id)) }} getItemKey={rowKey}
+      isNavigable={isSectionedItemRow} renderSectionHeader={renderSectionedRowHeader}
+      sortColumnId={movers ? null : sort.columnId} sortDirection={sort.direction}
+      onHeaderClick={movers ? undefined : (id) => setSort((previous) => nextHeaderSort(previous, id, { firstDirection: (key) => ["symbol", "name", "sector"].includes(key) ? "asc" : "desc", resetTo: DEFAULT_SORT }))}
+      onSortChange={movers ? undefined : (columnId, direction) => setSort({ columnId, direction })}
+      onRootKeyDown={(event, context) => { if (context.selectedIndex <= 0 && isSearchUp(event)) { stopSearchFocusNavigation(event); search.focus(); return true; } return false; }}
+      onActivate={(row) => { if (isSectionedItemRow(row) && row.item.symbol) pinTicker(row.item.symbol, { floating: true, instrument: null }); }}
+      renderCell={renderCell} selectedTextOverridesCellColor resetScrollKey={`${tab}:${query}`} emptyStateTitle={query ? "No matching holdings." : movers ? "No covered movers." : "No holdings."} />}
+  </PaneStatusBody>;
+}
+
+function Changes({ fund, width, height, focused, active }: ViewProps) {
+  const colors = useThemeColors();
+  const resource = useAsyncResource(useCallback((force: boolean) => loadChanges(fund, force), [fund]), { initialData: useCallback(() => cachedChanges(fund), [fund]) });
+  const data = resource.data?.payload;
+  const [selected, setSelected] = usePluginPaneState<string | null>(`change:${fund}`, null);
+  const [opened, setOpened] = usePluginPaneState<string | null>(`opened:${fund}`, null);
+  const detail = data?.changes.find((row) => row.id === opened);
+  const selectedRow = detail ?? data?.changes.find((row) => row.id === selected) ?? data?.changes[0];
+  const scrollRef = useRef<ScrollBoxRenderable | null>(null);
+  useAutoRefresh(resource.updatedAt, () => { if (active) resource.load(); });
+  usePaneRefreshKey(() => resource.reload(), { focused, enabled: active });
+  useExternalLinkFooter({ registrationId: "members:source", focused, url: selectedRow?.url });
+  usePaneStatusFooter({ registrationId: "members:changes", loading: !!data && resource.loading, stale: !!data && (data.stale || resource.data!.stale || !!resource.error),
+    info: data?.asOf ? [{ id: "updated", parts: [{ text: `as of ${data.asOf.slice(0, 10)}`, tone: "muted" }] }] : [] });
+  usePaneNoticeFooter({ registrationId: "members:changes-notices", focused, notices: resource.error || resource.data?.refreshError ? [resource.error ?? resource.data!.refreshError!] : [] });
+  const renderCell = useCallback((row: FundChange, column: DataTableColumn): DataTableCell => {
+    if (column.id === "effectiveDate") return { text: row.effectiveDate ?? MISSING_VALUE };
+    if (column.id === "daysToGo") return { text: row.daysToGo === null ? MISSING_VALUE : `${row.daysToGo}${column.label === "In" ? "d" : ""}`, value: row.daysToGo, color: row.daysToGo === null ? colors.textMuted : colors.warning, keepColorWhenSelected: row.daysToGo !== null };
+    if (column.id === "added") return { text: row.added ?? MISSING_VALUE, color: colors.positive };
+    if (column.id === "removed") return { text: row.removed ?? MISSING_VALUE, color: colors.negative };
+    if (column.id === "estimate") { const value = row.estimates.length === 1 ? row.estimates[0]!.days : null; return { text: percent(value, ""), value }; }
+    return { text: changeReason(row), color: colors.text };
+  }, [colors]);
+  return <PaneStatusBody subject="index changes" loading={!data && resource.loading} error={!data ? resource.error : null}>
+    {data && !data.available ? <EmptyState title="Index changes are not covered for this fund." /> : data && <DataTableStackView<FundChange>
+      rootWidth={width} rootHeight={height} focused={focused} columns={changeColumns(width)} items={data.changes}
+      getItemKey={(row) => row.id} selection={{ kind: "id", selectedId: selected, getId: (row) => row.id, onChange: (id) => setSelected(String(id)) }}
+      onActivate={(row) => setOpened(row.id)} sortColumnId={null} sortDirection="desc" renderCell={renderCell} selectedTextOverridesCellColor
+      detailOpen={!!detail} onBack={() => setOpened(null)} detailTitle={detail ? changeLabel(detail) : undefined} detailScrollRef={scrollRef}
+      detailContent={detail && <DetailScrollBody ref={scrollRef} resetScrollKey={detail.id}>
+        <KeyValueRow label="Effective" value={detail.effectiveDate ?? "Not confirmed"} />
+        {detail.announcedAt && <KeyValueRow label="Announced" value={detail.announcedAt.slice(0, 10)} />}
+        {detail.headline && <Prose text={detail.headline} width={Math.max(8, width - 4)} />}
+        {detail.reason !== detail.headline && <Prose text={detail.reason} width={Math.max(8, width - 4)} />}
+        {detail.estimates.map((estimate) => <KeyValueRow key={estimate.symbol} label={`${estimate.symbol} est. ADV days`} labelWidth={24} value={percent(estimate.days, "")} />)}
+        {!!detail.estimates.length && <KeyValueRow label="Holdings as of" labelWidth={24} value={formatDay(detail.estimates[0]!.asOf)} />}
+        {!!detail.estimates.length && <Prose text={data.estimateLabel} width={Math.max(8, width - 4)} />}
+        {detail.kind === "history" && data.attribution && <Prose text={data.attribution.text} width={Math.max(8, width - 4)} />}
+      </DetailScrollBody>} emptyStateTitle="No stored index changes." />}
+  </PaneStatusBody>;
+}
+
+function FundView({ fund, ...props }: Pick<PaneProps, "width" | "height" | "focused"> & { fund: string }) {
+  const instance = usePaneInstance();
+  const initial = isTab(instance?.settings?.tab) ? instance.settings.tab : "members";
+  const [storedTab, setTab] = usePluginPaneState<MembersTab>("tab", initial);
+  const tab = isTab(storedTab) ? storedTab : "members";
+  const holdings = tab === "members" || tab === "movers";
+  const [visited, setVisited] = useState({ holdings, changes: tab === "changes", breadth: tab === "breadth" });
+  const selectTab = (value: string) => { if (isTab(value)) { setTab(value); setVisited((previous) => ({ holdings: previous.holdings || value === "members" || value === "movers", changes: previous.changes || value === "changes", breadth: previous.breadth || value === "breadth" })); } };
+  const { strip, rows } = usePaneTabs({ tabs: TABS, activeValue: tab, onSelect: selectTab, focused: props.focused, compact: true, variant: "bare" });
+  const height = Math.max(1, props.height - rows);
+  return <Box width={props.width} height={props.height} flexDirection="column">
+    {strip}
+    {visited.holdings && <Box visible={holdings} flexGrow={1} flexBasis={0} overflow="hidden"><PaneFooterScope active={holdings}>
+      <Holdings fund={fund} {...props} height={height} tab={tab} active={holdings} focused={props.focused && holdings} />
+    </PaneFooterScope></Box>}
+    {visited.breadth && <Box visible={tab === "breadth"} flexGrow={1} flexBasis={0} overflow="hidden"><PaneFooterScope active={tab === "breadth"}>
+      <Breadth fund={fund} {...props} height={height} active={tab === "breadth"} focused={props.focused && tab === "breadth"} />
+    </PaneFooterScope></Box>}
+    {visited.changes && <Box visible={tab === "changes"} flexGrow={1} flexBasis={0} overflow="hidden"><PaneFooterScope active={tab === "changes"}>
+      <Changes fund={fund} {...props} height={height} active={tab === "changes"} focused={props.focused && tab === "changes"} />
+    </PaneFooterScope></Box>}
+  </Box>;
+}
+function FundPicker({ width, height, focused, choose }: Pick<PaneProps, "width" | "height" | "focused"> & { choose: (fund: string) => void }) {
+  const resource = useAsyncResource(loadFunds, { initialData: cachedFunds });
+  const [selected, setSelected] = useState<string | null>(null);
+  usePaneRefreshKey(() => resource.reload(), { focused });
+  usePaneStatusFooter({ registrationId: "members:picker", loading: resource.loading && !!resource.data, stale: resource.data?.stale });
+  return <PaneStatusBody subject="covered funds" loading={!resource.data && resource.loading} error={!resource.data ? resource.error : null}>
+    {resource.data && <DataTableView items={resource.data.payload.funds} emptyStateTitle="No covered funds." rootWidth={width} rootHeight={height} focused={focused}
+      columns={[{ id: "ticker", label: "Fund", align: "left", width: 8 }, { id: "name", label: "Index", align: "left", width: 24, flexGrow: 1 }, { id: "asOf", label: "Holdings as of", align: "left", width: 16 }]}
+      getItemKey={(row) => row.ticker} selection={{ kind: "id", selectedId: selected, getId: (row) => row.ticker, onChange: (id) => setSelected(String(id)) }}
+      onActivate={(row) => choose(row.ticker)} sortColumnId={null} sortDirection="asc" renderCell={(row, col) => col.id === "asOf" ? dayCell(row.asOf) : ({ text: String(row[col.id as "ticker"] ?? MISSING_VALUE) })} />}
+  </PaneStatusBody>;
+}
+type ListProps = Pick<PaneProps, "width" | "height" | "focused">;
+const stockFundKey = (row: SectionedRow<StockFund>) => row.key;
+/**
+ * The ETFs holding a stock: the covered funds on daily holdings files first, then every other US ETF whose
+ * latest SEC N-PORT report holds it, each with its weight and what its holdings are as of (and a report's
+ * filing day).
+ */
+function StockFunds({ symbol, width, height, focused }: ListProps & { symbol: string }) {
+  const colors = useThemeColors();
+  const { pinTicker } = usePluginTickerActions();
+  const resource = useAsyncResource(useCallback((force: boolean) => loadStockFunds(symbol, force), [symbol]), { initialData: useCallback(() => cachedStockFunds(symbol), [symbol]) });
+  const data = resource.data?.payload;
+  const [selected, setSelected] = usePluginPaneState<string | null>(`holding:${symbol}`, null);
+  const rows = useMemo(() => stockFundRows(data?.funds ?? []), [data]);
+  usePaneRefreshKey(() => resource.reload(), { focused });
+  usePaneStatusFooter({ registrationId: "members:stock-funds", loading: !!data && resource.loading, stale: !!data && (resource.data!.stale || !!resource.error) });
+  usePaneNoticeFooter({ registrationId: "members:stock-funds-notices", focused, notices: resource.error && data ? [resource.error] : [] });
+  const renderCell = useCallback((item: SectionedRow<StockFund>, column: DataTableColumn): DataTableCell => {
+    if (!isSectionedItemRow(item)) return { text: "" };
+    const row = item.item;
+    if (column.id === "ticker") return { text: row.ticker, color: colors.textBright };
+    if (column.id === "name") return { text: row.name, color: colors.text };
+    if (column.id === "weight") return { text: row.weight == null ? MISSING_VALUE : decimal(row.weight * 100), value: row.weight == null ? null : row.weight * 100 };
+    return { text: stockFundAsOf(row, !stockFundAsOfFits(width)), color: colors.textMuted };
+  }, [colors, width]);
+  const none = noStockFundsMessage(data?.symbol ?? symbol, "pane");
+  return <PaneStatusBody subject="funds holding the stock" loading={!data && resource.loading} error={!data ? resource.error : null}
+    empty={!!data && !data.funds.length} emptyTitle={none.title} emptyMessage={none.message}>
+    {data && !!data.funds.length && <DataTableView<SectionedRow<StockFund>> items={rows} columns={stockFundColumns(width)} rootWidth={width} rootHeight={height} focused={focused}
+      selection={{ kind: "id", selectedId: selected, getId: stockFundKey, onChange: (id) => setSelected(String(id)) }} getItemKey={stockFundKey}
+      isNavigable={isSectionedItemRow} renderSectionHeader={renderSectionedRowHeader} sortColumnId={null} sortDirection="desc"
+      onActivate={(row) => { if (isSectionedItemRow(row)) pinTicker(row.item.ticker, { floating: true, instrument: null }); }}
+      renderCell={renderCell} selectedTextOverridesCellColor emptyStateTitle={none.title} />}
+  </PaneStatusBody>;
+}
+type FundPaneProps = ListProps & { fund: string; listing: string; funds: MemberFundsPayload["funds"] | undefined; index: MemberIndex | null };
+/**
+ * The covered list is the server's, so a fund it adds opens without an app update. A symbol it does not hold is a
+ * stock, and the pane lists the covered funds holding it. A list that cannot be read leaves the fund's own load to
+ * report the failure.
+ */
+function CoveredFund({ fund, listing, funds, index, ...props }: FundPaneProps) {
+  // An index no covered fund stands for (^GDAXI) says its members are not covered, before any listing is read.
+  if (index && funds?.length && !coveredFund(funds, fund)) {
+    const text = indexNotCoveredMessage(index, "pane");
+    return <PaneStatusBody subject="index members" empty emptyTitle={text.title} emptyMessage={text.message} />;
+  }
+  if (listing.includes(":") || funds?.length && !coveredFund(funds, fund)) {
+    return <StockFunds key={listing} symbol={listing} {...props} />;
+  }
+  return <FundView key={fund} fund={fund} {...props} />;
+}
+export function MembersPane(props: PaneProps) {
+  const { symbol, ticker } = usePaneTickerIdentity();
+  const [chosen, choose] = usePluginPaneState("fund", "");
+  const requested = symbol ?? chosen;
+  const listing = stockListingInput(requested, ticker?.metadata.exchange);
+  const fund = canonicalFund(requested);
+  const resource = useAsyncResource(loadFunds, { initialData: cachedFunds });
+  const funds = resource.data?.payload.funds;
+  const index = memberIndex(requested);
+  const uncovered = !!fund && !!funds?.length && !coveredFund(funds, fund);
+  usePaneTitle(index && uncovered ? `${index.name} members` : listing.includes(":") ? membersTitle(listing, true) : membersTitle(requested, uncovered));
+  if (!fund) return <FundPicker {...props} choose={choose} />;
+  return <CoveredFund fund={fund} listing={listing} funds={funds} index={index} {...props} />;
+}

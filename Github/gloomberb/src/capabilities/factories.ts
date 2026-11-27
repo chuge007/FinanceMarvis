@@ -1,0 +1,184 @@
+import type { AssetDataProvider, SecFilingItem } from "../types/data-provider";
+import { filingContentPreview } from "../sources/sec-edgar/content";
+import { quoteMetadataFromQuote } from "../market-data/quotes/metadata";
+import { assetDataOperationContract } from "./asset-data-inputs";
+import type { NewsDataProvider } from "../types/capability-route-source";
+import {
+  chartSeriesCatalogOutputSchema,
+  chartSeriesCatalogRequestSchema,
+  chartSeriesResolveOutputSchema,
+  chartSeriesResolveRequestSchema,
+  isValidChartCapabilityId,
+} from "./chart-series";
+import type {
+  AssetDataCapability,
+  CapabilityOperation,
+  ChartSeriesCapability,
+  ChartSeriesProvider,
+  NewsCapability,
+} from "./types";
+
+function op(handler: CapabilityOperation["handler"], kind: CapabilityOperation["kind"] = "read"): CapabilityOperation {
+  return { kind, rendererSafe: true, handler };
+}
+
+function stream(subscribe: CapabilityOperation["subscribe"]): CapabilityOperation {
+  return { kind: "stream", rendererSafe: true, subscribe };
+}
+
+/** Each operation with the input it checks and the summary and input shape `gloom api get` lists (asset-data-inputs.ts). */
+function withAssetDataContracts(operations: Record<string, CapabilityOperation>): Record<string, CapabilityOperation> {
+  return Object.fromEntries(Object.entries(operations).map(([id, operation]) => [id, { ...operation, ...assetDataOperationContract(id) }]));
+}
+
+export function assetDataProvider(provider: AssetDataProvider): AssetDataCapability {
+  return {
+    id: `asset-data.${provider.id}`,
+    sourceId: provider.id,
+    kind: "asset-data",
+    name: provider.name,
+    priority: provider.priority,
+    cachePolicy: provider.cachePolicy,
+    provider,
+    operations: withAssetDataContracts({
+      canProvide: op((input: any) => provider.canProvide?.(input.ticker, input.exchange, input.context) ?? true, "query"),
+      primaryMarketSourceName: op(() => provider.primaryMarketSourceName?.() ?? provider.name, "query"),
+      batchesReads: op((input: any) => provider.batchesReads?.(input.method) ?? false, "query"),
+      getCachedFinancialsForTargets: op((input: any) => provider.getCachedFinancialsForTargets?.(input.targets ?? [], input.options) ?? new Map()),
+      getQuotesBatch: op((input: any) => provider.getQuotesBatch?.(input.targets ?? [], input.options) ?? Promise.resolve([])),
+      getTickerFinancialsBatch: op((input: any) => provider.getTickerFinancialsBatch?.(input.targets ?? [], input.options) ?? Promise.resolve([])),
+      getTickerFinancials: op((input: any) => provider.getTickerFinancials(input.ticker, input.exchange, input.context)),
+      getQuote: op((input: any) => provider.getQuote(input.ticker, input.exchange, input.context)),
+      getQuoteMetadata: op((input: any) => provider.getQuoteMetadata?.(input.ticker, input.exchange, input.context)
+        ?? provider.getQuote(input.ticker, input.exchange, input.context).then(quoteMetadataFromQuote)),
+      getExchangeRate: op((input: any) => provider.getExchangeRate(input.fromCurrency)),
+      search: op((input: any) => provider.search(input.query, input.context), "query"),
+      getSecFilings: op((input: any) => {
+        if (!provider.getSecFilings) throw new Error(`${provider.name} does not provide SEC filings.`);
+        return provider.getSecFilings(input.ticker, input.count, input.exchange, input.context);
+      }, "query"),
+      ...(provider.getSecFilingsPage ? { getSecFilingsPage: op((input: any) =>
+        provider.getSecFilingsPage!(input.ticker, input.query, input.exchange, input.context), "query") } : {}),
+      getHolders: op((input: any) => {
+        if (!provider.getHolders) throw new Error(`${provider.name} does not provide holders.`);
+        return provider.getHolders(input.ticker, input.exchange, input.context);
+      }, "query"),
+      getAnalystResearch: op((input: any) => {
+        if (!provider.getAnalystResearch) throw new Error(`${provider.name} does not provide analyst research.`);
+        return provider.getAnalystResearch(input.ticker, input.exchange, input.context);
+      }, "query"),
+      getCorporateActions: op((input: any) => {
+        if (!provider.getCorporateActions) throw new Error(`${provider.name} does not provide corporate actions.`);
+        return provider.getCorporateActions(input.ticker, input.exchange, input.context);
+      }, "query"),
+      ...(provider.getSplitHistoryBatch ? { getSplitHistoryBatch: op((input: any) =>
+        provider.getSplitHistoryBatch!(input.symbols ?? []), "query") } : {}),
+      ...(provider.getIssuerListings ? { getIssuerListings: op((input: any, { signal }) =>
+        provider.getIssuerListings!(input.symbol, input.exchange, signal ? { signal } : undefined), "query") } : {}),
+      getTickerChanges: op((input: any) => provider.getTickerChanges?.(input.symbol) ?? Promise.resolve(null), "query"),
+      getEarningsCalendar: op((input: any) => {
+        if (!provider.getEarningsCalendar) throw new Error(`${provider.name} does not provide earnings calendar.`);
+        return provider.getEarningsCalendar(input.symbols ?? [], input.context);
+      }, "query"),
+      getSecFilingDocuments: op((input: any) => {
+        if (!provider.getSecFilingDocuments) throw new Error(`${provider.name} does not provide SEC filing documents.`);
+        return provider.getSecFilingDocuments(input.filing);
+      }, "query"),
+      getSecFilingContent: op(async (input, { renderer }) => {
+        if (!provider.getSecFilingContent) throw new Error(`${provider.name} does not provide SEC filing content.`);
+        const { filing } = input as { filing: SecFilingItem };
+        const raw = await provider.getSecFilingContent(filing);
+        return renderer ? raw : filingContentPreview(raw, filing);
+      }, "query"),
+      getArticleSummary: op((input: any) => provider.getArticleSummary(input.url), "query"),
+      getPriceHistory: op((input: any) => provider.getPriceHistory(input.ticker, input.exchange, input.range, input.context), "query"),
+      ...(provider.getPriceHistoryWithMetadata ? { getPriceHistoryWithMetadata: op((input: any) =>
+        provider.getPriceHistoryWithMetadata!(input.ticker, input.exchange, input.range, input.context), "query") } : {}),
+      ...(provider.getPriceHistoryForResolutionWithMetadata ? { getPriceHistoryForResolutionWithMetadata: op((input: any) =>
+        provider.getPriceHistoryForResolutionWithMetadata!(input.ticker, input.exchange, input.bufferRange, input.resolution, input.context), "query") } : {}),
+      ...(provider.getDetailedPriceHistoryWithMetadata ? { getDetailedPriceHistoryWithMetadata: op((input: any) =>
+        provider.getDetailedPriceHistoryWithMetadata!(input.ticker, input.exchange, input.startDate, input.endDate, input.barSize, input.context), "query") } : {}),
+      getPriceHistoryForResolution: op((input: any) => {
+        if (!provider.getPriceHistoryForResolution) throw new Error(`${provider.name} does not provide resolution price history.`);
+        return provider.getPriceHistoryForResolution(input.ticker, input.exchange, input.bufferRange, input.resolution, input.context);
+      }, "query"),
+      getDetailedPriceHistory: op((input: any) => {
+        if (!provider.getDetailedPriceHistory) throw new Error(`${provider.name} does not provide detailed price history.`);
+        return provider.getDetailedPriceHistory(input.ticker, input.exchange, input.startDate, input.endDate, input.barSize, input.context);
+      }, "query"),
+      getChartResolutionSupport: op((input: any) => provider.getChartResolutionSupport?.(input.ticker, input.exchange, input.context) ?? [], "query"),
+      getChartResolutionCapabilities: op((input: any) => provider.getChartResolutionCapabilities?.(input.ticker, input.exchange, input.context) ?? [], "query"),
+      getOptionsChain: op((input: any) => {
+        if (!provider.getOptionsChain) throw new Error(`${provider.name} does not provide options.`);
+        return provider.getOptionsChain(input.ticker, input.exchange, input.expirationDate, input.context);
+      }, "query"),
+      subscribeQuotes: stream((input: any, emit) => {
+        if (!provider.subscribeQuotes) throw new Error(`${provider.name} does not provide quote streaming.`);
+        return provider.subscribeQuotes(input.targets ?? [], (target, quote) => emit({ target, quote }));
+      }),
+    }),
+  };
+}
+
+export function chartSeriesProvider(options: {
+  id: string;
+  name: string;
+  priority?: number;
+  provider: ChartSeriesProvider;
+}): ChartSeriesCapability {
+  if (!isValidChartCapabilityId(options.id)) {
+    throw new Error(`Invalid chart series capability ID "${options.id}".`);
+  }
+  return {
+    id: options.id,
+    kind: "chart-series",
+    name: options.name,
+    priority: options.priority,
+    provider: options.provider,
+    operations: {
+      catalog: {
+        ...op((input: any, ctx) => options.provider.catalog?.({ ...input, signal: ctx.signal }) ?? [], "query"),
+        input: chartSeriesCatalogRequestSchema,
+        output: chartSeriesCatalogOutputSchema,
+      },
+      search: {
+        ...op((input: any, ctx) => options.provider.search?.({ ...input, signal: ctx.signal })
+          ?? options.provider.catalog?.({ ...input, signal: ctx.signal })
+          ?? [], "query"),
+        input: chartSeriesCatalogRequestSchema,
+        output: chartSeriesCatalogOutputSchema,
+      },
+      resolve: {
+        ...op((input: any, ctx) => options.provider.resolve({ ...input, signal: ctx.signal }), "query"),
+        input: chartSeriesResolveRequestSchema,
+        output: chartSeriesResolveOutputSchema,
+      },
+    },
+  };
+}
+
+export function newsProvider(options: {
+  id: string;
+  name: string;
+  priority?: number;
+  provider: NewsDataProvider;
+}): NewsCapability {
+  return {
+    id: `news.${options.id}`,
+    sourceId: options.id,
+    kind: "news",
+    name: options.name,
+    priority: options.priority,
+    provider: options.provider,
+    operations: {
+      supports: op((input: any) => options.provider.supports?.(input.query) ?? true, "query"),
+      getCachedNews: op((input: any) => options.provider.getCachedNews?.(input.query) ?? [], "query"),
+      fetchNews: op((input: any) => options.provider.fetchNews(input.query), "query"),
+      fetchNewsPage: op((input: any) => (
+        options.provider.fetchNewsPage?.(input.query)
+        ?? options.provider.fetchNews(input.query).then((articles) => ({ articles, nextCursor: null }))
+      ), "query"),
+      fetchNewsStory: op((input: any) => options.provider.fetchNewsStory?.(input.storyId) ?? null, "query"),
+    },
+  };
+}

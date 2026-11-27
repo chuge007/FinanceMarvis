@@ -1,0 +1,275 @@
+import { logFailure } from "../utils/log-failure";
+import type { DataProvider } from "../types/data-provider";
+import { quoteTradingExchange } from "../market-data/quotes/metadata";
+import type { TickerRecord } from "../types/ticker";
+import { AmbiguousContractError, AmbiguousTickerError, LISTING_SEARCH_LIMIT, listingChoiceQuery, listingExchange, otherNamesOf, resolveTickerSearch } from "./search";
+import {
+  canonicalExchange,
+  exchangeCodeVenues,
+  isSharedExchangeCode,
+  isUsListingExchange,
+  parsePublicTickerKey,
+  typedExchangeCode,
+} from "../utils/exchanges";
+import { currencyPairSpelling } from "../utils/currency-pair";
+import { savedAbroadForBareSymbol } from "./search/bare-symbol";
+import { parseListingWithdrawal, withdrawalLabel } from "../market-data/quotes/delisting";
+import type { ListingWithdrawal } from "../types/financials";
+import { isRateLimited, isTransientServiceFailure } from "../sources/provider-errors";
+
+export interface ListingStore {
+  loadTicker(symbol: string): Promise<TickerRecord | null>;
+  loadAllTickers(): Promise<TickerRecord[]>;
+}
+
+export interface ListingDeps {
+  store: ListingStore;
+  dataProvider: DataProvider;
+}
+
+export interface ListingVenue {
+  /** Canonical code. */
+  exchange: string;
+  name: string;
+  /**
+   * The listing's own symbol there, when search lists it under another
+   * spelling than the one asked for: BP for `BP.` (London's code for it).
+   */
+  symbol?: string;
+  /** The exchange withdrew the listing (Hang Seng Bank's 0011 on HKEX): it is on record, and nothing trades there. */
+  withdrawal?: ListingWithdrawal;
+  /**
+   * The company the line belongs to, as the data service identifies it: two
+   * venues are different companies only when their ids differ, however each
+   * names the company (DHL Group AG on Xetra, Deutsche Post AG in Vienna).
+   */
+  companyId?: string;
+  /** The data service marks the line as its company's home line: its main listing. */
+  home?: true;
+  /**
+   * The other names the line's company answers to, as the data service sends
+   * them (a former name, a trade name): DHL Group's rows carry "Deutsche Post
+   * AG", the name it had, which a venue that never renamed its line still shows.
+   */
+  aliases?: string[];
+}
+
+/** A search row's company id and home mark, as a venue carries them. */
+function identityOf(companyId: unknown, home: boolean, aliases: readonly string[] = []): Pick<ListingVenue, "companyId" | "home" | "aliases"> {
+  return {
+    ...typeof companyId === "string" && companyId ? { companyId } : {},
+    ...home ? { home: true as const } : {},
+    ...aliases.length > 0 ? { aliases: [...aliases] } : {},
+  };
+}
+
+/** A search row's name, and its withdrawal with the day it went beside the name, as a choice between listings names it. */
+function withdrawnOf(name: string, value: unknown): Pick<ListingVenue, "name" | "withdrawal"> {
+  const withdrawal = parseListingWithdrawal(value);
+  return withdrawal
+    ? { name: [name, withdrawalLabel({ ...withdrawal, reason: null })].filter(Boolean).join(" · "), withdrawal }
+    : { name };
+}
+
+/** The venue's own symbol, when it is not `asked` (ignoring case). */
+function ownSymbol(listed: string | undefined, asked: string): { symbol: string } | Record<string, never> {
+  const symbol = listed?.trim().toUpperCase();
+  return symbol && symbol !== asked.trim().toUpperCase() ? { symbol } : {};
+}
+
+/**
+ * The venues a symbol trades on and the company on each, from the same
+ * listing picker the command bar opens for `SAN:`. This is the one venue list
+ * every command names; whether a venue it leaves out trades the symbol is the
+ * listing's own quote's to say (`quotedOnVenue`).
+ */
+export async function listingVenues(
+  symbol: string,
+  { store, dataProvider }: ListingDeps,
+  /**
+   * Throw a search failure that says nothing of the symbol (a busy moment, the
+   * request limit, no connection) rather than answer that no venue lists it.
+   */
+  { failTransient = false }: { failTransient?: boolean } = {},
+): Promise<ListingVenue[]> {
+  const query = `${symbol}:`;
+  if (!listingChoiceQuery(query)) return [];
+  const tickers = new Map((await store.loadAllTickers()).map((ticker) => [ticker.metadata.ticker.toUpperCase(), ticker] as const));
+  let venues: ListingVenue[];
+  try {
+    const resolved = await resolveTickerSearch({
+      query, activeTicker: null, tickers, dataProvider, searchContext: { limit: LISTING_SEARCH_LIMIT },
+    });
+    const only = !resolved ? null
+      : resolved.kind === "local" ? { exchange: resolved.ticker.metadata.exchange, name: resolved.ticker.metadata.name }
+      : {
+        exchange: resolved.result.exchange === "SMART" ? resolved.result.primaryExchange ?? "" : resolved.result.exchange || resolved.result.primaryExchange || "",
+        ...withdrawnOf(resolved.result.name, resolved.result.withdrawal),
+        ...ownSymbol(parsePublicTickerKey(resolved.result.symbol).symbol, symbol),
+        ...identityOf(resolved.result.companyId, resolved.result.homeListing === true, otherNamesOf(resolved.result)),
+      };
+    venues = only?.exchange ? [{ ...only, exchange: canonicalExchange(only.exchange) }] : [];
+  } catch (error) {
+    if (failTransient && (isTransientServiceFailure(error) || isRateLimited(error))) throw error;
+    // One listing settles the picker; several are its choices.
+    if (!(error instanceof AmbiguousTickerError) || error instanceof AmbiguousContractError) return [];
+    venues = error.listings.flatMap((listing) => {
+      const key = parsePublicTickerKey(listing);
+      return key.exchange ? [{
+        exchange: key.exchange, name: error.listingNames[listing] ?? "", ...ownSymbol(key.symbol, symbol),
+        ...(error.listingWithdrawals[listing] ? { withdrawal: error.listingWithdrawals[listing] } : {}),
+        ...identityOf(error.listingCompanies[listing], error.listingHomes.includes(listing), error.listingAliases[listing]),
+      }] : [];
+    });
+  }
+  return venues.filter((venue, index) => venues.findIndex((other) => other.exchange === venue.exchange) === index);
+}
+
+/**
+ * The venue a bare symbol goes to, resolved as `quote SYM` and adding the
+ * symbol to a watchlist resolve it: the one listing search finds, or, for a
+ * symbol several venues list, the one its own quote prices (the US exchanges
+ * share one symbol, so AAPL is its NASDAQ line and not the ones abroad).
+ * Empty when search lists nothing for the symbol. A symbol whose listings no
+ * quote settles throws `AmbiguousTickerError`, which names them. Asked for a
+ * symbol no saved row has a venue for; a saved row's venue is the user's.
+ */
+export async function bareListingExchange(symbol: string, { dataProvider }: Pick<ListingDeps, "dataProvider">): Promise<string> {
+  const resolved = await resolveTickerSearch({
+    query: symbol, activeTicker: null, tickers: new Map(), dataProvider, searchContext: { limit: LISTING_SEARCH_LIMIT },
+  });
+  if (!resolved) return "";
+  return canonicalExchange(resolved.kind === "local" ? resolved.ticker.metadata.exchange : listingExchange(resolved.result));
+}
+
+/**
+ * Whether the listing's own quote prices it on a venue abroad, as `quote
+ * SYM:EXCH` reads it. Search can leave a venue out (CAR's ASX line); a quote
+ * there settles that it trades. The US exchanges share one symbol, so a quote
+ * named for any of them says only that the symbol has a US line: there,
+ * search's venues stand.
+ */
+export async function quotedOnVenue(listing: { symbol: string; exchange: string }, { dataProvider }: Pick<ListingDeps, "dataProvider">): Promise<boolean> {
+  if (isUsListingExchange(listing.exchange)) return false;
+  try {
+    const quote = await dataProvider.getQuote(`${listing.symbol}:${listing.exchange}`, listing.exchange);
+    // A KOSDAQ code asked for on KRX is answered as KRX from its KOSDAQ line: it trades on KOSDAQ only.
+    return Number.isFinite(quote.price) && quote.price !== 0 && quoteTradingExchange(quote) === listing.exchange;
+  } catch (error) {
+    logFailure("tickers-listing-venues", "Could not verify listing venue")(error);
+    return false;
+  }
+}
+
+/**
+ * A currency pair typed the way a security could also be written, USD-NGN or
+ * USDNGN, read as the pair the service lists (USDNGN=X) when search, as the
+ * command bar reads the same text, finds no listing under those letters: MNT-USD
+ * stays the coin. Null for any other text, and for a listing.
+ */
+export async function readAmbiguousCurrencyPair(typed: string, { store, dataProvider }: ListingDeps): Promise<string | null> {
+  const pair = currencyPairSpelling(typed);
+  if (!pair?.ambiguous) return null;
+  try {
+    const tickers = new Map((await store.loadAllTickers()).map((ticker) => [ticker.metadata.ticker.toUpperCase(), ticker] as const));
+    const resolved = await resolveTickerSearch({ query: typed, activeTicker: null, tickers, dataProvider });
+    const exchange = !resolved ? undefined : resolved.kind === "local" ? resolved.ticker.metadata.exchange : resolved.result.exchange;
+    const listed = resolved ? currencyPairSpelling(resolved.symbol, exchange) : null;
+    return listed && !listed.ambiguous && listed.symbol === pair.symbol ? pair.symbol : null;
+  } catch (error) {
+    logFailure("tickers-listing-venues", "Could not resolve currency pair listing")(error);
+    return null;
+  }
+}
+
+/** The row a bare symbol stands for (`savedRowOfBareSymbol`). */
+export interface BareSymbolRow {
+  /** The saved row, or null when the listing it stands for is not saved yet. */
+  row: TickerRecord | null;
+  /**
+   * The US venue of the listing a row abroad saved under the bare key gave
+   * way to: NYSE for SAN, whose bare key holds Sanofi's Euronext Paris line
+   * while SAN in New York is Banco Santander. A command reads the symbol on
+   * it, so nothing that reads the store by the bare key draws the row abroad.
+   */
+  usExchange?: string;
+}
+
+/**
+ * The saved row a bare symbol stands for, read as the command bar reads it
+ * (`savedAbroadForBareSymbol`): a row abroad saved under the bare key (SHEL on
+ * LSE, saved from SHEL.L) gives way to the symbol's US listing that trades,
+ * the row of it saved under another key, or null when that listing is not
+ * saved yet, with that listing's venue. The row abroad stands when the symbol
+ * lists on no US exchange, its US line stopped trading (SOL saved on ASX,
+ * beside Emeren Group's NYSE line), or search could not say.
+ */
+export async function savedRowOfBareSymbol(symbol: string, saved: TickerRecord | null, { store, dataProvider }: ListingDeps): Promise<BareSymbolRow> {
+  if (!saved || !savedAbroadForBareSymbol(symbol, saved)) return { row: saved };
+  try {
+    const tickers = new Map((await store.loadAllTickers()).map((ticker) => [ticker.metadata.ticker.toUpperCase(), ticker] as const));
+    const resolved = await resolveTickerSearch({ query: symbol, activeTicker: null, tickers, dataProvider });
+    if (!resolved || (resolved.kind === "local" && resolved.ticker === saved)) return { row: saved };
+    const row = resolved.kind === "local" ? resolved.ticker : null;
+    const exchange = canonicalExchange(resolved.kind === "local" ? resolved.ticker.metadata.exchange : listingExchange(resolved.result));
+    return { row, ...isUsListingExchange(exchange) ? { usExchange: exchange } : {} };
+  } catch (error) {
+    // US listings no quote settles between: the lookup asks which, as with nothing saved.
+    if (error instanceof AmbiguousTickerError && !(error instanceof AmbiguousContractError)) return { row: null };
+    logFailure("tickers-listing-venues", "Could not resolve bare symbol")(error);
+    return { row: saved };
+  }
+}
+
+/** What a typed code that names several venues (7203:TSE) was read as. */
+export type SharedCodeReading =
+  /** The one of the code's venues the symbol trades on. */
+  | { kind: "venue"; exchange: string }
+  /** The symbol trades on several of them (TSE, and DUAL in Toronto and Tokyo). */
+  | { kind: "several"; venues: string[] }
+  /** The symbol trades on none of them; `venues` are where it does. */
+  | { kind: "none"; venues: ListingVenue[] }
+  /** Neither search nor a quote knows the symbol. */
+  | { kind: "unknown" };
+
+/**
+ * A listing typed with a code that names several venues (TSE: Tokyo or
+ * Toronto, KRX: KOSPI or KOSDAQ, EURONEXT: Paris, Amsterdam and the others),
+ * read as the one of them its symbol trades on: the venues the `7203:` picker
+ * lists, else the one its own quote prices (search can leave a venue out).
+ * This is the one reading of a typed shared code: commands, the command bar,
+ * links and chat all ask it. Broker data that arrives with TSE is Toronto and
+ * never comes here.
+ */
+export async function readSharedCode(symbol: string, code: string, deps: ListingDeps): Promise<SharedCodeReading> {
+  const meanings = exchangeCodeVenues(code);
+  const venues = await listingVenues(symbol, deps).catch(logFailure("tickers-listing-venues", "Could not load listing venues", []));
+  let traded = meanings.filter((venue) => venues.some((entry) => entry.exchange === venue));
+  if (traded.length === 0) {
+    const quoted = await Promise.all(meanings.map((exchange) => quotedOnVenue({ symbol, exchange }, deps)));
+    traded = meanings.filter((_venue, index) => quoted[index]);
+  }
+  if (traded.length === 1) return { kind: "venue", exchange: traded[0]! };
+  if (traded.length > 1) return { kind: "several", venues: traded };
+  return venues.length > 0 ? { kind: "none", venues } : { kind: "unknown" };
+}
+
+/**
+ * A typed listing key with a shared code read as the venue its symbol trades
+ * on: 7203:TSE is 7203:JPX, 247540:KRX is 247540:KOSDAQ, SAN:EURONEXT is
+ * SAN:EPA. A symbol on several of them is a choice (`AmbiguousTickerError`,
+ * which opens the listing picker). Any other key, and one nothing could read,
+ * comes back as typed.
+ */
+export async function settleTypedListingKey(typed: string, deps: ListingDeps): Promise<string> {
+  const key = typed.trim().toUpperCase();
+  const code = typedExchangeCode(key);
+  if (!isSharedExchangeCode(code)) return typed;
+  const { symbol } = parsePublicTickerKey(key);
+  const reading = await readSharedCode(symbol, code, deps);
+  if (reading.kind === "venue") return `${symbol}:${reading.exchange}`;
+  if (reading.kind === "several") {
+    throw new AmbiguousTickerError(key, reading.venues.map((exchange) => `${symbol}:${exchange}`));
+  }
+  return typed;
+}

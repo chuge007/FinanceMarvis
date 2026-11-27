@@ -1,0 +1,192 @@
+name: Release
+
+# Releases a version when its release PR is merged into main. A release PR has the head branch
+# feature/vX.Y.Z; any other PR is ignored. The release has three stages:
+#
+# 1. Prepare: checks the release (versions, notes, tag, approval), builds the package and validates the
+#    bundle manifest from the merge commit. Nothing is published yet. Prepare also runs on an open
+#    release PR as a dry run, so a release that isn't ready shows before the merge; the built files
+#    are kept with the run.
+# 2. Publish: waits for an approval on the "release" environment, then publishes the package to PyPI,
+#    locks and builds financetoolkit.mcpb against the published version, creates the tag vX.Y.Z and the
+#    release "FinanceToolkit vX.Y.Z" with the PR description as its text and attaches the bundle.
+# 3. MCP Registry: publishes server.json.
+#
+# Every publishing step skips what already exists (a version already on PyPI, an existing tag or
+# release) and replaces the attached bundle, so re-running a failed run continues where it stopped.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited, closed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+# One run per PR at a time; a newer dry run replaces an older one, a release is never cancelled.
+concurrency:
+  group: release-${{ github.event.pull_request.number }}
+  cancel-in-progress: ${{ github.event.action != 'closed' }}
+
+jobs:
+  prepare:
+    name: Prepare
+    # Open or merged PRs from a branch of this repository; the exact branch name is checked below.
+    if: >-
+      (github.event.action != 'closed' || github.event.pull_request.merged == true) &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      startsWith(github.event.pull_request.head.ref, 'feature/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read # to check that the "release" environment requires an approval
+    outputs:
+      release: ${{ steps.release.outputs.release }}
+      version: ${{ steps.release.outputs.version }}
+      sha: ${{ steps.release.outputs.sha }}
+    steps:
+      # The commit on main once merged; for an open PR, its test merge with main.
+      - name: Checkout the merge commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.merged && github.event.pull_request.merge_commit_sha || github.sha }}
+          fetch-depth: 0
+
+      - name: Check the release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/release.py prepare
+
+      - name: Install uv
+        if: steps.release.outputs.release == 'true'
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        with:
+          # A release is built without a cache that other workflow runs can write to.
+          enable-cache: false
+
+      - name: Build the package
+        if: steps.release.outputs.release == 'true'
+        run: uv build --out-dir dist
+
+      - name: Set up Node.js
+        if: steps.release.outputs.release == 'true'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+
+      # The bundle is locked and built in Publish, once PyPI serves the version it pins.
+      - name: Validate the bundle manifest
+        if: steps.release.outputs.release == 'true'
+        run: npx --yes @anthropic-ai/mcpb@2.1.2 validate financetoolkit/mcp_server/mcpb/manifest.json
+
+      - name: Upload the release files
+        if: steps.release.outputs.release == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release
+          path: |
+            dist/
+            financetoolkit/mcp_server/mcpb/
+            release-notes.md
+          if-no-files-found: error
+          # Keeps the bundle's .mcpbignore.
+          include-hidden-files: true
+
+  publish:
+    name: Publish
+    needs: prepare
+    if: github.event.action == 'closed' && needs.prepare.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # The environment requires an approval before this job starts.
+    environment:
+      name: release
+      url: https://github.com/${{ github.repository }}/releases/tag/v${{ needs.prepare.outputs.version }}
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      SHA: ${{ needs.prepare.outputs.sha }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Download the release files
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        with:
+          enable-cache: false
+
+      # PyPI's API token comes from the PYPI_TOKEN secret, and this job only runs once the "release"
+      # environment approves it. --check-url skips files PyPI already has, so a re-run doesn't fail on them.
+      - name: Publish to PyPI
+        env:
+          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_TOKEN }}
+        run: uv publish --trusted-publishing never --check-url https://pypi.org/simple/ dist/*
+
+      # The bundle and the MCP Registry point people at this version, so wait until PyPI serves it.
+      - name: Wait for the version on PyPI
+        run: |
+          for attempt in $(seq 1 60); do
+            if curl -sf "https://pypi.org/pypi/financetoolkit/$VERSION/json" > /dev/null; then
+              echo "financetoolkit $VERSION is on PyPI."
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::financetoolkit $VERSION did not appear on PyPI within 10 minutes."
+          exit 1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+
+      # The bundle installs financetoolkit[mcp]==X.Y.Z from PyPI when it starts. Its uv.lock fixes every
+      # dependency at the versions current at release time, so a later major release of one (such as mcp
+      # 2.x, which dropped mcp.server.fastmcp) can't break an installed bundle. PyPI's index can trail its
+      # JSON API by a few minutes, so the lock is retried until it resolves the new version.
+      - name: Lock and build financetoolkit.mcpb
+        working-directory: financetoolkit/mcp_server/mcpb
+        run: |
+          for attempt in $(seq 1 30); do
+            if uv lock --refresh-package financetoolkit; then
+              break
+            fi
+            sleep 10
+          done
+          if ! grep -A1 '^name = "financetoolkit"$' uv.lock | grep -qx "version = \"$VERSION\""; then
+            echo "::error::The bundle's uv.lock does not hold financetoolkit $VERSION."
+            exit 1
+          fi
+          mkdir -p "$GITHUB_WORKSPACE/bundle"
+          npx --yes @anthropic-ai/mcpb@2.1.2 pack . "$GITHUB_WORKSPACE/bundle/financetoolkit.mcpb"
+
+      - name: Create the tag and the release
+        run: |
+          if gh release view "v$VERSION" > /dev/null 2>&1; then
+            gh release edit "v$VERSION" --title "FinanceToolkit v$VERSION" --notes-file release-notes.md
+            gh release upload "v$VERSION" bundle/financetoolkit.mcpb --clobber
+          else
+            gh release create "v$VERSION" bundle/financetoolkit.mcpb \
+              --target "$SHA" \
+              --title "FinanceToolkit v$VERSION" \
+              --notes-file release-notes.md \
+              --latest
+          fi
+
+  mcp-registry:
+    name: MCP Registry
+    needs: [prepare, publish]
+    # A release created with the workflow token doesn't start other workflows, so the registry
+    # workflow is called from here.
+    uses: ./.github/workflows/mcp_registry.yml
+    with:
+      ref: v${{ needs.prepare.outputs.version }}
+    permissions:
+      contents: read
+      id-token: write

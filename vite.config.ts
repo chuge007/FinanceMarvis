@@ -1,17 +1,16 @@
-import { defineConfig, type Plugin, type UserConfig } from 'vite'
+import { defineConfig, type Plugin, type UserConfig, type ProxyOptions } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import https from 'node:https'
 import net from 'node:net'
 import { HttpsProxyAgent } from 'https-proxy-agent'
 import { createAiHandler } from './server/ai-gateway.mjs'
+import { UPSTREAMS } from './server/upstream/registry.mjs'
 
 // ConvexTrade / Yahoo / CBOE 对本机直连有地区限制：直连 Yahoo 返回 403，
 // 经本机 7897 返回 200。Node 不会自动使用 Windows 系统代理，所以这里显式探测。
 const CONVEX_UPSTREAM = 'https://convextrade.com/api/public'
 const PROXY_PORTS = [7897, 7890, 10809, 1080]
-const BROWSER_UA =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36'
 
 let outboundProxy = ''
 let proxySource: 'env' | 'detected' | 'none' = 'none'
@@ -114,7 +113,53 @@ function convexProxyViaLocalPlugin(proxyUrl: string): Plugin {
   }
 }
 
-// 内置 AI 网关（dev）：与生产 server/proxy.mjs 共用 server/ai-gateway.mjs，
+/**
+ * dev 内置数据服务：`npm run dev` 一条命令就能用 /api/v1。
+ *
+ * 复用 server/services.mjs 的同一套装配，不另写一份 dev 逻辑（这正是改造前
+ * 三处路由漂移的根源）。不想在 dev 里跑后端时设 MARVIS_NO_API=1。
+ */
+function dataApiPlugin(): Plugin {
+  let services: any = null
+  return {
+    name: 'marvis-data-api',
+    // 只在 dev server 生效：build 时不该启动调度器去抓数据
+    apply: 'serve',
+    async configureServer(server) {
+      if (process.env.MARVIS_NO_API === '1') {
+        console.log('[data] MARVIS_NO_API=1，dev 不启动数据服务')
+        return
+      }
+      try {
+        const { loadConfig } = await import('./server/config.mjs')
+        const { createTransport } = await import('./server/upstream/transport.mjs')
+        const { createServices } = await import('./server/services.mjs')
+        const cfg = loadConfig({ distDir: 'dist' })
+        const transport = createTransport({ ports: cfg.proxyPorts })
+        await transport.init()
+        services = await createServices({ config: cfg, transport, log: (m: string) => console.log(m) })
+        services.scheduler.start()
+        console.log(`[data] dev 数据服务已挂载（${cfg.profile}，库 ${cfg.dataDir}）`)
+      } catch (err) {
+        console.warn('[data] dev 数据服务启动失败，/api/v1 将返回 503：', err)
+        return
+      }
+
+      server.middlewares.use((req, res, next) => {
+        const pathname = (req.url ?? '/').split('?')[0]
+        if (!pathname.startsWith('/api/')) return next()
+        void services.apiRouter
+          .dispatch(req, res, pathname, { config: {}, log: () => undefined })
+          .then((handled: boolean) => {
+            if (!handled) next()
+          })
+          .catch(next)
+      })
+    },
+  }
+}
+
+// 内置 AI 网关（dev）：与生产 server/app.mjs 共用 server/ai-gateway.mjs，
 // 让 `npm run dev` 下前端调 /ai/chat 也能正常转发，不必额外起后端。
 function aiGatewayPlugin(): Plugin {
   const handleAi = createAiHandler({ log: (msg: string) => console.log(msg) })
@@ -132,6 +177,25 @@ function aiGatewayPlugin(): Plugin {
   }
 }
 
+/**
+ * dev 代理表由注册表生成，不再手写 14 条。
+ * 新增数据源只需在 server/upstream/registry.mjs 加一条，dev / 生产 / exe 同时生效。
+ */
+function buildProxyTable(agent: HttpsProxyAgent<string> | undefined): Record<string, ProxyOptions> {
+  const table: Record<string, ProxyOptions> = {}
+  for (const u of UPSTREAMS) {
+    if (u.devManual) continue
+    table[u.prefix] = {
+      target: u.origin,
+      changeOrigin: true,
+      rewrite: (p: string) => p.replace(new RegExp(`^${u.prefix}`), ''),
+      agent: u.viaProxy ? agent : undefined,
+      headers: u.headers,
+    }
+  }
+  return table
+}
+
 export default defineConfig(async (): Promise<UserConfig> => {
   const detected = await detectProxy()
   outboundProxy = detected.url
@@ -140,7 +204,7 @@ export default defineConfig(async (): Promise<UserConfig> => {
 
   console.log(
     outboundProxy
-      ? `[proxy] Yahoo / CBOE / Convex → ${outboundProxy}（${proxySource}）`
+      ? `[proxy] ${UPSTREAMS.filter((u) => u.viaProxy).length} 个出海源 → ${outboundProxy}（${proxySource}）`
       : '[proxy] 未检测到本机出海代理：Yahoo/CBOE/Convex 走直连（可能有地区限制）',
   )
 
@@ -150,122 +214,11 @@ export default defineConfig(async (): Promise<UserConfig> => {
       tailwindcss(),
       proxyStatusPlugin(outboundProxy, proxySource),
       convexProxyViaLocalPlugin(outboundProxy),
+      dataApiPlugin(),
       aiGatewayPlugin(),
     ],
     server: {
-      proxy: {
-        // 东方财富快讯接口无 CORS 头，前端直连会被浏览器拦截，
-        // 经本域代理转发规避跨域（dev 环境有效；生产构建需自建相同转发后端）。
-        '/eastmoney-news': {
-          target: 'https://np-listapi.eastmoney.com',
-          changeOrigin: true,
-          rewrite: (p) => p.replace(/^\/eastmoney-news/, ''),
-          // 东财接口按 Referer 白名单做 WAF 校验（localhost 直连返回 567 拦截页）。
-          headers: { Referer: 'https://www.eastmoney.com/', Origin: 'https://www.eastmoney.com' },
-        },
-        // Yahoo Finance 行情/K线接口对浏览器直连会 449 反爬或跨域拦截。
-        // headers 必须在转发前写入：Vite 8 的 proxyReq 事件触发时 headersSent 已为 true，
-        // 再 setHeader 会抛 ERR_HTTP_HEADERS_SENT（实测），所以用静态 headers。
-        '/yahoo': {
-          target: 'https://query1.finance.yahoo.com',
-          changeOrigin: true,
-          rewrite: (p) => p.replace(/^\/yahoo/, ''),
-          agent,
-          headers: {
-            'User-Agent': BROWSER_UA,
-            Referer: 'https://finance.yahoo.com/',
-            Origin: 'https://finance.yahoo.com',
-          },
-        },
-        // query1 偶发 403 时的同源重试通道。前缀不能以 /yahoo 开头，否则会被上面的路由先匹配。
-        '/yahoo-alt': {
-          target: 'https://query2.finance.yahoo.com',
-          changeOrigin: true,
-          rewrite: (p) => p.replace(/^\/yahoo-alt/, ''),
-          agent,
-          headers: {
-            'User-Agent': BROWSER_UA,
-            Referer: 'https://finance.yahoo.com/',
-            Origin: 'https://finance.yahoo.com',
-          },
-        },
-        // CBOE 官网日度市场统计页面内嵌 JSON，无浏览器直连 CORS。
-        '/cboe': {
-          target: 'https://www.cboe.com',
-          changeOrigin: true,
-          rewrite: (p) => p.replace(/^\/cboe/, ''),
-          agent,
-          headers: {
-            'User-Agent': BROWSER_UA,
-            Referer: 'https://www.cboe.com/',
-            Origin: 'https://www.cboe.com',
-          },
-        },
-        // 东财 K线/行情接口：国内站点，直连，不走海外代理。
-        '/eastmoney-kline': {
-          target: 'https://push2his.eastmoney.com',
-          changeOrigin: true,
-          rewrite: (p) => p.replace(/^\/eastmoney-kline/, ''),
-          headers: { Referer: 'https://quote.eastmoney.com/', Origin: 'https://quote.eastmoney.com' },
-        },
-        '/eastmoney-quote': {
-          target: 'https://push2.eastmoney.com',
-          changeOrigin: true,
-          rewrite: (p) => p.replace(/^\/eastmoney-quote/, ''),
-          headers: { Referer: 'https://quote.eastmoney.com/', Origin: 'https://quote.eastmoney.com' },
-        },
-        // 腾讯行业板块榜：东财被网络重置时的真实替代源（国内站点，直连）。
-        '/tencent-rank': {
-          target: 'https://proxy.finance.qq.com',
-          changeOrigin: true,
-          rewrite: (p) => p.replace(/^\/tencent-rank/, ''),
-          headers: { 'User-Agent': BROWSER_UA, Referer: 'https://gu.qq.com/' },
-        },
-        // 新浪板块：第二兜底（GBK 页面，前端用 TextDecoder('gbk') 解码）。
-        '/sina-sector': {
-          target: 'https://vip.stock.finance.sina.com.cn',
-          changeOrigin: true,
-          rewrite: (p) => p.replace(/^\/sina-sector/, ''),
-          headers: { 'User-Agent': BROWSER_UA, Referer: 'https://finance.sina.com.cn/' },
-        },
-        // 台湾证交所开放数据：台股月营收汇总表（JSON）
-        '/twse': {
-          target: 'https://openapi.twse.com.tw',
-          changeOrigin: true,
-          rewrite: (p) => p.replace(/^\/twse/, ''),
-          headers: { 'User-Agent': BROWSER_UA, Accept: 'application/json' },
-        },
-        // FRED 图表 CSV 直链：免 key，返回 text/csv。
-        // 直连失败时客户端会再试 /fred-proxy（走本机出海代理）；两个通道都可能被地区限制。
-        '/fred': {
-          target: 'https://fred.stlouisfed.org',
-          changeOrigin: true,
-          rewrite: (p) => p.replace(/^\/fred/, ''),
-          headers: { 'User-Agent': BROWSER_UA, Referer: 'https://fred.stlouisfed.org/' },
-        },
-        '/fred-proxy': {
-          target: 'https://fred.stlouisfed.org',
-          changeOrigin: true,
-          rewrite: (p) => p.replace(/^\/fred-proxy/, ''),
-          agent,
-          headers: { 'User-Agent': BROWSER_UA, Referer: 'https://fred.stlouisfed.org/' },
-        },
-        // 美国财政部官方收益率曲线 CSV：FRED/Convex 不可达时的真实利率兜底（直连可用）。
-        '/treasury': {
-          target: 'https://home.treasury.gov',
-          changeOrigin: true,
-          rewrite: (p) => p.replace(/^\/treasury/, ''),
-          headers: { 'User-Agent': BROWSER_UA, Referer: 'https://home.treasury.gov/' },
-        },
-        // 美联储官网 FOMC 日历页：公开页面，国内直连即可。
-        '/fed': {
-          target: 'https://www.federalreserve.gov',
-          changeOrigin: true,
-          rewrite: (p) => p.replace(/^\/fed/, ''),
-          headers: { 'User-Agent': BROWSER_UA, Referer: 'https://www.federalreserve.gov/' },
-        },
-        // ConvexTrade 宏观序列：由 convexProxyViaLocalPlugin 的本地代理中间件处理（见上方插件）。
-      },
+      proxy: buildProxyTable(agent),
     },
   }
 })

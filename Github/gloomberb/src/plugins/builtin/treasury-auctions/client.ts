@@ -1,0 +1,271 @@
+import { MISSING_VALUE } from "../../../utils/format";
+import { ApiRequestError } from "../../../api-client/errors";
+import { createThrottledFetch } from "../../../utils/throttled-fetch";
+import type { TreasuryAuction, TreasuryAuctionRaw } from "./types";
+
+const BASE_URL =
+  "https://api.fiscaldata.treasury.gov/services/api/fiscal_service/v1/accounting/od/auctions_query";
+
+/** The endpoint returns 114 columns per row; ask only for what the pane renders. */
+const FIELDS = [
+  "cusip",
+  "security_type",
+  "security_term",
+  "auction_date",
+  "high_investment_rate",
+  "high_yield",
+  "avg_med_yield",
+  "low_yield",
+  "high_price",
+  "low_price",
+  "avg_med_price",
+  "bid_to_cover_ratio",
+  "comp_accepted",
+  "indirect_bidder_accepted",
+  "direct_bidder_accepted",
+  "primary_dealer_accepted",
+  "total_accepted",
+  "offering_amt",
+  "inflation_index_security",
+  "floating_rate",
+  "high_discnt_margin",
+  "high_discnt_rate",
+  "avg_med_discnt_rate",
+  "low_discnt_rate",
+].join(",");
+
+export const AUCTION_HISTORY_DAYS = 120;
+/** The ALL window: every auction Fiscal Data holds, from its first. */
+export const AUCTION_HISTORY_ALL = "all";
+/** A history window: days back from today, or ALL. */
+export type AuctionHistoryWindow = number | typeof AUCTION_HISTORY_ALL;
+/** The first auction in Fiscal Data's auction history. */
+export const AUCTION_HISTORY_START = "1979-10-31";
+
+/**
+ * The feed holds roughly 400 auctions a year, so the default 120 days is one
+ * page and a 10-year window (~4,000 auctions) is four, a few seconds inside
+ * the throttle.
+ */
+const AUCTION_PAGE_SIZE = 1000;
+/**
+ * The archive behind ALL (1979 to last year, ~10,400 auctions) walks in pages
+ * of 5,000: three requests of about 3 MB and 5 seconds each, half Fiscal
+ * Data's 10,000-row page limit, so each stays well inside the request timeout.
+ */
+export const AUCTION_ARCHIVE_PAGE_SIZE = 5000;
+/** Fiscal Data answers 400 to a larger page. */
+const FISCAL_DATA_MAX_PAGE_SIZE = 10_000;
+/** Three times the longest walk's pages; the bound only exists so bad metadata cannot loop. */
+export const AUCTION_MAX_PAGES = 12;
+export const EMPTY_AUCTION_HISTORY = Symbol("empty auction history");
+export type AuctionHistory = TreasuryAuction[] | typeof EMPTY_AUCTION_HISTORY;
+
+/** One walk: auctions on or after `from` and, when set, before `before`. */
+export interface AuctionQuery {
+  from: string;
+  before?: string;
+  pageSize?: number;
+}
+
+// A query that has not answered in 15 s does not answer the second time
+// either: the source stalls for a minute at a time. The board then stands on
+// TreasuryDirect and the saved copy (cache.ts) at once, not after 48 s of retries.
+const TREASURY_FETCH = createThrottledFetch({
+  requestsPerMinute: 20,
+  maxRetries: 2,
+  retryTimeouts: false,
+  timeoutMs: 15_000,
+  backoffBaseMs: 800,
+  defaultHeaders: { Accept: "application/json" },
+});
+
+function isoDateDaysAgo(days: number, now = Date.now()): string {
+  return new Date(now - days * 86_400_000).toISOString().slice(0, 10);
+}
+
+/** The walk for a window of the last `days` days. */
+export function auctionWindowQuery(days: number, now = Date.now()): AuctionQuery {
+  return { from: isoDateDaysAgo(days, now) };
+}
+
+/**
+ * Where ALL splits its archive from its recent auctions: 1 January of last
+ * year (UTC). Results that old do not change, so the archive caches for weeks
+ * under this date and the recent side, at most two years, refreshes hourly.
+ */
+export function auctionArchiveBoundary(now = Date.now()): string {
+  return `${new Date(now).getUTCFullYear() - 1}-01-01`;
+}
+
+/** `page[size]` brackets are percent-encoded; the API rejects some proxies otherwise. */
+export function buildAuctionsUrl(query: AuctionQuery, page = 1): string {
+  const filters = [`auction_date:gte:${query.from}`, ...(query.before ? [`auction_date:lt:${query.before}`] : [])];
+  const params = [
+    `fields=${FIELDS}`,
+    `filter=${filters.join(",")}`,
+    // The CUSIP breaks ties inside a date, so a page boundary that falls in the
+    // middle of a day's auctions cannot repeat or skip one on the next page.
+    "sort=-auction_date,-cusip",
+    `page%5Bsize%5D=${Math.min(query.pageSize ?? AUCTION_PAGE_SIZE, FISCAL_DATA_MAX_PAGE_SIZE)}`,
+    `page%5Bnumber%5D=${page}`,
+  ];
+  return `${BASE_URL}?${params.join("&")}`;
+}
+
+/** Fiscal Data reports the page count as `meta["total-pages"]`. */
+export function totalPages(body: unknown, page = 1): number {
+  const { data, meta } = (body as { data?: unknown; meta?: Record<string, unknown> } | null) ?? {};
+  const value = meta?.["total-pages"];
+  if (page === 1 && value === 0 && meta?.count === 0 && meta["total-count"] === 0
+    && Array.isArray(data) && data.length === 0) return 0;
+  const pages = typeof value === "number" || (typeof value === "string" && value.trim())
+    ? Number(value) : NaN;
+  if (!Number.isSafeInteger(pages) || pages < 1) {
+    throw new Error(`Treasury auction page ${page} has an invalid page count`);
+  }
+  return pages;
+}
+
+/** Fiscal Data sends missing metrics as the literal string "null". */
+function toNumber(value: string | undefined | null): number | null {
+  if (value == null || value === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+/**
+ * A high and low in the order the auction cleared them. Fiscal Data has some
+ * early rows the other way round (the 30-year bond of 1982-02-04: high 14.47%,
+ * median 14.56%, low 14.61%; about 420 bills of 1979-83): a high below its low
+ * is read swapped when the median sits between them, and dropped when it does
+ * not, so neither reaches the stop-out as a negative spread. Prices follow a
+ * swapped pair. A bill's investment rate restates its high discount rate as
+ * the source had it, so once that pair is swapped or dropped the investment
+ * rate is blank rather than disagree with the discount rate beside it.
+ */
+export function inClearingOrder(auction: TreasuryAuction): TreasuryAuction {
+  let next = auction;
+  for (const [high, median, low] of [["highYield", "avgMedYield", "lowYield"], ["highDiscountRate", "avgMedDiscountRate", "lowDiscountRate"]] as const) {
+    const top = next[high], bottom = next[low], middle = next[median];
+    if (top == null || bottom == null || top >= bottom) continue;
+    const investment = high === "highDiscountRate" ? { highInvestmentRate: null } : {};
+    if (middle != null && middle >= top && middle <= bottom) {
+      const prices = next.highPrice != null && next.lowPrice != null && next.highPrice > next.lowPrice
+        ? { highPrice: next.lowPrice, lowPrice: next.highPrice } : {};
+      next = { ...next, [high]: bottom, [low]: top, ...prices, ...investment };
+    } else {
+      next = { ...next, [high]: null, [low]: null, ...investment };
+    }
+  }
+  return next;
+}
+
+export function normalizeAuction(raw: unknown): TreasuryAuction | null {
+  if (!raw || typeof raw !== "object") return null;
+  const record = raw as TreasuryAuctionRaw;
+  const secType = (record.security_type ?? "").trim();
+  const auctionDate = (record.auction_date ?? "").trim();
+  const securityTerm = (record.security_term ?? "").trim();
+  const cusip = (record.cusip ?? "").trim();
+  if (!secType || !auctionDate) return null;
+
+  return inClearingOrder({
+    // A reopening reuses its original CUSIP but is auctioned on its own date,
+    // so CUSIP plus date is what keeps reopenings from collapsing into one row.
+    id: cusip ? `${cusip}|${auctionDate}` : `${secType}|${auctionDate}|${securityTerm}`,
+    cusip: cusip || null,
+    // TIPS and FRNs are auctioned under the Note/Bond security type; their
+    // yields are real yields and discount margins, not nominal yields.
+    secType: record.inflation_index_security === "Yes" ? "TIPS" : record.floating_rate === "Yes" ? "FRN" : secType,
+    securityTerm: securityTerm || MISSING_VALUE,
+    auctionDate,
+    highInvestmentRate: toNumber(record.high_investment_rate),
+    highDiscountRate: toNumber(record.high_discnt_rate),
+    avgMedDiscountRate: toNumber(record.avg_med_discnt_rate),
+    lowDiscountRate: toNumber(record.low_discnt_rate),
+    highDiscountMargin: toNumber(record.high_discnt_margin),
+    highYield: toNumber(record.high_yield),
+    avgMedYield: toNumber(record.avg_med_yield),
+    lowYield: toNumber(record.low_yield),
+    highPrice: toNumber(record.high_price),
+    lowPrice: toNumber(record.low_price),
+    avgMedPrice: toNumber(record.avg_med_price),
+    bidToCoverRatio: toNumber(record.bid_to_cover_ratio),
+    competitiveAccepted: toNumber(record.comp_accepted),
+    indirectAccepted: toNumber(record.indirect_bidder_accepted),
+    directAccepted: toNumber(record.direct_bidder_accepted),
+    primaryDealerAccepted: toNumber(record.primary_dealer_accepted),
+    totalAccepted: toNumber(record.total_accepted),
+    offeringAmount: toNumber(record.offering_amt),
+  });
+}
+
+export function parseTreasuryAuctionsPayload(body: unknown): TreasuryAuction[] {
+  const data = (body as { data?: unknown } | null)?.data;
+  if (!Array.isArray(data)) return [];
+  const seen = new Set<string>();
+  const auctions: TreasuryAuction[] = [];
+  for (const raw of data) {
+    const auction = normalizeAuction(raw);
+    if (!auction || seen.has(auction.id)) continue;
+    seen.add(auction.id);
+    auctions.push(auction);
+  }
+  return auctions;
+}
+
+/**
+ * Walks pages until the count reported by the first response is exhausted.
+ * Pages overlap whenever an auction is announced mid-walk, so ids are deduped
+ * across the whole run and not just within a payload.
+ */
+export async function fetchAuctionPages(
+  loadPage: (page: number) => Promise<unknown>,
+): Promise<AuctionHistory> {
+  const auctions: TreasuryAuction[] = [];
+  const seen = new Set<string>();
+  let pages = 1;
+
+  for (let page = 1; page <= Math.min(pages, AUCTION_MAX_PAGES); page += 1) {
+    const body = await loadPage(page);
+    const declaredPages = totalPages(body, page);
+    if (declaredPages === 0) return EMPTY_AUCTION_HISTORY;
+    if (page === 1) pages = declaredPages;
+    else if (declaredPages !== pages) {
+      throw new Error(`Treasury auction page count changed on page ${page}`);
+    }
+    if (pages > AUCTION_MAX_PAGES) {
+      throw new Error(`Treasury auction history exceeds the ${AUCTION_MAX_PAGES}-page limit`);
+    }
+    const data = (body as { data?: unknown } | null)?.data;
+    if (!Array.isArray(data)) {
+      throw new Error(`Treasury auction page ${page} has invalid data`);
+    }
+    if (data.length === 0) {
+      throw new Error(`Treasury auction page ${page} is missing`);
+    }
+    // A declared page must be usable in full before any of the walk can be
+    // cached. Missing metrics are valid; missing auction identities are not.
+    if (data.some((raw) => !normalizeAuction(raw))) {
+      throw new Error(`Treasury auction page ${page} has invalid records`);
+    }
+    for (const auction of parseTreasuryAuctionsPayload(body)) {
+      if (seen.has(auction.id)) continue;
+      seen.add(auction.id);
+      auctions.push(auction);
+    }
+  }
+  return auctions;
+}
+
+export async function fetchTreasuryAuctions(
+  query: AuctionQuery = auctionWindowQuery(AUCTION_HISTORY_DAYS),
+): Promise<AuctionHistory> {
+  return fetchAuctionPages(async (page) => {
+    const response = await TREASURY_FETCH.fetch(buildAuctionsUrl(query, page));
+    // The status stays: an overloaded server is a failure a saved board may answer for, a refusal is not.
+    if (!response.ok) throw new ApiRequestError(`Treasury Fiscal Data request failed (${response.status})`, response.status);
+    return response.json();
+  });
+}

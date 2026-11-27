@@ -1,0 +1,338 @@
+"""API to be implemented by connectors."""
+
+from datetime import datetime
+from enum import Enum
+from typing import (
+    Any,
+    Generator,
+    Iterable,
+    List,
+    Literal,
+    Optional,
+    Protocol,
+    Union,
+    runtime_checkable,
+)
+
+from pysdmx.api.dc.query import (
+    BasicFilter,
+    BooleanFilter,
+    DateTimeFilter,
+    MultiFilter,
+    NotFilter,
+    NumberFilter,
+    SortBy,
+    TextFilter,
+)
+from pysdmx.model import (
+    Agency,
+    Dataflow,
+    DataflowInfo,
+    DataflowRef,
+    Organisation,
+    SeriesInfo,
+)
+from pysdmx.util import experimental
+
+
+@experimental
+@runtime_checkable
+class Connector(Protocol):
+    """A Connector provides access to a data source.
+
+    Connectors support both data discovery and data retrieval.
+
+    Attributes:
+        owner: The organisation providing the Connector.
+            It is recommended to provide contact details, in case users
+            of the Connector have questions about it.
+    """
+
+    owner: Organisation
+
+    def dataflows(
+        self,
+        filter_query: Optional[str] = None,
+        provider: Optional[str] = None,
+    ) -> Union[Iterable[Dataflow], Iterable[DataflowRef]]:
+        """Get the dataflows provided by the Connector.
+
+        Args:
+            filter_query: A search term. If set, any dataflow containing the
+                term in its id, name or description will be returned.
+            provider: A data provider. If set, any dataflow for which data are
+                being provided by the supplied provider will be returned.
+
+        Returns: Iterable[DataflowRef]: A collection of dataflow references.
+
+                The references contain core information about the
+                dataflows provided by the Connector. Most importantly,
+                they contain the identifying information required to
+                retrieve more information about a specific dataflow
+                (see dataflow).
+
+                It is expected that this method, if implemented,
+                will return at least one DataflowRef object.
+        """
+
+    def providers(
+        self,
+        filter_query: Optional[str] = None,
+    ) -> Iterable[Organisation]:
+        """Get the providers of which data are available in the Connector.
+
+        Args:
+            filter_query: A search term. If set, any provider containing the
+                term in its id, name or description will be returned.
+
+        Returns: Iterable[Organisation]: A collection of data providers.
+        """
+
+    def dataflow(
+        self,
+        dataflow: Union[str, DataflowRef, Dataflow],
+        metrics: bool = False,
+    ) -> DataflowInfo:
+        """Get information about a dataflow.
+
+        Args:
+            dataflow: Either a string representing the dataflow ID or
+                a DataflowRef, as returned by calling the dataflows
+                function.
+            metrics: Metrics contain useful information such as
+                the number of observations, series, when the
+                dataflow was last updated, etc. However, it may be
+                expensive to fetch this information. In case metrics
+                are not required, you may set metrics to False, to
+                prevent them from being computed.
+
+        Returns: DataflowInfo: Information about the requested dataflow.
+
+            The information includes:
+
+            - Some basic metadata about the dataflow (such as its ID and name).
+            - Some useful metrics such as the number of observations.
+            - The expected structure of data (i.e. the data schema), including
+              the expected columns, their types, etc.
+        """
+
+    def series(
+        self,
+        dataflow: Union[str, DataflowRef, Dataflow, DataflowInfo],
+        provider: Optional[Union[str, Organisation]] = None,
+        filters: Optional[
+            Union[
+                BooleanFilter,
+                DateTimeFilter,
+                MultiFilter,
+                NotFilter,
+                NumberFilter,
+                str,
+                TextFilter,
+            ]
+        ] = None,
+        discontinued: bool = False,
+        updated_after: Optional[datetime] = None,
+    ) -> Generator[SeriesInfo, None, None]:
+        """Get the series available in the dataflow.
+
+        Args:
+            dataflow: Either a string representing the dataflow ID or
+                a DataflowRef, as returned by calling the dataflows
+                function, or a DataflowInfo, as returned by calling the
+                dataflow function.
+            provider: The organisation providing the data to be returned.
+            filters: A dictionary, where the keys are the IDs of the
+                components used for filtering and the values
+                represent the filters to be applied.
+            discontinued: Whether discontinued (i.e. old)
+                series should be returned. Defaults to `False`.
+            updated_after: Retrieve the series updated after
+                the supplied timestamp.
+
+        Returns: A generator, to iterate over the collection matching series
+            The information includes:
+
+            - Some basic metadata about the series (such as an ID or name).
+            - Some useful metrics such as the number of observations, the last
+              time it was updated, etc.
+        """
+
+    def data(
+        self,
+        dataflow: Union[str, DataflowRef, Dataflow, DataflowInfo],
+        provider: Optional[Union[str, Organisation]] = None,
+        series: Optional[Iterable[str]] = None,
+        filters: Optional[
+            Union[
+                BooleanFilter,
+                DateTimeFilter,
+                MultiFilter,
+                NotFilter,
+                NumberFilter,
+                str,
+                TextFilter,
+            ]
+        ] = None,
+        columns: Optional[Iterable[str]] = None,
+        sort: Optional[List[SortBy]] = None,
+        offset: int = 0,
+        limit: Optional[int] = None,
+        history: bool = False,
+        updated_after: Optional[datetime] = None,
+        format: Literal["dict", "pandas"] = "dict",
+    ) -> Any:
+        """Get data for the selected dataflow.
+
+        Args:
+            dataflow: Either a string representing the dataflow ID or
+                a DataflowRef, as returned by calling the dataflows
+                function, or a DataflowInfo, as returned by calling the
+                dataflow function.
+            provider: The organisation providing the data to be returned.
+            series: One or more strings identifying the series
+                for which data should be returned (e.g. D.USD.EUR.SP00).
+                wildcards can be used too (e.g. D.*.EUR.SP00).
+            filters: A dictionary, where the keys are the IDs of the
+                components used for filtering and the values
+                represent the filters to be applied.
+            columns: The fields to be returned.
+            sort: The desired sorting order of the results.
+            offset: From which row to start fetching. This is useful to
+                paginate results. Default to 0.
+            limit: The number of rows to be returned.
+            history: Whether to retrieve previous "versions" of the data or
+                only the latest one. This is useful to see how the data may
+                have evolved or have been corrected over time.
+            updated_after: Retrieve the series updated after
+                the supplied timestamp.
+            format: The desired format for the data. By default, a generator
+                of dict objects will be returned, but there are other options
+                such as pandas data frames.
+
+        Returns: A generator, to iterate over the matching data, if format is
+            set to dict (the default), or a pandas data frame.
+        """
+
+
+@runtime_checkable
+class MaintainableIdentification(Protocol):
+    """The information necessary to identify a maintainable artefact.
+
+    This assumes the artefact type is already known.
+    """
+
+    @property
+    def agency(self) -> Union[Agency, str]:
+        """The agency maintaining the artefact."""
+
+    @property
+    def id(self) -> str:
+        """The ID of the artefact."""
+
+    @property
+    def version(self) -> str:
+        """The version of the artefact."""
+
+
+@runtime_checkable
+class BasicConnector(Protocol):
+    """A simple connector for data discovery and data retrieval.
+
+    This connector is compliant with the SDMX "data discovery and
+    data retrieval" profile.
+    """
+
+    def dataflows(
+        self, search_term: Optional[str] = None
+    ) -> Iterable[Dataflow]:
+        """Get the list of dataflows available in the connector.
+
+        Args:
+            search_term (Optional[str]): A search term. If set, any dataflow
+                containing the term in its ID, name, or description will be
+                returned.
+
+        Returns:
+            Iterable[Dataflow]: An iterable of dataflows available in the
+                connector.
+
+            - If `search_term` is set and no dataflows match it, an empty
+              iterable must be returned.
+            - If `search_term` is not set, the method must return at least
+              one dataflow.
+            - The returned iterable must not contain duplicates.
+
+            Whether the connector supports lazy evaluation (e.g. generators)
+            or materializes the result set in memory is up to the implementer.
+
+        Note:
+            Lazy evaluation (e.g., using generators) is recommended for
+            connectors that handle large datasets, but this is not required.
+        """
+
+    def dataflow(
+        self,
+        dataflow: Union[str, MaintainableIdentification],
+        filters: Optional[Union[BasicFilter, str]] = None,
+    ) -> Dataflow:
+        """Get information about a dataflow.
+
+        Args:
+            dataflow (Union[str, MaintainableIdentification]): Either a string
+                representing the SDMX URN of the dataflow or the information
+                necessary to uniquely identify it. Classes such as
+                `DataflowRef` or `Dataflow` are examples of pysdmx classes that
+                implement the `MaintainableIdentification` protocol.
+            filters: Filters used to scope the data availability
+                information for the selected dataflow. If not supplied,
+                information about the full dataflow is returned. If
+                supplied, information about the matching subset is
+                returned. This can be a string similar to a SQL WHERE
+                clause ("AREA='UY' AND FREQ <> 'A'") or a Python expression
+                ("REF_AREA=='UY' and FREQ != 'A'") or one of the various
+                filters the `pysdmx.api.dc.query` module offers, including
+                `MultiFilter`.
+
+        Returns:
+            Dataflow: Information about the requested dataflow.
+
+            The information includes:
+
+            - Some basic metadata about the dataflow (such as its ID and name).
+            - Some useful metrics such as the number of observations or the
+              period coverage, if this information is available in the source.
+            - The expected structure of data (i.e. the data schema), including
+              the expected columns, their types, etc.
+        """
+
+    def data(
+        self,
+        dataflow: Union[str, MaintainableIdentification],
+        filters: Optional[Union[BasicFilter, str]] = None,
+    ) -> Any:
+        """Get data for the selected dataflow, matching the supplied filters.
+
+        Args:
+            dataflow (Union[str, MaintainableIdentification]): The dataflow
+                from which to retrieve data. Either a string representing the
+                SDMX URN of the dataflow or the information necessary to
+                uniquely identify it. Classes such as `DataflowRef` or
+                `Dataflow` are examples of pysdmx classes that implement the
+                `MaintainableIdentification` protocol.
+            filters: The data query filters, if any. This can be a string
+                similar to a SQL WHERE clause ("AREA='UY' AND FREQ <> 'A'")
+                or a Python expression ("REF_AREA=='UY' and FREQ != 'A'") or
+                one of the various filters the `pysdmx.api.dc.query` module
+                offers, including `MultiFilter`.
+
+        Returns:
+            The requested data, if any.
+        """
+
+
+class Endpoints(str, Enum):
+    BIS = "https://stats.bis.org/api/v2"
+
+
+__all__ = ["BasicConnector", "Connector", "Endpoints"]

@@ -1,0 +1,9 @@
+env.ps1
+.vscode
+github.ipynb
+build.sh
+*.pyc
+.worktrees/
+/cran.csv
+/site/projects.csv
+/site/index.html

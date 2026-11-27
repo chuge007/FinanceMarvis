@@ -1,0 +1,703 @@
+"""Error Module"""
+
+__docformat__ = "google"
+
+import inspect
+import os
+import threading
+from collections.abc import Callable, Generator
+from contextlib import contextmanager
+from contextvars import ContextVar
+
+import numpy as np
+import pandas as pd
+
+from financetoolkit.utilities import logger_model
+
+logger = logger_model.get_logger()
+
+
+# Set FINANCETOOLKIT_STRICT_ERRORS to 1 (or true/yes/on) to make every failure inside a metric raise instead of being reported and returned as an empty Series; this is what a test suite or a scheduled job should run with, since it turns a quietly missing number into an immediate, traceable failure.  # noqa: E501
+STRICT_ERRORS_ENVIRONMENT_VARIABLE = "FINANCETOOLKIT_STRICT_ERRORS"
+
+# AttributeError and TypeError cannot be produced by financial data that is merely incomplete; they mean the code asked an object for something it does not have, and there is no value that can be returned for them that is not a lie, so they always raise.  # noqa: E501
+ALWAYS_RAISED_ERRORS = (AttributeError, TypeError)
+
+
+# An argument outside its options or range (an unknown method, an alpha of 5) is a mistake in the call, not missing data: answering it with an empty result reads as "no data" and hides the typo, so it always raises, with the valid values in its message.  # noqa: E501
+class InvalidArgumentError(ValueError):
+    """An argument the method does not accept, raised with the values it does accept."""
+
+
+def join_options(options) -> str:
+    """Write the options as 'a', 'b' or 'c'."""
+    names = [repr(option) for option in options]
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " or " + names[-1]
+
+
+def check_option(name: str, value, options) -> None:
+    """
+    Check that an argument is one of the values a method accepts.
+
+    Args:
+        name (str): The name of the argument, such as "method".
+        value: The value it was given.
+        options: The values it accepts.
+
+    Raises:
+        InvalidArgumentError: If the value is not one of the options, naming them.
+    """
+    if value not in options:
+        raise InvalidArgumentError(
+            f"{name} must be one of {join_options(options)}, not {value!r}. "
+            f"Please pass one of these as {name}."
+        )
+
+
+def check_period(period: str, periods) -> None:
+    """
+    Check that a period is one of the periods a method accepts.
+
+    Args:
+        period (str): The period it was given.
+        periods: The periods it accepts, such as ("daily", "weekly", "monthly").
+
+    Raises:
+        InvalidArgumentError: If the period is not one of them (or not text, such as a list),
+            naming them.
+    """
+    if not isinstance(period, str) or period not in periods:
+        raise InvalidArgumentError(
+            f"period must be one of {join_options(periods)}, not {period!r}. "
+            f"Please pass one of these as period."
+        )
+
+
+def validate_alpha(alpha: float) -> None:
+    """
+    Check that a tail probability lies strictly between 0 and 1.
+
+    Args:
+        alpha (float): The tail probability.
+
+    Raises:
+        InvalidArgumentError: If alpha is not between 0 and 1 (a ValueError).
+    """
+    if not 0 < alpha < 1:
+        raise InvalidArgumentError(
+            f"alpha is a tail probability between 0 and 1, e.g. 0.05 for the 95% "
+            f"confidence level, not {alpha!r}. Please pass a value between 0 and 1 as alpha."
+        )
+
+
+def validate_window(name: str, value: int | None, minimum: int = 1) -> None:
+    """
+    Check that a window (window, rolling, lags and the like) is a whole number of at least
+    minimum observations. None, for the whole sample or the default, is always accepted.
+
+    Args:
+        name (str): The name of the parameter, used in the message.
+        value (int | None): The window.
+        minimum (int, optional): The smallest window the calculation can use. Defaults to 1.
+
+    Raises:
+        InvalidArgumentError: If the window is not a whole number of at least minimum (a ValueError).
+    """
+    if value is None:
+        return
+    # A float such as 10.0 is a count of observations in value, but not a whole number type.
+    if isinstance(value, float | np.floating):
+        raise InvalidArgumentError(
+            f"{name} is a number of observations of at least {minimum}, so a whole number, "
+            f"not the float {value!r}. "
+            f"Please pass a whole number of {minimum} or more as {name}, or None."
+        )
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, np.integer))
+        or value < minimum
+    ):
+        raise InvalidArgumentError(
+            f"{name} is a number of observations of at least {minimum}, not {value!r}. "
+            f"Please pass a whole number of {minimum} or more as {name}, or None."
+        )
+
+
+# Errors that say the data is missing or unusable, reported as an empty result.
+REPORTED_ERRORS = (KeyError, IndexError, ZeroDivisionError, ValueError)
+
+# The modules that calculate from financial statements, where a missing key is a statement
+# row; elsewhere it is a ticker, column or date missing from the data.
+STATEMENT_MODULES = ("financetoolkit.ratios", "financetoolkit.models")
+
+
+# Counts the requests that failed (a rate limit, a plan restriction, a timeout) rather than
+# returned an answer. A caller compares it before and after retrieving something: when it
+# did not change, an empty answer is a genuine "no data" and can be cached like any other.
+_request_failures = 0
+_request_failures_lock = threading.Lock()
+
+# The counters of the count_request_failures blocks the current call is in. A ContextVar, so a
+# concurrent call (another MCP request) never adds to them, while the worker threads of
+# helpers.run_in_parallel, which run in a copy of the caller's context, share the same counters.
+_call_request_failures: ContextVar[tuple[list[int], ...]] = ContextVar(
+    "financetoolkit_call_request_failures", default=()
+)
+
+
+# The single column of the empty frame a source returns instead of an answer.
+ERROR_RESPONSE_COLUMNS = frozenset(
+    {
+        "PREMIUM QUERY PARAMETER",
+        "EXCLUSIVE ENDPOINT",
+        "SPECIAL ENDPOINT",
+        "NOT AVAILABLE",
+        "BANDWIDTH LIMIT REACH",
+        "LIMIT REACH",
+        "YFINANCE RATE LIMIT OR NO DATA FOUND FALLBACK",
+        "YFINANCE RATE LIMIT OR NO DATA FOUND",
+        "YFINANCE RATE LIMIT REACHED FALLBACK",
+        "YFINANCE RATE LIMIT REACHED",
+        "US STOCKS ONLY",
+        "INVALID API KEY",
+        "NO DATA",
+        "REQUEST FAILED",
+        "NO ERRORS",
+    }
+)
+
+
+def is_error_response(response: object) -> bool:
+    """
+    Whether a response is an error frame rather than an answer.
+
+    Args:
+        response (object): The response, usually a DataFrame.
+
+    Returns:
+        bool: True for an empty frame whose columns name an error, such as LIMIT REACH.
+    """
+    return (
+        isinstance(response, pd.DataFrame)
+        and response.empty
+        and any(str(column) in ERROR_RESPONSE_COLUMNS for column in response.columns)
+    )
+
+
+def report_request_failure() -> None:
+    """Record that a request failed instead of returning an answer."""
+    global _request_failures  # noqa: PLW0603
+
+    with _request_failures_lock:
+        _request_failures += 1
+        for counter in _call_request_failures.get():
+            counter[0] += 1
+
+
+def get_request_failures() -> int:
+    """
+    Return the number of failed requests so far in this process.
+
+    Returns:
+        int: The number of failed requests.
+    """
+    return _request_failures
+
+
+@contextmanager
+def count_request_failures() -> Generator[Callable[[], int]]:
+    """
+    Counts the requests of this call that failed within the block, for a caller that decides
+    from them whether to ask again (step back a day, request the next page). Unlike
+    get_request_failures, a request that failed for a concurrent call is not counted.
+
+    Yields:
+        Callable[[], int]: Returns the number of failed requests of this call so far in the block.
+    """
+    counter = [0]
+    token = _call_request_failures.set((*_call_request_failures.get(), counter))
+    try:
+        yield lambda: counter[0]
+    finally:
+        _call_request_failures.reset(token)
+
+
+def use_strict_errors() -> bool:
+    """
+    Reports whether strict error handling is enabled, in which case every failure inside
+    a metric is raised rather than reported and replaced by an empty Series.
+
+    Returns:
+        bool: whether strict error handling is enabled.
+    """
+    return os.environ.get(STRICT_ERRORS_ENVIRONMENT_VARIABLE, "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def get_tickers_from_arguments(args: tuple) -> str:
+    """
+    Recovers the tickers a failing metric was calculating for, so that the error message
+    names the companies involved rather than only the metric.
+
+    Args:
+        args (tuple): the positional arguments the decorated function was called with.
+            The first is the controller instance for every method this decorator is
+            applied to.
+
+    Returns:
+        str: " for " followed by a comma separated list of tickers, or an empty string
+        when the controller has no tickers, such as Economics and Fixed Income, or has not
+        retrieved them yet.
+    """
+    # Read from the instance itself: the modules retrieve their tickers when first needed,
+    # and reporting an error must not retrieve data (or fail on the error it reports).
+    tickers = (
+        vars(args[0]).get("_tickers") if args and hasattr(args[0], "__dict__") else None
+    )
+
+    if isinstance(tickers, str):
+        return f" for {tickers}"
+    if isinstance(tickers, list) and tickers:
+        return " for " + ", ".join(str(ticker) for ticker in tickers)
+
+    return ""
+
+
+def has_benchmark(args: tuple) -> bool:
+    """
+    Whether the instance a failing metric belongs to has a benchmark, so that an error
+    naming the Benchmark is about its data rather than about a missing benchmark_ticker.
+
+    Args:
+        args (tuple): the positional arguments the decorated function was called with,
+            the first being the controller instance.
+
+    Returns:
+        bool: True when the instance has a benchmark ticker or its historical data, as far
+        as it is retrieved, holds a Benchmark column.
+    """
+    # Read from the instance itself, as get_tickers_from_arguments does: reporting an error
+    # must not retrieve data, so only the historical data already retrieved is looked at.
+    attributes = vars(args[0]) if args and hasattr(args[0], "__dict__") else {}
+
+    if attributes.get("_benchmark_ticker"):
+        return True
+
+    historical_data = attributes.get("_historical_data")
+    datasets = dict.values(historical_data) if isinstance(historical_data, dict) else []
+
+    return any(
+        isinstance(dataset, pd.DataFrame)
+        and "Benchmark" in dataset.columns.get_level_values(-1)
+        for dataset in datasets
+    )
+
+
+def handle_errors(func):
+    """
+    Decorator that reports failures inside a metric calculation instead of letting them
+    propagate as a raw traceback, so that one unavailable line item does not abort an
+    entire analysis.
+
+    Silently returning an empty Series where a number was expected is the worst outcome
+    a financial library can produce, so the behaviour is deliberately split by what the
+    exception actually says about the data:
+
+        - KeyError and IndexError mean something the calculation needs is not in the
+          data, which is a genuine and common gap between data providers rather than a
+          defect. In the Ratios and Models (STATEMENT_MODULES) a missing key is a
+          statement line item, and the error asks to fill that row; elsewhere it is a
+          ticker, column or date, and the error names it as missing from the data. Both
+          name the metric and the tickers, and an empty Series is returned.
+        - ValueError and ZeroDivisionError mean the data is present but could not be
+          computed with. These are logged as an error, with the traceback attached so
+          the failing line is identifiable, and an empty Series is returned.
+        - AttributeError and TypeError cannot be caused by incomplete financial data at
+          all; they mean the code is wrong. These are always raised.
+        - InvalidArgumentError (a ValueError) means the call passed an argument outside
+          its options or range, such as an unknown method or an alpha of 5. It is always
+          raised, with the valid values in its message, so a typo is not mistaken for
+          missing data.
+
+    Setting the FINANCETOOLKIT_STRICT_ERRORS environment variable to 1 raises every
+    exception instead, which is the appropriate setting for a test suite or a scheduled
+    job where an empty result must not pass unnoticed.
+
+    Args:
+        func (function): The function to be decorated.
+
+    Returns:
+        function: The decorated function, which returns an empty Series of dtype object
+        in place of a result whenever a reported failure occurs.
+
+    Raises:
+        AttributeError: If the calculation asks an object for an attribute it lacks.
+        TypeError: If the calculation is performed on an unsupported type.
+        InvalidArgumentError: If an argument is outside its options or range.
+        Exception: Any exception at all when strict error handling is enabled.
+    """
+
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except InvalidArgumentError:
+            raise
+        except (KeyError, ValueError) as error:
+            # Metrics relative to a benchmark fail on its absence (a KeyError on the
+            # Benchmark column or a ValueError naming it), which is a setting rather than
+            # missing data or a defect, so the fix is reported instead. With a benchmark
+            # set, the same error means its data is missing (e.g. a period without
+            # benchmark prices) and is reported as such. An AttributeError is a defect
+            # even when it mentions the benchmark, so it is raised below.
+            if (
+                "Benchmark" not in str(error)
+                or use_strict_errors()
+                or has_benchmark(args)
+            ):
+                return _report_failure(func, args, error)
+
+            logger.error(
+                "Please set a benchmark_ticker in the Toolkit class to calculate %s. "
+                "For example: toolkit = Toolkit(['TSLA', 'AAPL', 'MSFT'], "
+                "benchmark_ticker='SPY')",
+                func.__name__,
+            )
+            return pd.Series(dtype="object")
+        except Exception as error:  # noqa: BLE001
+            return _report_failure(func, args, error)
+
+    # These steps are there to ensure the docstring of the function remains intact
+    wrapper.__doc__ = func.__doc__
+    wrapper.__name__ = func.__name__
+    wrapper.__signature__ = inspect.signature(func)
+    wrapper.__module__ = func.__module__
+
+    return wrapper
+
+
+def _report_failure(func, args: tuple, error: Exception) -> pd.Series:
+    """
+    Reports the failure of a metric calculation as handle_errors describes: an empty
+    Series for missing or unusable data, and the error itself for a defect, for an error
+    that is not about the data or when strict error handling is enabled.
+
+    Args:
+        func (function): The decorated function.
+        args (tuple): The arguments it was called with, to name the tickers.
+        error (Exception): The error it raised.
+
+    Returns:
+        pd.Series: An empty Series in place of the result.
+
+    Raises:
+        Exception: The error itself, when it is not reported.
+    """
+    tickers = get_tickers_from_arguments(args)
+
+    if isinstance(error, ALWAYS_RAISED_ERRORS):
+        logger.error(
+            "%s failed%s with a %s (%s), which indicates a defect rather than "
+            "missing data.",
+            func.__name__,
+            tickers,
+            type(error).__name__,
+            error,
+        )
+        raise error
+
+    if use_strict_errors() or not isinstance(error, REPORTED_ERRORS):
+        raise error
+
+    if isinstance(error, KeyError) and func.__module__.startswith(STATEMENT_MODULES):
+        logger.error(
+            "%s could not be calculated%s because the item %s is missing from "
+            "the provided financial statements. Fill this row to obtain the metric.",
+            func.__name__,
+            tickers,
+            error,
+        )
+    elif isinstance(error, KeyError):
+        logger.error(
+            "%s could not be calculated%s because %s is missing from the data.",
+            func.__name__,
+            tickers,
+            error,
+        )
+        # Outside the statements a missing key can also be a column or level the code
+        # looks up under the wrong name, so the traceback is kept for debugging without
+        # repeating it for every ticker that lacks data.
+        logger.debug("Traceback of the %s failure.", func.__name__, exc_info=True)
+    elif isinstance(error, IndexError):
+        logger.error(
+            "%s could not be calculated%s due to missing data. %s: %s",
+            func.__name__,
+            tickers,
+            type(error).__name__,
+            error,
+        )
+    elif isinstance(error, ZeroDivisionError):
+        logger.error(
+            "%s could not be calculated%s due to a division by zero. %s: %s",
+            func.__name__,
+            tickers,
+            type(error).__name__,
+            error,
+        )
+    else:
+        logger.error(
+            "%s could not be calculated%s. %s: %s",
+            func.__name__,
+            tickers,
+            type(error).__name__,
+            error,
+            exc_info=True,
+        )
+
+    return pd.Series(dtype="object")
+
+
+def check_for_error_messages(
+    dataset_dictionary: dict[str, pd.DataFrame],
+    user_subscription: str,
+    required_subscription: str = "Premium",
+    delete_tickers: bool = True,
+):
+    """
+    This functionality checks whether any of the defined errors are found in the
+    dataset and if they are, report them accordingly. This function is written
+    to prevent spamming the command line with error messages.
+
+    Args:
+        dataset_dictionary (dict[str, pd.DataFrame]): a dictionary with the ticker
+        as key and the dataframe as value.
+        user_subscription (str): the subscription type of the user.
+        required_subscription (str): the subscription the requested data needs. Defaults to "Premium".
+        delete_tickers (bool): whether to delete the tickers that have an error from the
+        dataset dictionary. Defaults to True.
+    """
+
+    not_available = []
+    premium_query_parameter = []
+    exclusive_endpoint = []
+    special_endpoint = []
+    bandwidth_limit_reach = []
+    limit_reach = []
+    yfinance_rate_limit_reached = []
+    yfinance_rate_limit_reached_fallback = []
+    yfinance_rate_limit_or_no_data_found = []
+    yfinance_rate_limit_or_no_data_found_fallback = []
+    no_data = []
+    us_stocks_only = []
+    invalid_api_key = []
+    no_errors = []
+    request_failed = []
+
+    for ticker, dataframe in dataset_dictionary.items():
+        if "PREMIUM QUERY PARAMETER" in dataframe.columns:
+            premium_query_parameter.append(ticker)
+        if "EXCLUSIVE ENDPOINT" in dataframe.columns:
+            exclusive_endpoint.append(ticker)
+        elif "SPECIAL ENDPOINT" in dataframe.columns:
+            special_endpoint.append(ticker)
+        elif "NOT AVAILABLE" in dataframe.columns:
+            not_available.append(ticker)
+        elif "BANDWIDTH LIMIT REACH" in dataframe.columns:
+            bandwidth_limit_reach.append(ticker)
+        elif "LIMIT REACH" in dataframe.columns:
+            limit_reach.append(ticker)
+        elif "YFINANCE RATE LIMIT OR NO DATA FOUND FALLBACK" in dataframe.columns:
+            yfinance_rate_limit_or_no_data_found_fallback.append(ticker)
+        elif "YFINANCE RATE LIMIT OR NO DATA FOUND" in dataframe.columns:
+            yfinance_rate_limit_or_no_data_found.append(ticker)
+        elif "YFINANCE RATE LIMIT REACHED FALLBACK" in dataframe.columns:
+            yfinance_rate_limit_reached_fallback.append(ticker)
+        elif "YFINANCE RATE LIMIT REACHED" in dataframe.columns:
+            yfinance_rate_limit_reached.append(ticker)
+        elif "NO DATA" in dataframe.columns:
+            no_data.append(ticker)
+        elif "US STOCKS ONLY" in dataframe.columns:
+            us_stocks_only.append(ticker)
+        elif "INVALID API KEY" in dataframe.columns:
+            invalid_api_key.append(ticker)
+        elif "REQUEST FAILED" in dataframe.columns:
+            request_failed.append(ticker)
+        elif "NO ERRORS" in dataframe.columns:
+            no_errors.append(ticker)
+
+    if premium_query_parameter:
+        logger.error(
+            "The following tickers are using a premium query parameter from Financial Modeling Prep: %s.\n"
+            "This is not available in your current plan. Consider upgrading your plan to a higher plan. "
+            "You can get 15%% off by using the following affiliate link which also supports the project: "
+            "https://www.jeroenbouma.com/fmp",
+            ", ".join(premium_query_parameter),
+        )
+
+    if exclusive_endpoint:
+        logger.error(
+            "The following tickers are using an exclusive endpoint from Financial Modeling Prep: %s.\n"
+            "This is not available in the Free plan. Consider upgrading your plan to a higher plan. "
+            "You can get 15%% off by using the following affiliate link which also supports the project: "
+            "https://www.jeroenbouma.com/fmp",
+            ", ".join(exclusive_endpoint),
+        )
+    if special_endpoint:
+        logger.error(
+            "The following tickers are using a special endpoint from Financial Modeling Prep: %s.\n"
+            "This is not available in the Free plan. Consider upgrading your plan to a higher plan. "
+            "You can get 15%% off by using the following affiliate link which also supports the project: "
+            "https://www.jeroenbouma.com/fmp",
+            ", ".join(special_endpoint),
+        )
+    if not_available:
+        logger.error(
+            "The requested data is part of the %s Subscription from "
+            "Financial Modeling Prep: %s.\nIf you wish to access "
+            "this data, consider upgrading your plan. You can get 15%% off by using the "
+            "following affiliate link which also supports the project: "
+            "https://www.jeroenbouma.com/fmp",
+            required_subscription,
+            ", ".join(not_available),
+        )
+
+    if bandwidth_limit_reach:
+        logger.error(
+            "The bandwidth limit from Financial Modeling Prep has been reached for the following tickers: %s.\n"
+            "Consider upgrading your plan to a higher plan to increase your bandwidth limit. You can get 15%% "
+            "off by using the following affiliate link which also supports the project: "
+            "https://www.jeroenbouma.com/fmp",
+            ", ".join(bandwidth_limit_reach),
+        )
+
+    if limit_reach:
+        logger.error(
+            "The limit from Financial Modeling Prep has been reached for the following tickers: %s.\n"
+            "Consider upgrading your plan to a higher plan to increase your limit. You can get 15%% "
+            "off by using the following affiliate link which also supports the project: "
+            "https://www.jeroenbouma.com/fmp",
+            ", ".join(limit_reach),
+        )
+
+    if yfinance_rate_limit_or_no_data_found_fallback:
+        ticker_text = (
+            "tickers"
+            if len(yfinance_rate_limit_or_no_data_found_fallback) > 1
+            else "ticker"
+        )
+        logger.error(
+            "The rate limit from Yahoo Finance has been reached or no data "
+            "could be found from this source for the following %s: %s.\n"
+            "This occurred after a previous attempt to use FinancialModelingPrep was unsuccessful "
+            "and is likely due to no data being available for the %s.",
+            ticker_text,
+            ", ".join(yfinance_rate_limit_or_no_data_found_fallback),
+            ticker_text,
+        )
+    if yfinance_rate_limit_or_no_data_found:
+        logger.error(
+            "The rate limit from Yahoo Finance has been reached or no data could be found "
+            "from this source for the following tickers: %s.\n"
+            "Consider obtaining an API key from FinancialModelingPrep to potentially "
+            "avoid this issue. You can get 15%% "
+            "off by using the following affiliate link which also supports the project: "
+            "https://www.jeroenbouma.com/fmp",
+            ", ".join(yfinance_rate_limit_or_no_data_found),
+        )
+    if yfinance_rate_limit_reached_fallback:
+        logger.error(
+            "The rate limit from Yahoo Finance has been reached for the following tickers: %s.\n"
+            "This occurred after a previous attempt to use FinancialModelingPrep was unsuccessful.",
+            ", ".join(yfinance_rate_limit_reached_fallback),
+        )
+    if yfinance_rate_limit_reached:
+        logger.error(
+            "The rate limit from Yahoo Finance has been reached for the following tickers: %s.\n"
+            "Consider obtaining an API key from FinancialModelingPrep to potentially avoid this issue. "
+            "You can get 15%% off by using the following affiliate link which also supports the project: "
+            "https://www.jeroenbouma.com/fmp",
+            ", ".join(yfinance_rate_limit_reached),
+        )
+    if no_data:
+        logger.error(
+            "Some tickers from Financial Modeling Prep have no data, verify if the ticker has any data to "
+            "begin with. If it does, please open an issue here: https://github.com/JerBouma/FinanceToolkit/issues. "
+            "These tickers are: %s",
+            ", ".join(no_data),
+        )
+
+        if user_subscription == "Free":
+            logger.error(
+                "Given that you are using the Free plan, it could be due to reaching the API "
+                "limit of the day, consider upgrading your plan. You can get 15% off by "
+                "using the following affiliate link which also supports the project: "
+                "https://www.jeroenbouma.com/fmp"
+            )
+
+    if us_stocks_only:
+        logger.error(
+            "The Free plan of Financial Modeling Prep is limited to US stocks only. "
+            "Therefore the following tickers are not available: %s\nConsider upgrading your plan to Starter or "
+            "higher. You can get 15%% off by using the following affiliate link which also "
+            "supports the project: https://www.jeroenbouma.com/fmp",
+            ", ".join(us_stocks_only),
+        )
+
+    if invalid_api_key:
+        logger.error(
+            "You have entered an invalid API key from Financial Modeling Prep. Obtain an API key for free "
+            "or get 15% off the Premium plans by using the following affiliate link.\nThis also supports "
+            "the project: https://www.jeroenbouma.com/fmp"
+        )
+
+    if request_failed:
+        # The reason (such as "HTTP 500") travels in the attrs of the error frame.
+        tickers_per_reason: dict[str, list[str]] = {}
+        for ticker in request_failed:
+            reason = dataset_dictionary[ticker].attrs.get(
+                "reason", "an unrecognised error"
+            )
+            tickers_per_reason.setdefault(reason, []).append(ticker)
+        for reason, tickers in tickers_per_reason.items():
+            logger.error(
+                "The request to Financial Modeling Prep failed (%s) for the following "
+                "tickers: %s.\nNo data could be collected for them.",
+                reason,
+                ", ".join(tickers),
+            )
+
+    if no_errors:
+        # These exhausted every connection retry, so this is a network failure rather than the absence of an error it is named after.  # noqa: E501
+        logger.error(
+            "The connection to Financial Modeling Prep could not be established for the "
+            "following tickers: %s.\nNo data could be collected for them.",
+            ", ".join(no_errors),
+        )
+
+    if delete_tickers:
+        # Tickers that errored are removed so the rest of the program continues.
+        removed_tickers = set(
+            premium_query_parameter
+            + exclusive_endpoint
+            + special_endpoint
+            + not_available
+            + bandwidth_limit_reach
+            + limit_reach
+            + yfinance_rate_limit_or_no_data_found
+            + yfinance_rate_limit_or_no_data_found_fallback
+            + yfinance_rate_limit_reached
+            + yfinance_rate_limit_reached_fallback
+            + us_stocks_only
+            + no_data
+            + invalid_api_key
+            + request_failed
+            + no_errors
+        )
+
+        for ticker in removed_tickers:
+            del dataset_dictionary[ticker]
+
+    return dataset_dictionary

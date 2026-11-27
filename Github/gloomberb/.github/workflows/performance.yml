@@ -1,0 +1,208 @@
+name: Performance
+
+# Separate from Verify so a noisy runner never blocks the checks a merge needs.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+    branches:
+      - main
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: performance-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  GLOOMBERB_NO_TELEMETRY: "1"
+  DO_NOT_TRACK: "1"
+
+jobs:
+  # Single lightweight scope job decides which path-scoped performance checks
+  # should grab runners, avoiding unnecessary Ubuntu, Windows and WebKit runner
+  # queues on pull requests that do not touch their areas.
+  scope:
+    name: Performance scope
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      tui_benchmarks: ${{ steps.paths.outputs.tui_benchmarks }}
+      pane_drag: ${{ steps.pane_drag.outputs.relevant }}
+      app_database: ${{ steps.paths.outputs.app_database }}
+      sync_budget: ${{ steps.paths.outputs.sync_budget }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: ./.github/actions/setup-bun
+        with:
+          install: "false"
+
+      - name: Fetch the base branch
+        run: git fetch --depth=1 origin "${{ github.base_ref }}"
+
+      - id: pane_drag
+        name: Check whether the change touches pane chrome
+        run: bun run scripts/pane-chrome/scope.ts FETCH_HEAD .github/workflows/performance.yml
+
+      - id: paths
+        name: Check which performance checks apply to the changed paths
+        run: |
+          bun -e '
+            import { execFileSync } from "node:child_process";
+            import { appendFileSync } from "node:fs";
+            const files = execFileSync("git", ["diff", "--name-only", "FETCH_HEAD", "HEAD"], { encoding: "utf8" })
+              .split("\n")
+              .filter(Boolean);
+            const nonTui = [
+              /^docs\//,
+              /\.md$/,
+              /^src\/renderers\/(?:dom|browser|share|cloudflare)\//,
+              /^src\/renderers\/electrobun\/view\//,
+              /^scripts\/pane-chrome\//,
+              /^\.github\/workflows\/(?!performance\.yml$)/,
+              /^\.github\/actions\/install-webkit\//,
+              /\.test\.tsx?$/,
+            ];
+            const tuiBenchmarks = files.length === 0 || files.some((f) => !nonTui.some((re) => re.test(f)));
+            const appDatabase = files.some((f) => /^(?:src\/data\/|scripts\/benchmark-app-database\.ts$|\.github\/workflows\/performance\.yml$)/.test(f));
+            const syncBudget = files.some((f) => /^(?:src\/sync\/|src\/plugins\/builtin\/analytics\/metrics\.ts$|src\/renderers\/electrobun\/|src\/utils\/http-proxy-response\.ts$|patches\/electrobun|scripts\/pane-chrome\/sync-poll|\.github\/workflows\/performance\.yml$|\.github\/actions\/install-webkit\/)/.test(f));
+            const out = process.env.GITHUB_OUTPUT!;
+            appendFileSync(out, `tui_benchmarks=${tuiBenchmarks}\napp_database=${appDatabase}\nsync_budget=${syncBudget}\n`);
+            console.log({ files: files.length, tuiBenchmarks, appDatabase, syncBudget });
+          '
+
+  tui-benchmarks:
+    needs: scope
+    if: needs.scope.outputs.tui_benchmarks == 'true'
+    runs-on: ubuntu-latest
+    env:
+      TERM: xterm-256color
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: ./.github/actions/setup-bun
+
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux
+
+      - name: Check out the base branch next to the PR
+        run: |
+          git fetch --depth=1 origin "${{ github.base_ref }}"
+          git worktree add ../base FETCH_HEAD
+          cd ../base && bun install --frozen-lockfile
+
+      # Fails when the typical keypress is clearly slower than on the base
+      # branch; the table lands in the job summary either way.
+      - name: Compare navigation speed with the base branch
+        run: bun run benchmark:tui:compare --base ../base
+
+      # Fails when browsing more tickers keeps growing the live heap.
+      - name: Check memory levels off while browsing tickers
+        run: bun run benchmark:tui:memory
+
+  pane-drag-budget:
+    name: Pane drag frame budget
+    needs: scope
+    if: needs.scope.outputs.pane_drag == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: ./.github/actions/setup-bun
+
+      - id: chrome
+        name: Read the pinned Chrome version
+        run: echo "version=$(sed -n 's/^const CHROME_VERSION = "\(.*\)";$/\1/p' scripts/pane-chrome/browser.ts)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/gloomberb-pane-chrome/chrome-headless-shell-${{ steps.chrome.outputs.version }}
+          key: chrome-headless-shell-${{ steps.chrome.outputs.version }}-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Check out the base branch next to the PR
+        run: |
+          git fetch --depth=1 origin "${{ github.base_ref }}"
+          git worktree add ../base FETCH_HEAD
+          cd ../base && bun install --frozen-lockfile
+
+      # Fails when dragging or resizing a pane clearly costs the main thread
+      # more per frame, or renders React more, than on the base branch, or
+      # when a resized frame falls behind the pointer; the table lands in the
+      # job summary either way.
+      - name: Compare a pane drag's frame budget with the base branch
+        run: bun run benchmark:pane-drag:compare --base ../base
+
+  # How long the app's database work holds the app's thread, on Windows,
+  # where a flush of the disk held it for seconds. Only for changes to the
+  # data layer, the check or this workflow.
+  app-database-windows:
+    name: App database on Windows
+    needs: scope
+    if: needs.scope.outputs.app_database == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # The data layer needs no packages: Bun alone runs both checkouts.
+      - uses: ./.github/actions/setup-bun
+        with:
+          install: "false"
+
+      - name: Check out the base branch next to the PR
+        shell: bash
+        run: |
+          git fetch --depth=1 origin "${{ github.base_ref }}"
+          git worktree add ../base FETCH_HEAD
+
+      # The same seeded 100 MB cache and workload against both checkouts; the
+      # table lands in the job summary.
+      - name: Compare the app database's time on the app's thread with the base branch
+        run: bun scripts/benchmark-app-database.ts --base ../base --seconds 45 --runs 2 --out app-database.json
+
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: app-database-windows
+          path: app-database.json
+          if-no-files-found: ignore
+
+  # How long one Cloud sync blocks the desktop view on a large workspace, in
+  # WebKit. Only for changes to the sync, the portfolio analytics it values,
+  # the desktop view's RPC path (Electrobun's patch included), or the check.
+  sync-budget:
+    name: Cloud sync main-thread budget
+    needs: scope
+    if: needs.scope.outputs.sync_budget == 'true'
+    # Playwright 1.60's WebKit does not install on Ubuntu 26.04; lift when Playwright supports it
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: ./.github/actions/setup-bun
+        with:
+          desktop: "true"
+
+      - name: Install WebKit
+        timeout-minutes: 8
+        uses: ./.github/actions/install-webkit
+
+      # Fails when an unchanged, a repriced or an edited workspace's sync, or
+      # a 4 MB message through the preload codec, blocks the main thread past
+      # its budget, or when an unchanged workspace is uploaded again.
+      - name: Check a Cloud sync's longest main-thread block
+        run: bun scripts/pane-chrome/sync-poll.ts --check --label sync-poll
+
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sync-poll
+          path: ~/.cache/gloomberb-pane-chrome/sync-poll/samples.json
+          if-no-files-found: ignore

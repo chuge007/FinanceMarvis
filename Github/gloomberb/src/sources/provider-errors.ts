@@ -1,0 +1,317 @@
+import { DataServiceUnreachableError, isNetworkFailure } from "../utils/network-failure";
+import { OperationTimeoutError } from "../utils/async-deadline";
+import { ApiRequestError, isTransientFailure, wasAskedTwice } from "../api-client/errors";
+import type { PriceHistoryResult } from "../types/price-history";
+
+// Registered, so a miss raised by another copy of this module (a plugin that
+// resolved `gloomberb/market-data` from the source tree) is still recognized.
+const PROVIDER_MISS_BRAND = Symbol.for("gloomberb.provider-miss");
+const EXPECTED_PROVIDER_MISS = /No data found|symbol may be delisted|"code":"Not Found"|No history for /i;
+
+const MAX_REASON_LENGTH = 200;
+// Whole ANSI sequences go first, so their printable tail does not outlive the escape byte.
+const ANSI_SEQUENCE = /\u001b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\u0007\u001b]*(?:\u0007|\u001b\\)?)/g;
+const LINE_BREAKS = /[\r\n\t\v\f\u0085\u2028\u2029]+/g;
+// Remaining controls, and the bidirectional overrides that can reorder text in a terminal.
+const CONTROL_CHARACTERS = /[\p{Cc}\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu;
+
+/**
+ * A reason a data service wrote for an empty answer, made safe to show: one
+ * line, no control characters, at most 200 characters. Anything that is not a
+ * non-empty string has no reason.
+ */
+export function cleanProviderReason(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const line = value.replace(ANSI_SEQUENCE, "").replace(LINE_BREAKS, " ").replace(CONTROL_CHARACTERS, "").replace(/\s+/g, " ").trim();
+  if (!line) return undefined;
+  const characters = Array.from(line);
+  return characters.length > MAX_REASON_LENGTH
+    ? `${characters.slice(0, MAX_REASON_LENGTH - 1).join("").trimEnd()}…`
+    : line;
+}
+
+export class ProviderMissError extends Error {
+  readonly [PROVIDER_MISS_BRAND] = true;
+  /** Why the service has nothing, in its own words, when it said. */
+  readonly reason?: string;
+  /** The service found no listing for the symbol: it is not a ticker, which differs from a ticker it has no data for. */
+  readonly notFound: boolean;
+
+  constructor(message = "Provider could not satisfy request", reason?: unknown, options: { notFound?: boolean } = {}) {
+    super(message);
+    this.name = "ProviderMissError";
+    this.reason = cleanProviderReason(reason);
+    this.notFound = options.notFound === true;
+  }
+}
+
+export function createProviderMiss(message?: string, reason?: unknown, options?: { notFound?: boolean }): ProviderMissError {
+  return new ProviderMissError(message, reason, options);
+}
+
+/**
+ * A source has the listing's bars but not up to the present: it answered, just
+ * behind. `behind` is what it answered, which the router shows, said to be
+ * behind, when no source has the present.
+ */
+export class StaleHistoryError extends ProviderMissError {
+  readonly behind?: PriceHistoryResult;
+
+  constructor(message: string, behind?: PriceHistoryResult) {
+    super(message);
+    this.name = "StaleHistoryError";
+    if (behind) this.behind = behind;
+  }
+}
+
+function isProviderMiss(error: unknown): error is ProviderMissError {
+  return error instanceof ProviderMissError
+    || (!!error && typeof error === "object" && PROVIDER_MISS_BRAND in error);
+}
+
+/**
+ * A source that could not answer just now (rate limited, overloaded, timed
+ * out) and may if asked again shortly. Unlike a miss, it says nothing about
+ * whether what was asked for exists.
+ */
+export class ProviderBusyError extends Error {
+  constructor(message = "The data service is busy", options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "ProviderBusyError";
+  }
+}
+
+export function isProviderBusy(error: unknown): error is ProviderBusyError {
+  return error instanceof ProviderBusyError;
+}
+
+/** What a search its sources could not answer says, rather than that nothing matched. */
+export const SEARCH_BUSY_MESSAGE = "Search is busy, try again in a moment.";
+/** The code a structured answer (CLI `--json`, remote control) gives that failure. */
+export const SEARCH_BUSY_CODE = "search_busy";
+
+/** The reason a provider gave for a miss, or undefined when it gave none. */
+export function providerMissReason(error: unknown): string | undefined {
+  return isProviderMiss(error) ? error.reason : undefined;
+}
+
+/** Collects the latest reason across the providers of one request. */
+export interface ProviderMissNote {
+  reason?: string;
+  /** True while every provider that failed said it found no listing; one that failed another way (a timeout) clears it. */
+  notFound?: boolean;
+  /** The last provider failure that was not a miss (a refused session, a rate limit, a timeout). */
+  failure?: unknown;
+}
+
+export function noteProviderMiss(note: ProviderMissNote | undefined, error: unknown): void {
+  if (!note) return;
+  const reason = providerMissReason(error);
+  if (reason) note.reason = reason;
+  if (!isProviderMiss(error)) note.failure = error;
+  note.notFound = note.notFound !== false && isProviderMiss(error) && error.notFound === true;
+}
+
+/** A provider answered with data the router could not use: whatever else is missing, the symbol exists. */
+export function noteProviderAnswer(note: ProviderMissNote | undefined): void {
+  if (note) note.notFound = false;
+}
+
+// A command may follow it with the listing search suggests: "Not a ticker: USD_NGN. Did you mean USDNGN=X (...)?"
+const NOT_A_TICKER = /^Not a ticker: (.+?)\.(?= Did you mean |$)/;
+
+/** "Not a ticker: APPLE.", what a request for a symbol no listing carries ends in. */
+function notATickerMessage(symbol: string): string {
+  return `Not a ticker: ${symbol}.`;
+}
+
+/** The symbol of a "Not a ticker: APPLE." message, or null for any other text. */
+export function notATickerSymbol(message: string): string | null {
+  return NOT_A_TICKER.exec(message.split("\n")[0] ?? "")?.[1] ?? null;
+}
+
+/**
+ * Whether a message is the router's answer that no source serves a symbol: "No history provider
+ * available for 2222", or "Not a ticker: 2222." when the service found no listing for it.
+ * A timeout or any other failure is not.
+ */
+export function isNoProviderMessage(message: string): boolean {
+  return /\bprovider available for\b/i.test(message) || notATickerSymbol(message) !== null;
+}
+
+/**
+ * What a read says when Gloom's data service answered that its source failed,
+ * having been asked twice (`readListing`): the listing is not said to have no
+ * data, since asked again in a moment it may. "for SYMBOL" closes the first
+ * sentence, so a table's note can name several symbols in front of it.
+ */
+export function serviceDidNotAnswerMessage(symbol?: string, failure?: unknown): string {
+  // A source the service reads that took too long (TIMEOUT) is said as a timeout, never as no source for the symbol.
+  const then = serviceSourceTimedOut(failure) ? "Its source timed out; try again in a moment." : "Try again in a moment.";
+  return `Gloom's data service did not answer${symbol ? ` for ${symbol}` : ""}. ${then}`;
+}
+
+/** Whether the data service answered that the source it reads timed out (reason TIMEOUT), asked twice. */
+function serviceSourceTimedOut(failure: unknown): boolean {
+  return failure instanceof Error && failure.message.trim() === "TIMEOUT";
+}
+
+/** The router's generic answer that no provider served a request, holding the failure behind it when a provider failed rather than missed. */
+class NoProviderError extends Error {
+  constructor(message: string, readonly failure: unknown) {
+    super(message);
+  }
+}
+
+/**
+ * The router's final error when no provider answered. A reason a provider gave
+ * replaces the generic wording, and so does the service's answer that no
+ * listing exists for `symbol` ("Not a ticker"), a request that never reached
+ * the data service, and a listing read the data service failed to answer twice
+ * (`wasAskedTwice`, `serviceDidNotAnswerMessage`), each of which says that
+ * rather than that no source has the symbol; any other failure, a 5xx on a read
+ * that is not asked again among them, keeps the generic message. A timeout
+ * on a working connection is kept in its own words as well.
+ */
+export function noProviderError(message: string, note: ProviderMissNote | undefined, symbol?: string): Error {
+  if (note?.reason) return createProviderMiss(note.reason, note.reason);
+  if (note?.notFound === true && symbol) return createProviderMiss(notATickerMessage(symbol), undefined, { notFound: true });
+  if (isNetworkFailure(note?.failure)) {
+    return note!.failure instanceof DataServiceUnreachableError ? note!.failure : new DataServiceUnreachableError(note!.failure);
+  }
+  if (note?.failure instanceof OperationTimeoutError) return new NoProviderError(note.failure.message, note.failure);
+  if (wasAskedTwice(note?.failure)) return new NoProviderError(serviceDidNotAnswerMessage(symbol, note!.failure), note!.failure);
+  if (note?.failure instanceof ApiRequestError && note.failure.status === 429) {
+    return new NoProviderError(rateLimitedMessage(symbol, note.failure.retryAfterMs), note.failure);
+  }
+  return new NoProviderError(message, note?.failure);
+}
+
+/**
+ * What a read says when Gloom's data service refused it for its request limit
+ * (429): not that the listing has no data, and when to ask again. "for SYMBOL"
+ * closes the first sentence, as `serviceDidNotAnswerMessage` words it.
+ */
+export function rateLimitedMessage(symbol?: string, retryAfterMs?: number): string {
+  const wait = retryAfterMs && retryAfterMs > 0 ? `in ${Math.ceil(retryAfterMs / 1000)} s` : "in a minute";
+  return `Gloom's data service is at its request limit${symbol ? ` for ${symbol}` : ""}. Try again ${wait}.`;
+}
+
+/**
+ * The router's answer that no source served a read because one failed (a
+ * timeout, a rate limit, a refused session), not because none has it: asked
+ * again shortly it may answer.
+ */
+export function isSourceFailure(error: unknown): boolean {
+  return error instanceof NoProviderError && error.failure !== undefined;
+}
+
+/**
+ * A source failure (`isSourceFailure`) that asking again shortly may get
+ * past: the source timed out, was rate limited or overloaded
+ * (`isTransientFailure`). A source that refused the read is not one.
+ */
+export function isTransientSourceFailure(error: unknown): boolean {
+  return error instanceof NoProviderError && error.failure !== undefined && isTransientFailure(error.failure);
+}
+
+/**
+ * The router's bare "No history provider available": no source failed, none
+ * gave a reason or said the symbol is unknown, and none served bars it could
+ * use (a source's bars that stop short of the latest session are not used).
+ */
+export function isUnservedWithoutReason(error: unknown): boolean {
+  return error instanceof NoProviderError && error.failure === undefined;
+}
+
+const UNSERVED_HISTORY = /^No (?:resolution-aware )?history provider available for /;
+
+/**
+ * The router's answer that every history source it asked holds no bars of a
+ * listing at the size asked, none failing or giving a reason: a source that
+ * failed makes it say "No source could load history", and one that gave a
+ * reason says that. Read from the message, which is all that crosses the
+ * desktop and screenshot bridges.
+ */
+export function isUnservedHistory(error: unknown): boolean {
+  return error instanceof Error && UNSERVED_HISTORY.test(error.message);
+}
+
+/**
+ * Whether a failed read means no source has what was asked for: a source's
+ * miss, or the router's answer that none served it when none failed another
+ * way. A refused session, a rate limit or a timeout is not, as asked again it may answer.
+ */
+export function isNoSourceAnswer(error: unknown): boolean {
+  if (isProviderMiss(error)) return true;
+  if (error instanceof NoProviderError) return error.failure === undefined;
+  return error instanceof Error && !(error instanceof ProviderBusyError) && isNoProviderMessage(error.message);
+}
+
+/**
+ * A source that answered it has nothing for a listing it knows: a miss that
+ * does not say the symbol is unknown, or one that crossed the desktop or
+ * screenshot bridge, which carries only its message, the service's bare
+ * NO_DATA. A source that failed, and a symbol no source knows, are not.
+ */
+export function isNoDataAnswer(error: unknown): boolean {
+  if (error instanceof Error && error.message.trim() === "NO_DATA") return true;
+  return isProviderMiss(error) && !error.notFound && !/^(?:NOT_FOUND|BAD_MAPPING)$/.test(error.message.trim())
+    && notATickerSymbol(error.message) === null;
+}
+
+export function shouldLogProviderError(error: unknown): boolean {
+  if (isProviderMiss(error)) return false;
+  const message = error instanceof Error ? error.message : String(error);
+  return !EXPECTED_PROVIDER_MISS.test(message);
+}
+
+/**
+ * The data service's refusal of a read for its request limit (429), however
+ * it reached the caller: as itself, as the failure behind the router's "No
+ * quote provider available", or as the cause of a busy search. Null for any
+ * other failure.
+ */
+function rateLimitRefusal(error: unknown, depth = 0): ApiRequestError | null {
+  if (!error || typeof error !== "object" || depth > 4) return null;
+  if (error instanceof ApiRequestError) return error.status === 429 ? error : null;
+  if (error instanceof NoProviderError) return rateLimitRefusal(error.failure, depth + 1);
+  return rateLimitRefusal((error as { cause?: unknown }).cause, depth + 1);
+}
+
+/**
+ * Whether a read was refused for the data service's request limit, including
+ * one whose message alone crossed a bridge ("... at its request limit for
+ * AAPL. Try again in 40 s."). Never asked again: asking is more of what it
+ * refused, so the row keeps when to try.
+ */
+export function isRateLimited(error: unknown): boolean {
+  if (error == null) return false;
+  if (rateLimitRefusal(error)) return true;
+  const message = (error instanceof Error ? error.message : String(error)).trim();
+  return message.startsWith(rateLimitedMessage().split(".")[0]!);
+}
+
+/**
+ * A read refused for the request limit, worded as a single read of `symbol`
+ * says it: "Gloom's data service is at its request limit for AAPL. Try again
+ * in 40 s.". The error itself when it says so already.
+ */
+export function rateLimitedError(error: unknown, symbol: string): unknown {
+  const refusal = rateLimitRefusal(error);
+  return refusal ? new NoProviderError(rateLimitedMessage(symbol, refusal.retryAfterMs), refusal) : error;
+}
+
+/**
+ * Whether a failure says nothing of what was asked, so asked again in a
+ * moment it may be answered: no connection, no answer from the data service,
+ * or a busy moment. A source's own answer (Not a ticker, a delisting) is not
+ * one, and neither is the request limit (`isRateLimited`), which is never
+ * asked again.
+ */
+export function isTransientServiceFailure(error: unknown): boolean {
+  if (error == null || isRateLimited(error)) return false;
+  if (isNetworkFailure(error) || isProviderBusy(error)) return true;
+  const message = (error instanceof Error ? error.message : String(error)).trim();
+  return message.startsWith(serviceDidNotAnswerMessage().split(".")[0]!);
+}

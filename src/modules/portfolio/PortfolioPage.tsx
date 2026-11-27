@@ -1,219 +1,212 @@
-import React, { useEffect, useState } from 'react';
+/**
+ * 组合与风险工作台：回答「我赚的是 beta 还是 alpha、现在有没有超风险预算」。
+ *
+ * 计算全部走 core/domain 的纯函数（本地与云端共用）；
+ * 样本不足时指标显示「不可得」并列出原因，绝不填 0 冒充安全。
+ */
+import { memo, useEffect, useMemo, useState } from 'react';
 import { usePortfolioStore } from '../../stores/usePortfolioStore';
-import { useAppStore } from '../../stores/useAppStore';
+import { useSeries } from '../../core/data/hooks';
+import { checkLimits, riskSummary, drift, hhi, effectiveN } from '../../core/domain';
 
-const PortfolioSummaryCards: React.FC = () => {
-  const summary = usePortfolioStore(state => state.summary);
-
-  const cards = [
-    {
-      label: '总资产',
-      value: `¥${summary.totalAssets.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
-      trend: summary.totalPnL >= 0 ? '+' : '',
-      trendValue: `${summary.totalPnL.toFixed(2)} (${summary.totalPnLPercent.toFixed(2)}%)`,
-      color: summary.totalPnL >= 0 ? 'text-green-500' : 'text-red-500',
-    },
-    {
-      label: '持仓市值',
-      value: `¥${summary.totalValue.toLocaleString('zh-CN', { minimumFractionDigits: 2 })}`,
-      subValue: `成本 ¥${summary.totalCost.toLocaleString('zh-CN', { minimumFractionDigits: 2 })}`,
-      color: 'text-blue-500',
-    },
-    {
-      label: '可用现金',
-      value: `¥${summary.cash.toLocaleString('zh-CN', { minimumFractionDigits: 2 })}`,
-      subValue: `占比 ${((summary.cash / summary.totalAssets) * 100).toFixed(1)}%`,
-      color: 'text-gray-600',
-    },
-    {
-      label: '持仓数量',
-      value: summary.positionCount.toString(),
-      subValue: `胜率 ${summary.winRate.toFixed(1)}%`,
-      color: 'text-purple-500',
-    },
-  ];
-
-  return (
-    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-      {cards.map((card, idx) => (
-        <div key={idx} className="bg-white dark:bg-gray-800 rounded-lg p-4 shadow">
-          <div className="text-sm text-gray-500 dark:text-gray-400 mb-1">{card.label}</div>
-          <div className={`text-2xl font-bold ${card.color}`}>{card.value}</div>
-          {card.trend && (
-            <div className={`text-sm mt-1 ${card.color}`}>
-              {card.trend}{card.trendValue}
-            </div>
-          )}
-          {card.subValue && (
-            <div className="text-xs text-gray-500 dark:text-gray-400 mt-1">{card.subValue}</div>
-          )}
-        </div>
-      ))}
-    </div>
-  );
+const DEFAULT_LIMITS = {
+  maxDrawdown: 20,
+  var95: 15,
+  maxSingleWeight: 25,
+  maxSectorWeight: 40,
+  minCash: 5,
+  maxHHI: 0.25,
 };
 
-const PositionTable: React.FC = () => {
-  const positions = usePortfolioStore(state => state.positions);
-  const removePosition = usePortfolioStore(state => state.removePosition);
-
-  if (positions.length === 0) {
-    return (
-      <div className="bg-white dark:bg-gray-800 rounded-lg p-8 text-center">
-        <div className="text-gray-400 text-lg">暂无持仓</div>
-        <div className="text-sm text-gray-500 mt-2">点击右上角"添加持仓"开始记录</div>
-      </div>
-    );
-  }
-
+function MetricCard({ label, value, suffix, missing }: { label: string; value: number | null; suffix?: string; missing?: boolean }) {
   return (
-    <div className="bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden">
-      <div className="overflow-x-auto">
-        <table className="w-full">
-          <thead className="bg-gray-50 dark:bg-gray-700">
-            <tr>
-              <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">代码/名称</th>
-              <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">持仓</th>
-              <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">成本价</th>
-              <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">现价</th>
-              <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">市值</th>
-              <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">盈亏</th>
-              <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">权重</th>
-              <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">操作</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
-            {positions.map(pos => (
-              <tr key={pos.id} className="hover:bg-gray-50 dark:hover:bg-gray-700">
-                <td className="px-4 py-3">
-                  <div className="font-medium text-gray-900 dark:text-white">{pos.symbol}</div>
-                  <div className="text-xs text-gray-500">{pos.name}</div>
-                </td>
-                <td className="px-4 py-3 text-right text-sm">{pos.quantity.toLocaleString()}</td>
-                <td className="px-4 py-3 text-right text-sm">¥{pos.avgCost.toFixed(2)}</td>
-                <td className="px-4 py-3 text-right text-sm font-medium">¥{pos.currentPrice.toFixed(2)}</td>
-                <td className="px-4 py-3 text-right text-sm">¥{pos.marketValue.toLocaleString('zh-CN', { minimumFractionDigits: 2 })}</td>
-                <td className={`px-4 py-3 text-right text-sm font-medium ${pos.pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                  {pos.pnl >= 0 ? '+' : ''}{pos.pnl.toFixed(2)}
-                  <div className="text-xs">({pos.pnlPercent >= 0 ? '+' : ''}{pos.pnlPercent.toFixed(2)}%)</div>
-                </td>
-                <td className="px-4 py-3 text-right text-sm">{pos.weight.toFixed(1)}%</td>
-                <td className="px-4 py-3 text-center">
-                  <button
-                    onClick={() => removePosition(pos.id)}
-                    className="text-red-600 hover:text-red-800 text-sm"
-                  >
-                    删除
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+    <div className="rounded border border-[#151823] bg-[#0b0d13] p-2.5">
+      <div className="text-[0.75rem] text-[#636878]">{label}</div>
+      <div className={`mt-1 font-mono text-[1.125rem] ${missing ? 'text-[#f5a524]' : 'text-[#d8dce6]'}`}>
+        {missing ? '不可得' : value == null ? '—' : `${value.toFixed(2)}${suffix ?? ''}`}
       </div>
     </div>
   );
-};
+}
 
-export const PortfolioPage: React.FC = () => {
-  const loadPositions = usePortfolioStore(state => state.loadPositions);
-  const loadTrades = usePortfolioStore(state => state.loadTrades);
-  const addPosition = usePortfolioStore(state => state.addPosition);
-  const loading = usePortfolioStore(state => state.loading);
-  const market = useAppStore(state => state.market);
-
-  const [showAdd, setShowAdd] = useState(false);
-  const [form, setForm] = useState({ symbol: '', name: '', quantity: '', avgCost: '', currentPrice: '' });
-  const [error, setError] = useState<string | null>(null);
+export const PortfolioPage = memo(function PortfolioPage() {
+  const positions = usePortfolioStore((s) => s.positions);
+  const summary = usePortfolioStore((s) => s.summary);
+  const loadPositions = usePortfolioStore((s) => s.loadPositions);
+  const [targets, setTargets] = useState<Record<string, string>>({});
+  const [mode, setMode] = useState<'asset' | 'single'>('asset');
 
   useEffect(() => {
-    loadPositions();
-    loadTrades();
-  }, [loadPositions, loadTrades]);
+    void loadPositions();
+  }, [loadPositions]);
 
-  const field = (key: keyof typeof form, label: string, placeholder: string) => (
-    <label className="block">
-      <span className="text-xs text-gray-500">{label}</span>
-      <input
-        value={form[key]}
-        onChange={(e) => setForm((f) => ({ ...f, [key]: e.target.value }))}
-        placeholder={placeholder}
-        className="mt-1 w-full px-2 py-1.5 text-sm border rounded dark:bg-gray-700 dark:border-gray-600"
-      />
-    </label>
+  // 收益序列：用沪深300真实日线算日收益（样本足够才算 VaR/CVaR）
+  const bench = useSeries(['cn:index:sh000300'], '2y');
+  const returns = useMemo(() => {
+    const pts = bench.data?.series?.[0]?.points ?? [];
+    const out: number[] = [];
+    for (let i = 1; i < pts.length; i++) {
+      const prev = Number(pts[i - 1].value);
+      const cur = Number(pts[i].value);
+      if (prev > 0 && Number.isFinite(cur)) out.push(cur / prev - 1);
+    }
+    return out;
+  }, [bench.data]);
+
+  const risk = useMemo(() => riskSummary(returns), [returns]);
+  const weights = useMemo(() => {
+    const out: Record<string, number> = {};
+    for (const p of positions) out[p.symbol] = Number(p.weight) || 0;
+    return out;
+  }, [positions]);
+
+  const cashPct = summary.totalAssets > 0 ? (summary.cash / summary.totalAssets) * 100 : 100;
+  const checked = useMemo(
+    () => checkLimits({ weights, cash: cashPct, returns }, DEFAULT_LIMITS),
+    [weights, cashPct, returns],
   );
 
-  const submit = async () => {
-    const qty = Number(form.quantity);
-    const cost = Number(form.avgCost);
-    const rawPrice = form.currentPrice.trim() === '' ? cost : Number(form.currentPrice);
-    if (!form.symbol.trim() || !Number.isFinite(qty) || qty <= 0 || !Number.isFinite(cost) || cost <= 0) {
-      setError('请填写有效的代码、数量与成本价（数量与价格需大于 0）。');
-      return;
+  const targetWeights = useMemo(() => {
+    const out: Record<string, number> = {};
+    for (const p of positions) {
+      const t = Number(targets[p.symbol]);
+      out[p.symbol] = Number.isFinite(t) ? t : (100 - cashPct) / Math.max(1, positions.length);
     }
-    await addPosition({
-      symbol: form.symbol.trim().toUpperCase(),
-      name: form.name.trim() || form.symbol.trim().toUpperCase(),
-      quantity: qty,
-      avgCost: cost,
-      currentPrice: Number.isFinite(rawPrice) && rawPrice > 0 ? rawPrice : cost,
-      market,
-    });
-    setForm({ symbol: '', name: '', quantity: '', avgCost: '', currentPrice: '' });
-    setError(null);
-    setShowAdd(false);
-  };
+    return out;
+  }, [positions, targets, cashPct]);
+
+  const drifts = useMemo(() => drift(weights, targetWeights, mode), [weights, targetWeights, mode]);
+  const missingSet = new Set(risk.missing.map((m) => m.split('（')[0]));
 
   return (
-    <div className="p-6 space-y-6">
-      <div className="flex justify-between items-center">
-        <div>
-          <h1 className="text-3xl font-bold text-gray-900 dark:text-white">持仓跟踪</h1>
-          <p className="text-sm text-gray-500 mt-1">手动记账，数据只存本机浏览器；不会自动同步券商</p>
-        </div>
-        <button
-          onClick={() => { setShowAdd((v) => !v); setError(null); }}
-          className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
-        >
-          {showAdd ? '收起' : '+ 添加持仓'}
-        </button>
+    <div className="space-y-3 p-3">
+      <div>
+        <h2 className="text-[1.0625rem] font-bold text-[#d8dce6]">组合与风险 · 我有没有超风险预算</h2>
+        <p className="mt-1 text-[0.8125rem] text-[#636878]">
+          指标来自真实日线；样本不足写「不可得」而不是填 0。VaR 需≥100 样本，CVaR 需≥250。
+        </p>
       </div>
 
-      {showAdd && (
-        <div className="bg-white dark:bg-gray-800 rounded-lg p-4 shadow space-y-3">
-          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-            {field('symbol', '代码', '600519')}
-            {field('name', '名称（可选）', '贵州茅台')}
-            {field('quantity', '数量', '100')}
-            {field('avgCost', '成本价', '1800')}
-            {field('currentPrice', '现价（可留空）', '')}
-          </div>
-          {error && <div className="text-sm text-red-600">{error}</div>}
-          <div className="flex items-center gap-2">
-            <button onClick={() => void submit()} className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
-              保存持仓
-            </button>
-            <button onClick={() => setShowAdd(false)} className="px-4 py-2 border rounded-lg dark:border-gray-600">
-              取消
-            </button>
-            <span className="text-xs text-gray-500">
-              现价留空则按成本价计；当前市价对应「{market === 'US' ? '美股' : 'A股'}」。
+      <section className="grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
+        <MetricCard label="VaR 95%" value={risk.metrics.var95} suffix="%" missing={missingSet.has('var95')} />
+        <MetricCard label="CVaR 95%" value={risk.metrics.cvar95} suffix="%" missing={missingSet.has('cvar95')} />
+        <MetricCard label="Sharpe" value={risk.metrics.sharpe} missing={missingSet.has('sharpe')} />
+        <MetricCard label="Sortino" value={risk.metrics.sortino} missing={missingSet.has('sortino')} />
+        <MetricCard label="最大回撤" value={risk.metrics.maxDrawdown} suffix="%" missing={missingSet.has('maxDrawdown')} />
+      </section>
+
+      <div className="grid gap-3 lg:grid-cols-[1.2fr_1fr]">
+        <section className="rounded-[5px] border border-[#1a1d26] bg-[#0f1118] p-4">
+          <div className="mb-2 flex items-center justify-between">
+            <h3 className="text-[0.875rem] font-semibold text-[#d8dce6]">持仓台账</h3>
+            <span className="text-[0.75rem] text-[#4d5364]">
+              有效持仓 {checked.summary.effectiveN ?? '—'} · HHI {checked.summary.hhi ?? '—'}
             </span>
           </div>
-        </div>
-      )}
+          {positions.length === 0 ? (
+            <div className="py-6 text-center text-[0.8125rem] text-[#4d5364]">还没有持仓记录</div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[38rem] border-collapse text-[0.8125rem]">
+                <thead>
+                  <tr className="border-b border-[#1a1d26] text-left text-[0.75rem] text-[#4d5364]">
+                    <th className="py-1.5 pr-2 font-normal">标的</th>
+                    <th className="py-1.5 pr-2 font-normal">数量</th>
+                    <th className="py-1.5 pr-2 font-normal">成本</th>
+                    <th className="py-1.5 pr-2 font-normal">现价</th>
+                    <th className="py-1.5 pr-2 font-normal">盈亏</th>
+                    <th className="py-1.5 pr-2 font-normal">权重%</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {positions.map((p) => (
+                    <tr key={p.id} className="border-b border-[#151823] last:border-0">
+                      <td className="py-1.5 pr-2 text-[#d8dce6]">{p.name || p.symbol}</td>
+                      <td className="py-1.5 pr-2 font-mono text-[#b0b5c0]">{p.quantity}</td>
+                      <td className="py-1.5 pr-2 font-mono text-[#b0b5c0]">{p.avgCost.toFixed(2)}</td>
+                      <td className="py-1.5 pr-2 font-mono text-[#b0b5c0]">{p.currentPrice.toFixed(2)}</td>
+                      <td className={`py-1.5 pr-2 font-mono ${p.pnl >= 0 ? 'text-[#e5484d]' : 'text-[#30a46c]'}`}>
+                        {p.pnlPercent.toFixed(2)}%
+                      </td>
+                      <td className="py-1.5 pr-2 font-mono text-[#b0b5c0]">{p.weight.toFixed(1)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
 
-      {loading ? (
-        <div className="text-center py-12">
-          <div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
-          <div className="mt-2 text-gray-600">加载中...</div>
+        <section className="rounded-[5px] border border-[#1a1d26] bg-[#0f1118] p-4">
+          <h3 className="mb-2 text-[0.875rem] font-semibold text-[#d8dce6]">纪律与限额检查</h3>
+          {checked.violations.length === 0 && checked.unverified.length === 0 ? (
+            <p className="text-[0.8125rem] text-[#30a46c]">全部通过</p>
+          ) : (
+            <div className="space-y-1.5">
+              {checked.violations.map((v, i) => (
+                <div key={i} className="rounded border-l-2 border-[#e5484d] bg-[#e5484d]/5 px-2 py-1 text-[0.8125rem] text-[#e5484d]">
+                  {v.rule} · 实际 {String(v.actual)} / 限额 {String(v.limit ?? '—')}
+                  {v.note ? ` · ${v.note}` : ''}
+                </div>
+              ))}
+              {checked.unverified.map((u, i) => (
+                <div key={`u${i}`} className="rounded border-l-2 border-[#f5a524] bg-[#f5a524]/5 px-2 py-1 text-[0.8125rem] text-[#f5a524]">
+                  {u.rule} 无法验证 · {u.reason}
+                </div>
+              ))}
+            </div>
+          )}
+          <p className="mt-3 border-t border-[#151823] pt-2 text-[0.75rem] text-[#4d5364]">
+            相关性拥挤与流动性变现需要逐笔相关矩阵与 ADV20，本版未接入，不计入通过。
+          </p>
+        </section>
+      </div>
+
+      <section className="rounded-[5px] border border-[#1a1d26] bg-[#0f1118] p-4">
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+          <h3 className="text-[0.875rem] font-semibold text-[#d8dce6]">配置漂移</h3>
+          <div className="flex gap-1">
+            {(['asset', 'single'] as const).map((m) => (
+              <button
+                key={m}
+                onClick={() => setMode(m)}
+                className={`rounded px-2.5 py-1 text-[0.8125rem] transition-colors ${
+                  mode === m ? 'bg-[rgba(64,120,255,0.16)] text-[#d8dce6]' : 'text-[#787e8e] hover:text-[#d8dce6]'
+                }`}
+              >
+                {m === 'asset' ? '大类资产' : '单券/行业'}
+              </button>
+            ))}
+          </div>
         </div>
-      ) : (
-        <>
-          <PortfolioSummaryCards />
-          <PositionTable />
-        </>
-      )}
+        {drifts.length === 0 ? (
+          <div className="py-5 text-center text-[0.8125rem] text-[#4d5364]">没有可核对的持仓权重</div>
+        ) : (
+          drifts.map((d) => (
+            <div key={d.key} className="flex items-center gap-2 border-b border-[#151823] py-1.5 last:border-0">
+              <span className="w-[8rem] shrink-0 truncate text-[0.8125rem] text-[#b0b5c0]">{d.key}</span>
+              <span className="w-[4rem] shrink-0 text-[0.75rem] text-[#636878]">现 {d.actual.toFixed(1)}%</span>
+              <input
+                aria-label={`${d.key} 目标权重`}
+                value={targets[d.key] ?? ''}
+                onChange={(e) => setTargets((prev) => ({ ...prev, [d.key]: e.target.value }))}
+                placeholder={d.target.toFixed(1)}
+                className="w-[5rem] rounded border border-[#1a1d26] bg-[#0b0d13] px-2 py-1 font-mono text-[0.8125rem] text-[#d8dce6] outline-none focus:border-[#4078ff]"
+              />
+              <span className={`font-mono text-[0.8125rem] ${d.delta >= 0 ? 'text-[#e5484d]' : 'text-[#30a46c]'}`}>
+                {d.delta >= 0 ? '+' : ''}{d.delta.toFixed(2)}pp
+              </span>
+              <span
+                className={`ml-auto rounded px-1.5 text-[0.75rem] ${
+                  d.level === 'breach' ? 'bg-[#e5484d]/15 text-[#e5484d]' : d.level === 'warn' ? 'bg-[#f5a524]/15 text-[#f5a524]' : 'text-[#4d5364]'
+                }`}
+              >
+                {d.level === 'breach' ? '超限' : d.level === 'warn' ? '预警' : '正常'}
+              </span>
+            </div>
+          ))
+        )}
+      </section>
     </div>
   );
-};
+});

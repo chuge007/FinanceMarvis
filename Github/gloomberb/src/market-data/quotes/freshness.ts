@@ -1,0 +1,306 @@
+import type { Quote } from "../../types/financials";
+import { canonicalExchange, isUsListingExchange } from "../../utils/exchanges";
+import { zonedDateKey } from "../../utils/zoned-date-time";
+import { formatUtcDayTime } from "../../utils/utc-time";
+import { getPublishedUsEquitySession } from "../published-us-sessions";
+import { quoteFutureToleranceMs } from "./clock";
+import {
+  activeUsExtendedHoursSession,
+  delayedFeedLagMs,
+  isAlwaysOpenExchange,
+  isRegularSessionTime,
+  isTimestampStaleForExchangeSession,
+  isUsPriorSessionPremarketQuote,
+  isUsRegularCloseQuoteInPostSession,
+  latestRegularSessionClose,
+  latestRegularSessionOpen,
+  nextRegularSessionOpen,
+  preMarketOpenOn,
+  readIndexSession,
+} from "../market/freshness";
+import { indexSessionVenue } from "../market/index-session-venues";
+
+// Give the next regular session's NAV time to publish after its actual close.
+const NAV_PUBLICATION_ALLOWANCE_MS = 12 * 60 * 60_000;
+
+/**
+ * Receipt time cannot establish when the source observed a quoted price. A
+ * stamp slightly ahead of local time is clock skew, not a bad observation.
+ */
+export function hasValidQuoteObservationTime(quote: Pick<Quote, "lastUpdated">, now = Date.now()): boolean {
+  const timestamp = quote.lastUpdated;
+  return typeof timestamp === "number" && Number.isFinite(timestamp) && timestamp > 0
+    && Number.isFinite(now) && timestamp <= now + quoteFutureToleranceMs()
+    && Number.isFinite(new Date(timestamp).getTime()) && Number.isFinite(new Date(now).getTime());
+}
+
+/**
+ * The size of the stamp window a chart bar, an as-of clock and a session edge
+ * all move on: a whole minute. A stamp that stays inside the held one's window
+ * changes none of them.
+ */
+const QUOTE_STAMP_BUCKET_MS = 60_000;
+
+/** The whole minute a quote's stamp falls in; NaN for an unusable stamp. */
+export function quoteStampBucket(quote: Pick<Quote, "lastUpdated">): number {
+  return Number.isFinite(quote.lastUpdated) ? Math.floor(quote.lastUpdated / QUOTE_STAMP_BUCKET_MS) : Number.NaN;
+}
+
+/** The source date of a validated daily fund observation, including an old NAV. */
+export function dailyNavDate(quote: Quote, now = Date.now()): string | null {
+  if (quote.priceObservation !== "nav" || quote.instrumentType !== "MUTUALFUND"
+    || (quote.priceBasis !== undefined && quote.priceBasis !== "per-unit")
+    || !Number.isFinite(quote.price) || quote.price <= 0
+    || !hasValidQuoteObservationTime(quote, now) || quote.lastUpdated > now) return null;
+  const exchange = quote.listingExchangeName || quote.exchangeName;
+  const date = quote.changeSessionDate;
+  if (typeof exchange !== "string" || typeof date !== "string"
+    || getPublishedUsEquitySession(exchange, date)?.kind !== "session"
+    || zonedDateKey(quote.lastUpdated, "America/New_York") !== date) return null;
+  return date;
+}
+
+function isDailyNavStale(quote: Quote, now: number): boolean {
+  const date = dailyNavDate(quote, now);
+  if (!date) return true;
+  const exchange = quote.listingExchangeName || quote.exchangeName;
+  const today = zonedDateKey(now, "America/New_York");
+  if (!today || !getPublishedUsEquitySession(exchange!, today) || date > today) return true;
+  const sourceDay = Date.parse(`${date}T00:00:00Z`);
+  for (let ahead = 1; ahead <= 10; ahead++) {
+    const nextDate = new Date(sourceDay + ahead * 24 * 60 * 60_000).toISOString().slice(0, 10);
+    const next = getPublishedUsEquitySession(exchange!, nextDate);
+    if (!next) return true;
+    if (next.kind === "session") return now >= next.close + NAV_PUBLICATION_ALLOWANCE_MS;
+  }
+  return true;
+}
+
+export function isExtendedHoursExchange(quote: Quote): boolean {
+  return isUsListingExchange(quote.listingExchangeName || quote.exchangeName);
+}
+
+function isQuoteMissingActiveSessionPrice(quote: Quote, now: number): boolean {
+  if (!isExtendedHoursExchange(quote)) return false;
+  const exchange = quote.listingExchangeName || quote.exchangeName;
+  const activeSession = activeUsExtendedHoursSession(now, exchange);
+  if (!activeSession) return false;
+  // No after-hours trade yet: today's regular close is the current price.
+  if (activeSession === "POST" && quote.postMarketPrice == null && isUsRegularCloseQuoteInPostSession(
+    quote.lastUpdated, exchange, quote.marketState, now,
+  )) return false;
+  if (quote.marketState !== activeSession) return true;
+  if (activeSession === "POST") return quote.postMarketPrice == null;
+  // No pre-market trade yet: the previous session's close is the current price.
+  return quote.preMarketPrice == null && !isUsPriorSessionPremarketQuote(
+    quote.lastUpdated, exchange, quote.marketState, now,
+  );
+}
+
+export function isQuoteStaleForCurrentSession(quote: Quote | null | undefined, now = Date.now()): boolean {
+  if (!quote) return false;
+  if (quote.stale === true) return true;
+  if (!hasValidQuoteObservationTime(quote, now)) return true;
+  if (quote.priceObservation != null) return isDailyNavStale(quote, now);
+  if (isQuoteMissingActiveSessionPrice(quote, now)) return true;
+
+  // A tolerated future stamp belongs to the session in progress, not the next one.
+  return isTimestampStaleForExchangeSession(
+    Math.min(quote.lastUpdated, now),
+    quote.listingExchangeName || quote.exchangeName,
+    now,
+    quote.marketState,
+  );
+}
+
+/** Spot FX: its week is in `fx-market-hours`, not a session calendar. */
+const FX_VENUE = "CCY";
+/** Every venue with sessions has had one within this long; Spring Festival can close TWSE for twelve days. */
+const LONGEST_SESSION_GAP_MS = 14 * 24 * 60 * 60_000;
+
+/**
+ * Whether a quote's last print is older than its venue's latest completed
+ * regular session: a whole session traded since, so the state its source
+ * reports says where the market is, not where this price is (a delisted
+ * line read as OPEN). Only a quote already stale for its session can be;
+ * the last session's close before the open, an after-hours print after it,
+ * and round-the-clock venues and FX keep their state. A venue without a
+ * calendar counts a print older than any venue goes between sessions.
+ */
+export function isQuoteBeforeLatestSession(quote: Quote | null | undefined, now = Date.now()): boolean {
+  if (!quote || !isQuoteStaleForCurrentSession(quote, now)) return false;
+  const venue = canonicalExchange(quote.listingExchangeName || quote.exchangeName);
+  if (venue === FX_VENUE || isAlwaysOpenExchange(venue)) return false;
+  const printed = quote.lastUpdated;
+  if (!Number.isFinite(printed) || printed <= 0 || printed > now) return false;
+  const latest = latestRegularSessionClose(venue, now);
+  if (!latest) return now - printed > LONGEST_SESSION_GAP_MS;
+  const open = latestRegularSessionOpen(venue, latest.close);
+  return open != null ? printed < open : zonedDateKey(printed, latest.timeZone) < latest.date;
+}
+
+/**
+ * How old a stale print is, as an order ticket and a quote with no prints
+ * today say it: `45s old`, `12m old`, `10h 0m old`; `Age unknown` without a
+ * time, or with one ahead of `now`.
+ */
+export function quoteAgeText(at: number | null | undefined, now = Date.now()): string {
+  if (!at || !Number.isFinite(at) || at > now) return "Age unknown";
+  const seconds = Math.max(0, Math.floor((now - at) / 1000));
+  return seconds < 60 ? `${seconds}s old`
+    : seconds < 3600 ? `${Math.floor(seconds / 60)}m old`
+    : `${Math.floor(seconds / 3600)}h ${Math.floor(seconds % 3600 / 60)}m old`;
+}
+
+const PRINT_WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
+const PRINT_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;
+
+/**
+ * When a stale quote last printed, while its venue's regular session is open
+ * and nothing has printed in it. A stalled feed and a closure the calendar
+ * does not know (TWSE's typhoon days) read alike, so a quote says only this.
+ * Null for a quote that is current, a venue that is closed or without known
+ * hours, and a print from today's session.
+ */
+export function noPrintsTodaySince(quote: Quote | null | undefined, now = Date.now()): number | null {
+  if (!quote || quote.delisting || !isQuoteStaleForCurrentSession(quote, now) || !hasValidQuoteObservationTime(quote, now)) return null;
+  const venue = quote.listingExchangeName || quote.exchangeName;
+  if (isRegularSessionTime(venue, now) !== true) return null;
+  const open = latestRegularSessionOpen(venue, now);
+  const printed = Math.min(quote.lastUpdated, now);
+  return open != null && printed < open ? printed : null;
+}
+
+/** How long past a venue's open its delayed feed's first print may take, beyond the feed's own lag. */
+const FIRST_DELAYED_PRINT_GRACE_MS = 5 * 60_000;
+
+/**
+ * A venue abroad whose regular session has opened by its calendar while its
+ * delayed feed has not printed in it yet (LSE at 08:09 on a feed 15 minutes
+ * behind): the session is open, and the last price is the previous close
+ * until the first delayed print, due about `expected`. Null outside that
+ * wait, for a US listing (whose pre-market the service names) and for a
+ * quote that printed today.
+ */
+export function awaitingFirstDelayedPrint(quote: Quote | null | undefined, now = Date.now()): { open: number; expected: number } | null {
+  if (!quote || quote.delisting || !Number.isFinite(quote.lastUpdated)) return null;
+  const venue = canonicalExchange(quote.listingExchangeName || quote.exchangeName);
+  if (!venue || isUsListingExchange(venue) || isRegularSessionTime(venue, now) !== true) return null;
+  const open = latestRegularSessionOpen(venue, now);
+  if (open == null || quote.lastUpdated >= open) return null;
+  const expected = open + delayedFeedLagMs(venue);
+  return now <= expected + FIRST_DELAYED_PRINT_GRACE_MS ? { open, expected } : null;
+}
+
+/** `no prints today since Thu 22 Oct 05:30 UTC (20h 50m old)`, or null as noPrintsTodaySince. */
+export function noPrintsTodayText(quote: Quote | null | undefined, now = Date.now()): string | null {
+  const since = noPrintsTodaySince(quote, now);
+  if (since == null) return null;
+  const at = new Date(since);
+  const time = `${PRINT_WEEKDAYS[at.getUTCDay()]} ${at.getUTCDate()} ${PRINT_MONTHS[at.getUTCMonth()]} ${at.toISOString().slice(11, 16)} UTC`;
+  return `no prints today since ${time} (${quoteAgeText(since, now)})`;
+}
+
+/**
+ * What a quote nothing traded on says beside its price (Quote.nominalPrice):
+ * "no trades since Thu 29 Oct, nominal price", or "no recent trades, nominal
+ * price" when its bars reach back to no trade. In the regular session too,
+ * until it trades. Null for any other quote.
+ */
+export function nominalPriceText(quote: Pick<Quote, "nominalPrice"> | null | undefined): string | null {
+  const nominal = quote?.nominalPrice;
+  if (!nominal) return null;
+  const traded = nominal.lastTraded ? new Date(`${nominal.lastTraded}T00:00:00Z`) : null;
+  return traded && Number.isFinite(traded.getTime())
+    ? `no trades since ${PRINT_WEEKDAYS[traded.getUTCDay()]} ${traded.getUTCDate()} ${PRINT_MONTHS[traded.getUTCMonth()]}, nominal price`
+    : "no recent trades, nominal price";
+}
+
+/**
+ * When a nominal price is from, as an Updated cell names it: "6 Nov close", the venue session whose nominal close it
+ * is (Quote.nominalPrice), not the last print, which can be days older. Null for any other quote.
+ */
+export function nominalSessionLabel(quote: Pick<Quote, "nominalPrice"> | null | undefined): string | null {
+  const session = quote?.nominalPrice?.session;
+  const day = session ? new Date(`${session}T00:00:00Z`) : null;
+  return day && Number.isFinite(day.getTime()) ? `${formatUtcDayTime({ time: day.getTime(), dateOnly: true })} close` : null;
+}
+
+/**
+ * What a quote with no live price says beside it (Quote.dailyClose): "no live
+ * quote, daily close of Wed 11 Nov". Null for any other quote.
+ */
+export function dailyCloseText(quote: Pick<Quote, "dailyClose"> | null | undefined): string | null {
+  const session = quote?.dailyClose?.session;
+  const day = session ? new Date(`${session}T00:00:00Z`) : null;
+  return day && Number.isFinite(day.getTime())
+    ? `no live quote, daily close of ${PRINT_WEEKDAYS[day.getUTCDay()]} ${day.getUTCDate()} ${PRINT_MONTHS[day.getUTCMonth()]}`
+    : null;
+}
+
+/** When a daily close is from, as an Updated cell names it: "11 Nov daily close" (Quote.dailyClose). Null for any other quote. */
+export function dailyCloseSessionLabel(quote: Pick<Quote, "dailyClose"> | null | undefined): string | null {
+  const session = quote?.dailyClose?.session;
+  const day = session ? new Date(`${session}T00:00:00Z`) : null;
+  return day && Number.isFinite(day.getTime()) ? `${formatUtcDayTime({ time: day.getTime(), dateOnly: true })} daily close` : null;
+}
+
+/** A US listing's after-hours session ends four hours past its regular close (17:00 New York after an early close). */
+const US_AFTER_HOURS_MS = 4 * 60 * 60_000;
+
+/**
+ * Whether a quote's market could have printed between `since` and `now`, so
+ * a feed that stopped carrying it then has left it behind. The window is
+ * read as the quote's feed shows it: a delayed quote's moves `delayedFeedLagMs`
+ * late, so a session's last delayed prints come after its close and its first
+ * after its open. A US listing trades from its 04:00 pre-market through after
+ * hours on the published session days; an index follows its venue's
+ * calendar, or the sessions it carries (`indexSession`) when its venue has
+ * none; another venue its regular sessions. A venue without known hours goes
+ * by the session its source last reported: the regular session, or none
+ * reported, counts as trading. Round-the-clock venues always trade, and a
+ * listing that no longer trades never does. False means the last price is
+ * still the market's current one: US prices at 07:00 UTC on a weekday.
+ */
+export function couldQuoteHavePrintedSince(quote: Quote, since: number, now = Date.now()): boolean {
+  if (quote.delisting) return false;
+  if (!Number.isFinite(since) || !Number.isFinite(now)) return true;
+  const venue = indexSessionVenue(quote.symbol) ?? canonicalExchange(quote.listingExchangeName || quote.exchangeName);
+  if (isAlwaysOpenExchange(venue)) return true;
+  const lag = quote.dataSource === "delayed" ? delayedFeedLagMs(venue) : 0;
+  const from = Math.min(since, now) - lag;
+  const to = now - lag;
+
+  if (isUsListingExchange(venue)) {
+    const latest = latestRegularSessionClose(venue, to);
+    if (latest && latest.close + US_AFTER_HOURS_MS > from) return true;
+    // The next session's pre-market has opened.
+    const next = nextRegularSessionOpen(venue, latest?.close ?? to);
+    const preMarket = next ? preMarketOpenOn(venue, next.date) : null;
+    return preMarket != null && preMarket <= to;
+  }
+
+  const inSession = isRegularSessionTime(venue, to);
+  if (inSession !== null) {
+    if (inSession) return true;
+    const latest = latestRegularSessionClose(venue, to);
+    return !!latest && latest.close > from;
+  }
+
+  const index = readIndexSession(quote.indexSession);
+  if (index) return [...index.regular, index.current].some((session) => session.start <= to && session.end > from);
+
+  return quote.marketState == null || quote.marketState === "REGULAR";
+}
+
+export function hasFreshQuoteForCurrentSession(
+  quotes: Iterable<Quote | null | undefined>,
+  now = Date.now(),
+): boolean {
+  for (const quote of quotes) {
+    if (quote && !isQuoteStaleForCurrentSession(quote, now)) {
+      return true;
+    }
+  }
+  return false;
+}

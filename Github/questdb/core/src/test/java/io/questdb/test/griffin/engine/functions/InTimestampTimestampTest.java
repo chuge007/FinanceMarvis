@@ -1,0 +1,273 @@
+/*+*****************************************************************************
+ *     ___                  _   ____  ____
+ *    / _ \ _   _  ___  ___| |_|  _ \| __ )
+ *   | | | | | | |/ _ \/ __| __| | | |  _ \
+ *   | |_| | |_| |  __/\__ \ |_| |_| | |_) |
+ *    \__\_\\__,_|\___||___/\__|____/|____/
+ *
+ *  Copyright (c) 2014-2019 Appsicle
+ *  Copyright (c) 2019-2026 QuestDB
+ *
+ *  Licensed under the Apache License, Version 2.0 (the "License");
+ *  you may not use this file except in compliance with the License.
+ *  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ *  distributed under the License is distributed on an "AS IS" BASIS,
+ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  See the License for the specific language governing permissions and
+ *  limitations under the License.
+ *
+ ******************************************************************************/
+
+package io.questdb.test.griffin.engine.functions;
+
+import io.questdb.cairo.sql.RecordCursor;
+import io.questdb.cairo.sql.RecordCursorFactory;
+import io.questdb.std.ObjList;
+import io.questdb.std.str.Utf8String;
+import io.questdb.test.AbstractCairoTest;
+import io.questdb.test.tools.BindVarTuple;
+import org.junit.Assert;
+import org.junit.Test;
+
+public class InTimestampTimestampTest extends AbstractCairoTest {
+
+    @Test
+    public void testBindVarRuntimeConstantsWithConstant() throws Exception {
+        final ObjList<BindVarTuple> cases = new ObjList<>();
+        cases.add(BindVarTuple.ok(
+                "runtime constants",
+                "participantId\tparticipantIdType\n",
+                bindVariableService -> {
+                    bindVariableService.setDate(0, 1000L);
+                    bindVariableService.setTimestamp(1, 2000L);
+                    bindVariableService.setTimestamp(2, 3000L);
+                }
+        ));
+
+        assertQuery("""
+                SELECT DISTINCT initParticipantId AS participantId, initParticipantIdType AS participantIdType
+                FROM 'MovementLog'
+                WHERE movementBusinessDate=$1 AND slotId IN ($2, '1970-01-01T00:00:00.005000Z', $3)
+                ORDER BY participantId
+                LIMIT 0,6""")
+                .ddl("""
+                        create table MovementLog(
+                        ts timestamp,
+                        initParticipantId long,
+                        initParticipantIdType symbol,
+                        movementBusinessDate date,
+                        slotId timestamp
+                        ) timestamp(ts) partition by day wal
+                        """)
+                .assertBinds(cases);
+    }
+
+    @Test
+    public void testBindVarTypeChange() throws Exception {
+        // when more than one argument supplied, the function will match exact values from the list
+        final ObjList<BindVarTuple> cases = new ObjList<>();
+        cases.add(BindVarTuple.ok(
+                "simple",
+                """
+                        a\tts
+                        -1148479920\t1970-01-01T00:00:00.000000Z
+                        315515118\t1970-01-01T00:00:00.001000Z
+                        -948263339\t1970-01-01T00:00:00.005000Z
+                        """,
+                bindVariableService -> {
+                    bindVariableService.setInt(0, 0);
+                    bindVariableService.setInt(1, 1000);
+                    bindVariableService.setStr(2, "1970-01-01T00:00:00.005000Z");
+                }
+        ));
+
+        cases.add(BindVarTuple.ok(
+                "type change",
+                """
+                        a\tts
+                        1326447242\t1970-01-01T00:00:00.006000Z
+                        592859671\t1970-01-01T00:00:00.007000Z
+                        -1191262516\t1970-01-01T00:00:00.010000Z
+                        """,
+                bindVariableService -> {
+                    bindVariableService.setLong(0, 6000);
+                    bindVariableService.setStr(1, "1970-01-01T00:00:00.007000Z");
+                    bindVariableService.setInt(2, 10_000);
+                }
+        ));
+
+        cases.add(BindVarTuple.ok(
+                "type change with varchar",
+                """
+                        a\tts
+                        1326447242\t1970-01-01T00:00:00.006000Z
+                        -1191262516\t1970-01-01T00:00:00.010000Z
+                        -2041844972\t1970-01-01T00:00:00.011000Z
+                        """,
+                bindVariableService -> {
+                    bindVariableService.setLong(0, 6000);
+                    bindVariableService.setVarchar(1, new Utf8String("1970-01-01T00:00:00.011000Z"));
+                    bindVariableService.setInt(2, 10_000);
+                }
+        ));
+
+        assertQuery("test where ts in ($1,$2,$3)")
+                .ddl("create table test as (select rnd_int() a, timestamp_sequence(0, 1000) ts from long_sequence(100))")
+                .assertBinds(cases);
+    }
+
+    @Test
+    public void testInStrColumnParsesEachRow() throws Exception {
+        // The tick string of each row gives the intervals that t must fall in. 2024-01-15 is a
+        // Monday, so the day filter of row 5 drops the only day. A malformed string (row 6), a NULL
+        // string (row 7) and a NULL timestamp (row 8) match nothing, so NOT IN holds for them.
+        assertQuery("SELECT k, t IN s AS in_s, t NOT IN s AS not_in_s, t IN v AS in_v, t NOT IN v AS not_in_v FROM x")
+                .ddl(
+                        "CREATE TABLE x (k INT, t TIMESTAMP, s STRING, v VARCHAR)",
+                        """
+                                INSERT INTO x VALUES
+                                    (1, '2024-01-15T10:00:00.000000Z', '2024-01-15', '2024-01-15'),
+                                    (2, '2024-01-15T10:00:00.000000Z', '2024-01-16', '2024-01-16'),
+                                    (3, '2024-01-15T10:00:59.999999Z', '2024-01-[14,15]T10:00', '2024-01-[14,15]T10:00'),
+                                    (4, '2024-01-15T10:01:00.000000Z', '2024-01-[14,15]T10:00', '2024-01-[14,15]T10:00'),
+                                    (5, '2024-01-15T10:00:00.000000Z', '2024-01-15#tue', '2024-01-15#tue'),
+                                    (6, '2024-01-15T10:00:00.000000Z', '2024-01-[15', '2024-01-[15'),
+                                    (7, '2024-01-15T10:00:00.000000Z', NULL, NULL),
+                                    (8, NULL, '2024-01-15', '2024-01-15')
+                                """
+                )
+                .expectSize()
+                .returns("""
+                        k\tin_s\tnot_in_s\tin_v\tnot_in_v
+                        1\ttrue\tfalse\ttrue\tfalse
+                        2\tfalse\ttrue\tfalse\ttrue
+                        3\ttrue\tfalse\ttrue\tfalse
+                        4\tfalse\ttrue\tfalse\ttrue
+                        5\tfalse\ttrue\tfalse\ttrue
+                        6\tfalse\ttrue\tfalse\ttrue
+                        7\tfalse\ttrue\tfalse\ttrue
+                        8\tfalse\ttrue\tfalse\ttrue
+                        """);
+    }
+
+    @Test
+    public void testIntervalBindVariable() throws Exception {
+        execute("create table test as (select rnd_int() a, timestamp_sequence(0, 1000) ts from long_sequence(10000))");
+
+        // baseline
+        assertQuery("select timestamp_floor('1s', ts), count() from test where ts in '1970-01-01T00:00:02'")
+                .noLeakCheck()
+                .expectSize()
+                .returns("""
+                        timestamp_floor\tcount
+                        1970-01-01T00:00:02.000000Z\t1000
+                        """);
+
+        final ObjList<BindVarTuple> cases = new ObjList<>();
+        cases.add(BindVarTuple.ok(
+                "2s",
+                """
+                        timestamp_floor\tcount
+                        1970-01-01T00:00:02.000000Z\t1000
+                        """,
+                bindVariableService -> bindVariableService.setStr(0, "1970-01-01T00:00:02")
+        ));
+
+        cases.add(BindVarTuple.fails(
+                "int interval",
+                64,
+                "unsupported bind variable type [INT] expected one of [STRING or VARCHAR]",
+                bindVariableService -> bindVariableService.setInt(0, 10)
+        ));
+
+        cases.add(BindVarTuple.ok(
+                "2s",
+                """
+                        timestamp_floor\tcount
+                        1970-01-01T00:00:03.000000Z\t1000
+                        """,
+                bindVariableService -> bindVariableService.setStr(0, "1970-01-01T00:00:03")
+        ));
+
+        assertQuery("select timestamp_floor('1s', ts), count() from test where ts in $1")
+                .noLeakCheck()
+                .expectSize()
+                .assertBinds(cases);
+    }
+
+    @Test
+    public void testListOfTimestamps() throws Exception {
+        execute("create table test as (select rnd_int() a, timestamp_sequence(0, 1000) ts from long_sequence(100))");
+
+        assertQuery("test where ts in ('1970-01-01T00:00:00.070000Z', 77000, '1970-01-01'::date)")
+                .noLeakCheck()
+                .returns("""
+                        a\tts
+                        -1148479920\t1970-01-01T00:00:00.000000Z
+                        -2144581835\t1970-01-01T00:00:00.070000Z
+                        -296610933\t1970-01-01T00:00:00.077000Z
+                        """);
+    }
+
+    @Test
+    public void testListOfTimestampsInvalidInput() throws Exception {
+        execute("create table test as (select rnd_int() a, timestamp_sequence(0, 1000) ts from long_sequence(100))");
+
+        assertQuery("test where ts in ('1970-01-01T00:00:0.070000Z', 'abc')")
+                .fails(18, "Invalid date [str=1970-01-01T00:00:0.070000Z]");
+    }
+
+    @Test
+    public void testListOfTimestampsUnsupportedType() throws Exception {
+        execute("create table test as (select rnd_int() a, timestamp_sequence(0, 1000) ts from long_sequence(100))");
+
+        assertQuery("test where ts in ('1970-01-01T00:00:00.070000Z', true)")
+                .fails(49, "cannot compare TIMESTAMP with type BOOLEAN");
+    }
+
+    @Test
+    public void testNestedDateAndTimeLists() throws Exception {
+        assertQuery("""
+                SELECT
+                    '2024-01-15T09:00:00'::TIMESTAMP IN '[2024-01-15,2024-01-16]T[09:00,14:30]:[00,30]' AS micro,
+                    '2024-01-16T14:30:30.999999999'::TIMESTAMP_NS IN '[2024-01-15,2024-01-16]T[09:00,14:30]:[00,30]' AS nano,
+                    '2024-01-16T14:30:31'::TIMESTAMP IN '[2024-01-15,2024-01-16]T[09:00,14:30]:[00,30]' AS outside
+                """).expectSize().returns("""
+                micro	nano	outside
+                true	true	false
+                """);
+    }
+
+    @Test
+    public void testNowInTickExprWithDateVariableReevaluatesOnCachedExecution() throws Exception {
+        assertMemoryLeak(() -> {
+            // T1 = 1_000_000_000 micros (1000 seconds since epoch)
+            long t1 = 1_000_000_000L;
+            setCurrentMicros(t1);
+
+            // Compile the query once; the factory will be reused (cached)
+            try (RecordCursorFactory factory = select(
+                    "SELECT 1 AS v FROM long_sequence(1) WHERE now() IN '$now-100s..$now'"
+            )) {
+                // First execution: now() == T1, interval is [T1-100s, T1] — should match
+                try (RecordCursor cursor = factory.getCursor(sqlExecutionContext)) {
+                    Assert.assertTrue("first execution should return a row", cursor.hasNext());
+                }
+
+                // Advance now by 200 seconds (well past the first interval)
+                long t2 = t1 + 200_000_000L;
+                setCurrentMicros(t2);
+
+                // Second execution with the same factory: now() == T2,
+                // interval must re-evaluate to [T2-100s, T2] — should still match
+                try (RecordCursor cursor = factory.getCursor(sqlExecutionContext)) {
+                    Assert.assertTrue("second execution should return a row after now() advances", cursor.hasNext());
+                }
+            }
+        });
+    }
+}

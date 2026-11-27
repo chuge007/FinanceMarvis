@@ -1,0 +1,48 @@
+# World map
+
+`MAP` is one map for anything with a place: trading venues, country names, and layers for ships, ports, energy, airports and AI buildout facilities, each with a table of what it holds.
+
+| Type | Opens |
+|---|---|
+| `MAP` | The world map: trading venues and the default layers (today the shipping chokepoints) |
+| `MAP venues` | Trading venues alone, with each one's session, local time and the next session change |
+| `MAP ships` | Ships and shipping chokepoints |
+| `MAP ports` | Ports with weekly calls and trade |
+| `MAP energy` | Pipelines, oil and gas fields and LNG terminals, all in the United States (the footer dates the terminals' capacity list); a search elsewhere says so |
+| `MAP air` | Airports, and flights where they are switched on |
+| `MAP ships Sydney` | Ships and chokepoints around Sydney |
+| `MAP air 51.5,-0.1` | Air traffic around latitude 51.5, longitude -0.1 |
+
+A venue's session is `open` while its core session trades, `holiday` on a full-day closure its exchange published (Nasdaq Riga on Latvia's Proclamation Day), `pre-market` or `after-hours` for a US venue trading around its core session, and `closed` otherwise. `gloom fn MAP venues --json` keeps `open` for the core session beside `session`.
+
+The selected venue and `gloom fn MAP venues` show the next published closure and early close when known. When the calendar provides a date but the app cannot verify an exact closing time, MAP shows only the date. Once that shortened session is over, MAP moves to the next listed early close.
+
+Put a place after the layers. Coordinates are latitude,longitude; names come from the app's countries, venue cities and layer search (including ports, airports and chokepoints), with no outside geocoder. An unknown place opens the world and says so in the footer. In pane settings, **Home area** sets where new maps without a place start; blank means world. The table starts with nearby results first, including in `gloom fn MAP ships Sydney` and `gloom shot MAP ships Sydney`. The terminal always draws the whole world. On desktop and web, moving the map switches layer tables to the visible area at the layer's supported zoom, and the pane keeps its own saved pan and zoom.
+
+## Layers
+
+Pick layers in the pane settings, grouped as ships, air, energy, ports and infrastructure, each with its cadence and status. Up to four layers show at once, two of them live. A layer added to Gloom Cloud appears in the picker without an app update. A plain `MAP` follows Gloom Cloud's default layers until you change its layers or venues; from then on it keeps what you chose.
+
+**Facilities** are TheBuildout's located data centers, fabs, power plants and the plants around them (`MAP facilities`). A map with facilities on can be linked to `TBO` or any list: it then shows the selected company's sites, owned or not, and the bar above the table switches to every site owned by a company in the selected theme. The map frames the sites each time the company or theme changes. What a free account sees of a theme follows TheBuildout's own free and Pro split.
+
+The map's table lists one layer; the bar above it switches layers and `/` searches. `Enter` opens an entity: its figures, linked tickers, chart series and, for a ship, its recent track. `d` opens the linked company's description, `g` charts the entity's series.
+
+Dense layers show counts until you zoom in. On the desktop and the web the map zooms until a pane shows some 15 km of sea, so a harbor or a strait fills it and ships stand apart. Zoom with the wheel, a trackpad pinch, a double click or `+` and `-` (`0` resets); drag to pan. From the keyboard, `m` hands the arrow keys to the map (Shift for bigger steps) and `Esc` gives them back to the list; clicking the map does the same. `<` and `>` narrow and widen the list beside the map. The map is drawn in Web Mercator, so a country keeps its shape at any latitude. Each layer has its own icon: a ship points along its course while under way and is a dot at rest, colored by class (hover **Ships** in the legend for the key); a view holding more than about 900 of one layer's points draws them as dots until you zoom closer. Hovering a feature shows its name. Coastlines sharpen as you zoom in: closer views switch to finer outlines and load only the part in view. Country names show on the desktop and the web, the largest on the world view and smaller ones as you zoom in; the terminal map leaves them out. Ticker links marked inferred are sector or ownership guesses; reviewed links name the owner or operator the source itself lists.
+
+## Series in G
+
+`GEO:<name>` charts a map series beside anything else, for example `G XOM, GEO:HORMUZ`. `CHOKE` opens the main chokepoints' daily transits, `CHOKE SUEZ` one of them. A name or alias finds its strait (`CHOKE Hormuz`, `CHOKE Bab el-Mandeb`); text that names none, such as a ticker, says so and lists the main ones instead of opening an empty chart. `fn CHOKE` prints each one's latest day, its 7-day and 28-day average transits, and the 28-day average's change against the same 28 days a year earlier, with that year-ago average and its days beside it (`Yr-ago 28D avg 87.3`, `Yr-ago days 2025-10-19 to 2025-11-15`, `28D vs yr ago -96.0%`). The six together are named `Suez`, `Panama`, `Hormuz`, `Bab el-Mandeb`, `Malacca` and `Bosphorus` in the legend, so each shows whole. Transits are published some days after the ships pass, so a chart of map series alone ends at its newest observation rather than today, and the legend leads with that date (`Oct 4`); a series whose last value is older carries its own date. Panned or zoomed back, the chart says how far its data goes in the footer (`newest Oct 11`). The chart editor's series search finds map series by name. `CORR FRO, STNG, GEO:HORMUZ` correlates a map series with tickers; see [research data](research-data.md#charts-comparisons-and-correlations) for how a count is paired with returns.
+
+### US activity
+
+The same index carries US activity series that have no place on the map, each daily: travelers through TSA's airport checkpoints (`GEO:TSA`) and electricity demand from EIA-930 for the Lower 48 (`GEO:US48.LOAD`) and the balancing authorities that run the largest power markets (`ERCOT.LOAD`, `PJM.LOAD`, `MISO.LOAD`, `CAISO.LOAD`, `NYISO.LOAD`, `ISONE.LOAD`, `SPP.LOAD`). Each has a 7-day average (`.7D`, as in `GEO:TSA.7D`) and a change in percent on the same weekday 52 weeks earlier (`.YOY`), so a holiday or a weekend lines up with its own. A day is the day counted: the day travelers were screened, the Eastern-time day of the demand, in GWh, not adjusted for weather. Demand for the Lower 48 is EIA's own daily figure, from the grid monitor's Lower 48 workbook: the sum of the hourly demand every Lower 48 balancing authority reported, by Eastern-time day. It is shown for a day only once EIA's hourly files have that day from every balancing authority to within 0.75% of the day's demand, so a day still short of late hours is not shown low. A balancing authority's day is the sum of its 24 hours (23 or 25 when the clocks change) and is shown only when every hour is in. A day the publisher has only part of (the newest, or the day the clocks go back for an authority that drops the repeated hour) is a gap until a later file completes it: the chart breaks its line there and reads the day as missing. A 7-day average needs six of the seven days, so one missing day leaves its week's averages in place. `gloom catalog TSA`, `catalog "air travel"`, `catalog "power load"`, `catalog "grid load"` and `catalog "electricity demand"` list them with their publisher, and a chart of them alone gives the newest day and the day the publisher put it out.
+
+## From the shell
+
+`gloom fn MAP --layer vessels --json` returns a layer's table with its linked tickers; `gloom shot MAP ships` saves a picture of the map. `--query` filters a table by any field; on ships, the name or ticker of a listed cruise or container line lists the ships of its brands (`--query "Royal Caribbean"` or `--query RCL`), the ticker matching only its fleet.
+
+The chokepoints' transits and the ports' calls and trade are published by IMF PortWatch, from ships' position reports (AIS). `fn CHOKE`, `fn MAP ports`, their screenshots and their exports cite it as the source and publisher (`Source: IMF PortWatch · observed Sun 11 Oct · lag 6d` under `shot CHOKE`, `# Publisher: IMF PortWatch` in CSV), and `gloom catalog transits` lists it in the Publisher column. Layers that do not name a publisher cite Gloom Cloud.
+
+## Map data
+
+Land, coastlines, country borders and country names come from [Natural Earth](https://www.naturalearthdata.com/) (1:50m, and 1:10m when zoomed in; names and their label points from the 1:50m admin-0 countries), which is in the public domain; at the closest zooms the coastline is the 1:10m outline, drawn as straight runs a few hundred metres long. `bun run map:data` rebuilds them from a pinned release with `scripts/generate-world-map-data.ts`; the app ships the result and asks no outside host for map data.

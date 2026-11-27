@@ -1,0 +1,653 @@
+"""Efficiency Module"""
+
+__docformat__ = "google"
+
+
+import pandas as pd
+
+
+def get_asset_turnover_ratio(
+    sales: pd.Series | pd.DataFrame, average_total_assets: pd.Series | pd.DataFrame
+) -> pd.Series | pd.DataFrame:
+    """
+    Calculate the asset turnover ratio, an efficiency ratio that measures how
+    efficiently a company uses its assets to generate sales.
+
+    Args:
+        sales (float or pd.Series): Total sales of the company.
+        average_total_assets (float or pd.Series): Average total assets of the company.
+        This is typically calculated as (beginning total assets + ending total assets) / 2.
+
+    Returns:
+        float | pd.Series: The asset turnover ratio value.
+    """
+    return sales / average_total_assets
+
+
+def get_inventory_turnover_ratio(
+    cost_of_goods_sold: pd.Series | pd.DataFrame,
+    average_inventory: pd.Series | pd.DataFrame,
+) -> pd.Series | pd.DataFrame:
+    """
+    Calculate the inventory turnover ratio, an efficiency ratio that measures
+    how quickly a company sells its inventory.
+
+    Args:
+        cost_of_goods_sold (float or pd.Series): Total cost of goods sold of the company.
+        average_inventory (float or pd.Series): Average inventory of the company.
+        This is typically calculated as (beginning inventory + ending inventory) / 2.
+
+    Returns:
+        float | pd.Series: The inventory turnover ratio value.
+    """
+    return cost_of_goods_sold / average_inventory
+
+
+def get_days_of_inventory_outstanding(
+    average_inventory: pd.Series | pd.DataFrame,
+    cost_of_goods_sold: pd.Series | pd.DataFrame,
+    days: int | float = 365,
+) -> pd.Series | pd.DataFrame:
+    """
+    Calculate the days sales in inventory ratio, an efficiency ratio that measures
+    how long it takes a company to sell its inventory.
+
+    Args:
+        average_inventory (float or pd.Series): Average inventory of the company.
+        This is typically calculated as (beginning inventory + ending inventory) / 2.
+        cost_of_goods_sold (float or pd.Series): Total cost of goods sold of the company.
+        days (int | float, optional): Number of days the cost of goods sold or revenue covers
+            (365 for a year of flows). Defaults to 365.
+
+    Returns:
+        float | pd.Series: The days sales in inventory ratio value.
+    """
+    return average_inventory / cost_of_goods_sold * days
+
+
+def get_days_of_sales_outstanding(
+    average_accounts_receivable: pd.Series | pd.DataFrame,
+    net_credit_sales: pd.Series | pd.DataFrame,
+    days: int | float = 365,
+) -> pd.Series | pd.DataFrame:
+    """
+    Calculate the days of sales outstanding, an efficiency ratio that measures the average number of days it takes a
+    company to collect payment on its credit sales.
+
+    Args:
+        average_accounts_receivable (float or pd.Series): Average accounts receivable of the company.
+        This is typically calculated as (beginning accounts receivable + ending accounts receivable) / 2.
+        net_credit_sales (float or pd.Series): Net credit sales of the company.
+        days (int | float, optional): Number of days the cost of goods sold or revenue covers
+            (365 for a year of flows). Defaults to 365.
+
+    Returns:
+        float | pd.Series: The days of sales outstanding value.
+    """
+    return average_accounts_receivable / net_credit_sales * days
+
+
+def get_operating_cycle(
+    days_of_inventory: pd.Series | pd.DataFrame,
+    days_of_sales_outstanding: pd.Series | pd.DataFrame,
+) -> pd.Series | pd.DataFrame:
+    """
+    Calculate the operating cycle, an efficiency ratio that measures the average
+    number of days it takes a company to turn its inventory into cash.
+
+    Args:
+        days_of_inventory (float or pd.Series): Days of inventory of the company.
+        days_of_sales_outstanding (float or pd.Series): Days of sales outstanding of the company.
+
+    Returns:
+        float | pd.Series: The operating cycle value.
+    """
+    return days_of_inventory + days_of_sales_outstanding
+
+
+def get_accounts_payables_turnover_ratio(
+    cost_of_goods_sold: pd.Series | pd.DataFrame,
+    average_accounts_payable: pd.Series | pd.DataFrame,
+) -> pd.Series | pd.DataFrame:
+    """
+    Calculate the accounts payable turnover ratio, an efficiency ratio that measures how quickly a company pays its
+    suppliers.
+
+    Args:
+        cost_of_goods_sold (float or pd.Series): Total Costs of Goods Sold of the company.
+        average_accounts_payable (float or pd.Series): Average accounts payable of the company.
+
+    Returns:
+        float | pd.Series: The payables turnover ratio value.
+    """
+    return cost_of_goods_sold / average_accounts_payable
+
+
+def get_days_of_accounts_payable_outstanding(
+    cost_of_goods_sold: pd.Series | pd.DataFrame,
+    average_accounts_payable: pd.Series | pd.DataFrame,
+    days: int | float = 365,
+) -> pd.Series | pd.DataFrame:
+    """
+    Calculate the days payables outstanding, an efficiency ratio that measures the
+    number of days it takes a company to pay its suppliers.
+
+    Args:
+        cost_of_goods_sold (float or pd.Series): Total Costs of Goods Sold of the company.
+        average_accounts_payable (float or pd.Series): Average accounts payable of the company.
+        This is typically calculated as (beginning accounts payable + ending accounts payable) / 2.
+        days (int | float, optional): Number of days the cost of goods sold or revenue covers
+            (365 for a year of flows). Defaults to 365.
+
+    Returns:
+        float | pd.Series: The days payables outstanding value.
+    """
+    return average_accounts_payable / cost_of_goods_sold * days
+
+
+def get_cash_conversion_cycle(
+    days_inventory: pd.Series | pd.DataFrame,
+    days_sales_outstanding: pd.Series | pd.DataFrame,
+    days_payables_outstanding: pd.Series | pd.DataFrame,
+) -> pd.Series | pd.DataFrame:
+    """
+    Calculate the cash conversion cycle: the number of days a company's cash is tied up in inventory and receivables,
+    less the days it takes to pay its suppliers.
+
+    Args:
+        days_inventory (float or pd.Series): Average number of days that inventory is held before being sold.
+        days_sales_outstanding (float or pd.Series): Average number of days it takes to collect accounts receivable.
+        days_payables_outstanding (float or pd.Series): Average number of days it takes to pay accounts payable.
+
+    Returns:
+        float | pd.Series: The Cash Conversion Cycle value.
+    """
+    return days_inventory + days_sales_outstanding - days_payables_outstanding
+
+
+def get_receivables_turnover(
+    average_accounts_receivable: pd.Series | pd.DataFrame,
+    net_credit_sales: pd.Series | pd.DataFrame,
+) -> pd.Series | pd.DataFrame:
+    """
+    Calculate the receivables turnover, an efficiency ratio that measures how many times per period a company collects
+    its average accounts receivable, i.e. how efficiently it extends credit to and collects cash from its customers.
+
+    Note that this is the reciprocal (times per period, rather than days) of the
+    days of sales outstanding: Receivables Turnover = Days in Period /
+    Days of Sales Outstanding.
+
+    The formula is as follows:
+
+        Receivables Turnover = Net Credit Sales / Average Accounts Receivable
+
+    Args:
+        average_accounts_receivable (float or pd.Series): Average accounts receivable of the company.
+        This is typically calculated as (beginning accounts receivable + ending accounts receivable) / 2.
+        net_credit_sales (float or pd.Series): The total net credit sales generated during the period.
+
+    Returns:
+        float | pd.Series: The receivables turnover value.
+    """
+    return net_credit_sales / average_accounts_receivable
+
+
+def get_sga_to_revenue_ratio(
+    sga_expenses: pd.Series | pd.DataFrame, revenue: pd.Series | pd.DataFrame
+) -> pd.Series | pd.DataFrame:
+    """
+    Calculate the sales, general and administrative (SG&A) expenses to revenue ratio: the share of revenue a company
+    spends on its overhead.
+
+    Args:
+        sga_expenses (float or pd.Series): SG&A expenses of the company.
+        revenue (float or pd.Series): Revenue of the company.
+
+    Returns:
+        float | pd.Series: The SG&A to revenue ratio.
+    """
+    return sga_expenses / revenue
+
+
+def get_fixed_asset_turnover(
+    net_sales: pd.Series | pd.DataFrame,
+    average_net_fixed_assets: pd.Series | pd.DataFrame,
+) -> pd.Series | pd.DataFrame:
+    """
+    Calculate the Fixed Asset Turnover ratio, an efficiency ratio that
+    measures how efficiently a company uses its fixed assets to generate sales.
+
+    Args:
+        net_sales (float or pd.Series): Total sales of the company.
+        average_net_fixed_assets (float or pd.Series): Average net property, plant and equipment
+            of the company.
+
+    Returns:
+        float | pd.Series: The Fixed Asset Turnover ratio value.
+    """
+    return net_sales / average_net_fixed_assets
+
+
+def get_operating_ratio(
+    operating_expenses: pd.Series | pd.DataFrame,
+    cost_of_goods_sold: pd.Series | pd.DataFrame,
+    revenue: pd.Series | pd.DataFrame,
+) -> pd.Series | pd.DataFrame:
+    """
+    Calculate the operating ratio, a financial metric that measures the efficiency
+    of a company's operations by comparing its operating expenses to its revenue.
+
+    Args:
+        operating_expenses (float or pd.Series): Total operating expenses of the company.
+        cost_of_goods_sold (float or pd.Series): Total cost of goods sold of the company.
+        revenue (float or pd.Series): Total revenue of the company.
+
+    Returns:
+        float or pd.Series: The operating ratio value.
+    """
+    return (operating_expenses + cost_of_goods_sold) / revenue
+
+
+def get_cash_conversion_efficiency(
+    operating_cash_flow: pd.Series,
+    revenue: pd.Series,
+):
+    """
+    Calculate the cash conversion efficiency, a financial metric that measures the efficiency
+    of a company's operations by comparing its operating cash flow to its revenue.
+
+    Args:
+        operating_cash_flow (float or pd.Series): Total operating cash flow of the company.
+        revenue (float or pd.Series): Total revenue of the company.
+
+    Returns:
+        float or pd.Series: The cash conversion efficiency value.
+    """
+    return operating_cash_flow / revenue
+
+
+def get_research_and_development_ratio(
+    research_and_development_expenses: pd.Series | pd.DataFrame,
+    revenue: pd.Series | pd.DataFrame,
+) -> pd.Series | pd.DataFrame:
+    """
+    Calculate the research and development (R&D) intensity ratio, an efficiency ratio that measures how much a company
+    reinvests in research and development relative to its revenue.
+
+    This ratio is particularly relevant for comparing companies in technology,
+    pharmaceutical and other innovation-driven industries, where R&D spending is a
+    key driver of future growth.
+
+    Args:
+        research_and_development_expenses (float or pd.Series): Research and development
+            expenses of the company.
+        revenue (float or pd.Series): Total revenue of the company.
+
+    Returns:
+        float | pd.Series: The R&D intensity ratio value.
+    """
+    return research_and_development_expenses / revenue
+
+
+def get_selling_and_marketing_ratio(
+    selling_and_marketing_expenses: pd.Series | pd.DataFrame,
+    revenue: pd.Series | pd.DataFrame,
+) -> pd.Series | pd.DataFrame:
+    """
+    Calculate the selling and marketing (S&M) expenses to revenue ratio, an efficiency ratio that measures the
+    proportion of revenue spent on selling and marketing activities.
+
+    This ratio isolates the selling and marketing component of the combined SG&A
+    expense line, which is useful for comparing customer-acquisition efficiency
+    (e.g. between companies with different administrative overhead structures).
+
+    Args:
+        selling_and_marketing_expenses (float or pd.Series): Selling and marketing
+            expenses of the company.
+        revenue (float or pd.Series): Total revenue of the company.
+
+    Returns:
+        float | pd.Series: The S&M to revenue ratio value.
+    """
+    return selling_and_marketing_expenses / revenue
+
+
+def get_general_and_administrative_ratio(
+    general_and_administrative_expenses: pd.Series | pd.DataFrame,
+    revenue: pd.Series | pd.DataFrame,
+) -> pd.Series | pd.DataFrame:
+    """
+    Calculate the general and administrative (G&A) expenses to revenue ratio, an efficiency ratio that measures the
+    proportion of revenue spent on general and administrative overhead.
+
+    This ratio isolates the administrative component of the combined SG&A expense
+    line, which is useful for assessing overhead efficiency independently of selling
+    and marketing spend.
+
+    Args:
+        general_and_administrative_expenses (float or pd.Series): General and
+            administrative expenses of the company.
+        revenue (float or pd.Series): Total revenue of the company.
+
+    Returns:
+        float | pd.Series: The G&A to revenue ratio value.
+    """
+    return general_and_administrative_expenses / revenue
+
+
+def get_stock_based_compensation_ratio(
+    stock_based_compensation: pd.Series | pd.DataFrame,
+    revenue: pd.Series | pd.DataFrame,
+) -> pd.Series | pd.DataFrame:
+    """
+    Calculate the stock-based compensation (SBC) to revenue ratio, an efficiency ratio that measures how much of a
+    company's revenue is being used to compensate employees through non-cash equity awards.
+
+    A high or rising SBC-to-revenue ratio is a common quality-of-earnings flag,
+    particularly for technology companies, since SBC is added back in cash flow from
+    operations but represents real economic dilution for shareholders.
+
+    Args:
+        stock_based_compensation (float or pd.Series): Stock-based compensation
+            expense of the company, as reported in the Cash Flow Statement.
+        revenue (float or pd.Series): Total revenue of the company.
+
+    Returns:
+        float | pd.Series: The SBC to revenue ratio value.
+    """
+    return stock_based_compensation / revenue
+
+
+def get_working_capital_turnover_ratio(
+    revenue: pd.Series | pd.DataFrame, average_working_capital: pd.Series | pd.DataFrame
+) -> pd.Series | pd.DataFrame:
+    """
+    Calculate the working capital turnover ratio, an efficiency ratio that measures how
+    effectively a company uses its working capital to generate revenue.
+
+    A high working capital turnover ratio indicates that a company is generating a
+    large amount of revenue relative to the working capital it employs, which can
+    signal an efficient (or, if extreme, undercapitalized) operation. A low ratio can
+    indicate excess inventory, slow receivables collection, or otherwise underutilized
+    working capital.
+
+    The formula is as follows:
+
+        Working Capital Turnover Ratio = Revenue / Average Working Capital
+
+    Args:
+        revenue (float or pd.Series): Total revenue of the company.
+        average_working_capital (float or pd.Series): Average working capital of the company.
+            This is typically calculated as (beginning working capital + ending working
+            capital) / 2, where working capital equals current assets minus current
+            liabilities.
+
+    Returns:
+        float | pd.Series: The working capital turnover ratio value.
+    """
+    return revenue / average_working_capital
+
+
+def get_deferred_revenue_ratio(
+    deferred_revenue: pd.Series | pd.DataFrame, revenue: pd.Series | pd.DataFrame
+) -> pd.Series | pd.DataFrame:
+    """
+    Calculate the deferred revenue ratio, an efficiency ratio that measures the size of a company's deferred revenue
+    (payments collected for goods or services not yet delivered) relative to its revenue.
+
+    This ratio is a common leading indicator for subscription and SaaS businesses,
+    where a growing deferred revenue balance relative to revenue can signal
+    accelerating future revenue recognition.
+
+    Args:
+        deferred_revenue (float or pd.Series): Deferred revenue of the company, as
+            reported in the Balance Sheet Statement.
+        revenue (float or pd.Series): Total revenue of the company.
+
+    Returns:
+        float | pd.Series: The deferred revenue ratio value.
+    """
+    return deferred_revenue / revenue
+
+
+def get_capex_intensity(
+    capital_expenditure: pd.Series | pd.DataFrame, revenue: pd.Series | pd.DataFrame
+) -> pd.Series | pd.DataFrame:
+    """
+    Calculate the capital expenditure intensity, the share of revenue a company
+    reinvests in property, plant and equipment.
+
+    The formula is as follows:
+
+        Capex Intensity = |Capital Expenditure| / Revenue
+
+    Capital expenditure is reported as a negative cash outflow, so its magnitude is
+    used. A revenue of zero or less gives NaN.
+
+    Also known as: capex to revenue, capex to sales, capital intensity of spending.
+
+    Args:
+        capital_expenditure (float or pd.Series): Capital expenditure of the company,
+            as reported in the Cash Flow Statement.
+        revenue (float or pd.Series): Total revenue of the company.
+
+    Returns:
+        float | pd.Series: The capex intensity value.
+    """
+    return abs(capital_expenditure) / revenue.where(revenue > 0)
+
+
+def get_capex_to_depreciation_ratio(
+    capital_expenditure: pd.Series | pd.DataFrame,
+    depreciation_and_amortization: pd.Series | pd.DataFrame,
+) -> pd.Series | pd.DataFrame:
+    """
+    Calculate the capital expenditure to depreciation ratio, which compares what a company invests in its assets with
+    what wears off them.
+
+    Above 1 the asset base grows, around 1 the company maintains it and below 1 it shrinks.
+
+    The formula is as follows:
+
+        Capex to Depreciation = |Capital Expenditure| / Depreciation and Amortization
+
+    Capital expenditure is reported as a negative cash outflow, so its magnitude is
+    used. Depreciation and amortization of zero or less gives NaN.
+
+    Also known as: capex to D&A, capex to depreciation.
+
+    Args:
+        capital_expenditure (float or pd.Series): Capital expenditure of the company,
+            as reported in the Cash Flow Statement.
+        depreciation_and_amortization (float or pd.Series): Depreciation and
+            amortization of the company.
+
+    Returns:
+        float | pd.Series: The capex to depreciation value.
+    """
+    return abs(capital_expenditure) / depreciation_and_amortization.where(
+        depreciation_and_amortization > 0
+    )
+
+
+def get_net_capital_expenditure(
+    capital_expenditure: pd.Series | pd.DataFrame,
+    depreciation_and_amortization: pd.Series | pd.DataFrame,
+) -> pd.Series | pd.DataFrame:
+    """
+    Calculate the net capital expenditure: what a company invests in its assets beyond
+    what wears off them, the growth part of its capital expenditure.
+
+    The formula is as follows:
+
+        Net Capital Expenditure = |Capital Expenditure| - Depreciation and Amortization
+
+    Capital expenditure is reported as a negative cash outflow, so its magnitude is
+    used. A negative value means the company invests less than its assets depreciate.
+
+    Also known as: net capex, net investment, growth capex.
+
+    Args:
+        capital_expenditure (float or pd.Series): Capital expenditure of the company,
+            as reported in the Cash Flow Statement.
+        depreciation_and_amortization (float or pd.Series): Depreciation and
+            amortization of the company.
+
+    Returns:
+        float | pd.Series: The net capital expenditure.
+    """
+    return abs(capital_expenditure) - depreciation_and_amortization
+
+
+def get_asset_growth(
+    total_assets: pd.Series | pd.DataFrame,
+    beginning_total_assets: pd.Series | pd.DataFrame,
+) -> pd.Series | pd.DataFrame:
+    """
+    Calculate the asset growth of Cooper, Gulen and Schill (2008): the change in total assets relative to the total
+    assets at the start of the window.
+
+    Companies that grow their assets the most earn the lowest returns afterwards.
+
+    The formula is as follows:
+
+        Asset Growth = (Total Assets - Beginning Total Assets) / Beginning Total Assets
+
+    Beginning total assets of zero or less give NaN.
+
+    Also known as: total asset growth, investment (Fama-French CMA), ASSETG.
+
+    Args:
+        total_assets (float or pd.Series): Total assets at the end of the window.
+        beginning_total_assets (float or pd.Series): Total assets at the start of the window.
+
+    Returns:
+        float | pd.Series: The asset growth value.
+    """
+    beginning_total_assets = beginning_total_assets.where(beginning_total_assets > 0)
+
+    return (total_assets - beginning_total_assets) / beginning_total_assets
+
+
+def get_net_operating_assets(
+    total_assets: pd.Series | pd.DataFrame,
+    cash_and_short_term_investments: pd.Series | pd.DataFrame,
+    short_term_debt: pd.Series | pd.DataFrame,
+    long_term_debt: pd.Series | pd.DataFrame,
+    total_equity: pd.Series | pd.DataFrame,
+    beginning_total_assets: pd.Series | pd.DataFrame,
+) -> pd.Series | pd.DataFrame:
+    """
+    Calculate the scaled net operating assets of Hirshleifer, Hou, Teoh and Zhang (2004): the operating assets minus
+    the operating liabilities, relative to the total assets at the start of the year.
+
+    It is the cumulative difference between operating income and free cash flow, so a high value means earnings have
+    run ahead of cash for years (a bloated balance sheet), which predicts lower returns.
+
+    The formula is as follows:
+
+        Operating Assets = Total Assets - Cash and Short Term Investments
+        Operating Liabilities = Total Assets - Short Term Debt - Long Term Debt - Total Equity
+        Net Operating Assets = (Operating Assets - Operating Liabilities) / Beginning Total Assets
+
+    The total equity is the common equity, preferred stock and minority interest that
+    the paper deducts separately. Beginning total assets of zero or less give NaN.
+
+    Also known as: NOA, scaled net operating assets, balance sheet bloat.
+
+    Args:
+        total_assets (float or pd.Series): Total assets at the end of the period.
+        cash_and_short_term_investments (float or pd.Series): Cash and short term
+            investments at the end of the period.
+        short_term_debt (float or pd.Series): Debt in current liabilities at the end of
+            the period.
+        long_term_debt (float or pd.Series): Long term debt at the end of the period.
+        total_equity (float or pd.Series): Total equity, including preferred stock and
+            minority interest, at the end of the period.
+        beginning_total_assets (float or pd.Series): Total assets at the start of the year.
+
+    Returns:
+        float | pd.Series: The net operating assets value.
+    """
+    operating_assets = total_assets - cash_and_short_term_investments
+    operating_liabilities = (
+        total_assets - short_term_debt - long_term_debt - total_equity
+    )
+
+    return (operating_assets - operating_liabilities) / beginning_total_assets.where(
+        beginning_total_assets > 0
+    )
+
+
+def get_capex_to_operating_cash_flow_ratio(
+    capital_expenditure: pd.Series | pd.DataFrame,
+    cash_flow_from_operations: pd.Series | pd.DataFrame,
+) -> pd.Series | pd.DataFrame:
+    """
+    Calculate the capital expenditure to operating cash flow ratio, the share of the cash
+    from operations that a company reinvests in property, plant and equipment.
+
+    The formula is as follows:
+
+        Capex to Operating Cash Flow = |Capital Expenditure| / Cash Flow from Operations
+
+    Capital expenditure is reported as a negative cash outflow, so its magnitude is used.
+    A cash flow from operations of zero or less gives NaN. It is the inverse of the
+    capital expenditure coverage ratio.
+
+    Args:
+        capital_expenditure (float or pd.Series): Capital expenditure of the company,
+            as reported in the Cash Flow Statement.
+        cash_flow_from_operations (float or pd.Series): Cash flow from operations.
+
+    Returns:
+        float | pd.Series: The capex to operating cash flow ratio.
+    """
+    return abs(capital_expenditure) / cash_flow_from_operations.where(
+        cash_flow_from_operations > 0
+    )
+
+
+def get_intangibles_to_total_assets_ratio(
+    goodwill_and_intangible_assets: pd.Series | pd.DataFrame,
+    total_assets: pd.Series | pd.DataFrame,
+) -> pd.Series | pd.DataFrame:
+    """
+    Calculate the intangibles to total assets ratio, the share of the assets that is
+    goodwill or another intangible asset.
+
+    The formula is as follows:
+
+        Intangibles to Total Assets = Goodwill and Intangible Assets / Total Assets
+
+    Args:
+        goodwill_and_intangible_assets (float or pd.Series): Goodwill and intangible assets.
+        total_assets (float or pd.Series): Total assets of the company.
+
+    Returns:
+        float | pd.Series: The intangibles to total assets ratio.
+    """
+    return goodwill_and_intangible_assets / total_assets
+
+
+def get_amount_per_employee(
+    amount: pd.Series | pd.DataFrame, employee_count: pd.Series | pd.DataFrame
+) -> pd.Series | pd.DataFrame:
+    """
+    Calculate an amount per employee, such as the revenue or the net income per employee,
+    a measure of the productivity of the workforce.
+
+    The formula is as follows:
+
+        Amount per Employee = Amount / Employee Count
+
+    An employee count of zero or less gives NaN.
+
+    Args:
+        amount (float or pd.Series): The amount, e.g. the revenue or the net income.
+        employee_count (float or pd.Series): The number of employees.
+
+    Returns:
+        float | pd.Series: The amount per employee.
+    """
+    return amount / employee_count.where(employee_count > 0)

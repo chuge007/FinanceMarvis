@@ -1,0 +1,760 @@
+import type { RowWindowOptions } from "../row-window";
+import { logFailure } from "../../utils/log-failure";
+import type { PaneInstanceConfig } from "../../types/config";
+import { CHART_COMPOSER_PANE_ID } from "../../types/config";
+import type {
+  HeadlessPaneDefinition,
+  PaneDef,
+  PaneTemplateCreateOptions,
+  PaneTemplateDef,
+} from "../../types/plugin";
+import { applyChartComposerCapabilityOptions } from "../../plugins/builtin/chart-composer/cli-options";
+import { parseChartSpec } from "../../plugins/builtin/chart-composer/chart-spec";
+import { CHART_COMPOSER_TEMPLATE_ID } from "../../plugins/builtin/chart-composer/catalog-inventory";
+import { normalizeTickerInput } from "../../tickers/search";
+import { slugifyName } from "../../utils/slugify";
+import { fredSeriesArgument } from "../../series/fred-argument";
+import {
+  type CliListing, listCoinNotes, ListingArgError, listingInstrument, listingReadNotes, MAX_CHOICE_LOOKUPS, resolveCliListing, usListingsOnlyMessage,
+} from "../listing-arg";
+import { uncoveredInstrumentKind, uncoveredInstrumentMessage, uncoveredInstrumentsMessage } from "../../tickers/instrument-coverage";
+import { uncoveredInstrumentCommand } from "../uncovered-instrument";
+import { listingAbroadVenue } from "../../utils/sec";
+import { parsePublicTickerKey } from "../../utils/exchanges";
+import { movedListing, movedListingNote } from "../../tickers/listing-fate";
+import { splitSymbolArgs, stripStrayEdges } from "../symbol-args";
+import { readNameEntries } from "../name-entries";
+import { bankFigurePointer, bankWordPointer } from "../known-gaps";
+import { findCatalogSeries, type SeriesSource } from "../series-search";
+import type { PluginCodeCommands, PluginCodeStop } from "./plugin-code";
+import { readTerminalCodeArg } from "../../tickers/company-name-listing";
+import { unknownBloombergMarket, unreadBloombergCode } from "../../tickers/terminal-codes";
+import { notATickerWords } from "../company-name-hint";
+import type { MarketContext } from "../types";
+import { shellWord } from "../../utils/shell-word";
+import { readWatchlistArgument, watchlistMemberSymbol } from "../../portfolio/collection-name";
+import {
+  buildPaneFunctionLookup,
+  buildTemplateContext,
+  findFunctionCode,
+  nearFunctionCodes,
+  paneFunctionCode,
+  suggestedFunctionCodes,
+  suggestPaneFunctions,
+  type NearFunctionCode,
+  type PaneFunctionCatalog,
+} from "./catalog";
+import {
+  argumentNamesTicker,
+  buildCreateOptions,
+  cleanTickerInput,
+  normalizeLookupToken,
+  optionSettings,
+  parsePaneFunctionArgs,
+  type ParsedPaneFunctionArgs,
+} from "./options";
+import { argumentSymbols, validateSymbolCount } from "./headless";
+import { discoveryOpening } from "../../utils/lookup-token";
+import {
+  capabilityHasOption,
+  capabilityPaneSettings,
+  findCapabilityOption,
+  getHeadlessPaneDefinition,
+  getPaneFunctionCapability,
+  noArgumentMessage,
+  normalizeCapabilityOptions,
+  paneFunctionArgument,
+  takesNoArgument,
+  type NormalizedPaneFunctionOptions,
+  type PaneFunctionCapability,
+} from "./capabilities";
+
+/** Plugins whose series a name that opens nothing is pointed at, or a function that gives them when that name is met. */
+type SeriesSources = readonly SeriesSource[] | (() => readonly SeriesSource[]);
+
+export interface ResolvedPaneFunction {
+  token: string;
+  label: string;
+  description: string;
+  shortcut?: string;
+  pane: PaneDef;
+  template?: PaneTemplateDef;
+  headless?: HeadlessPaneDefinition;
+  instance: PaneInstanceConfig;
+  createOptions: PaneTemplateCreateOptions | undefined;
+  optionSettings: Record<string, unknown>;
+  capability: PaneFunctionCapability;
+  options: NormalizedPaneFunctionOptions;
+  /**
+   * `--limit` and `--tail` of a report whose function takes no such option of its own: the rows the report keeps,
+   * as every command that prints a list keeps them (row-window).
+   */
+  rowWindow?: RowWindowOptions;
+  /** `--section` of a report: the table `--csv` and `--ndjson` write, when the function has no `section` option of its own. */
+  tableSection?: string | true;
+}
+
+async function buildPaneInstance(
+  resolved: Pick<ResolvedPaneFunction, "token" | "pane" | "template" | "headless" | "createOptions" | "optionSettings" | "capability" | "options">,
+  context: MarketContext,
+  target: string,
+  command: "fn" | "shot",
+): Promise<PaneInstanceConfig> {
+  // Free text is a phrase, not a symbol. Treating it as a ticker makes the
+  // pane look for a provider for values such as "HIGH GROWTH SOFTWARE".
+  const headlessArgKind = resolved.headless?.argument.kind;
+  const fallbackSymbol = !argumentNamesTicker(resolved.template, resolved.headless, resolved.pane)
+    ? null
+    : headlessArgKind === "tickers" || headlessArgKind === "symbol-list"
+      ? normalizeTickerInput(null, cleanTickerInput(target.split(/[,\s]+/)[0] ?? ""))
+      : normalizeTickerInput(null, cleanTickerInput(target));
+  const primarySymbol = resolved.createOptions?.symbol
+    ?? resolved.createOptions?.symbols?.[0]
+    ?? fallbackSymbol;
+  const templateContext = buildTemplateContext(context, primarySymbol ?? null);
+  const spec = await resolved.template?.createInstance?.(templateContext, resolved.createOptions) ?? {};
+  const instanceId = `${resolved.pane.id}:cli-${slugifyName(target || resolved.pane.id, "pane")}`;
+  const settings = (() => {
+    if (resolved.pane.id !== CHART_COMPOSER_PANE_ID) {
+      return { ...spec.settings, ...resolved.optionSettings };
+    }
+    const chartSpec = parseChartSpec(spec.settings?.chartSpec);
+    if (!chartSpec) {
+      // A chart of too few tickers (CMP of one) has none to draw: say how many it takes.
+      if (resolved.headless) validateSymbolCount(resolved.headless, resolved.token, argumentSymbols(target), command);
+      throw new Error("The chart template did not produce a valid chart specification.");
+    }
+    return {
+      ...spec.settings,
+      chartSpec: applyChartComposerCapabilityOptions(
+        chartSpec,
+        resolved.capability.id,
+        resolved.options,
+      ),
+    };
+  })();
+  return {
+    instanceId,
+    paneId: resolved.pane.id,
+    title: spec.title ?? primarySymbol ?? resolved.pane.name,
+    binding: spec.binding ?? (primarySymbol ? { kind: "fixed", symbol: primarySymbol } : { kind: "none" }),
+    params: spec.params,
+    settings,
+  };
+}
+
+/** The template or pane a name opens, as `fn` resolves it: a function code, an alias, a pane id or name, a keyword. */
+export function findPaneFunction(registry: PaneFunctionCatalog, target: string): { template?: PaneTemplateDef; pane?: PaneDef } | null {
+  const entry = buildPaneFunctionLookup(registry).get(normalizeLookupToken(target));
+  if (!entry) return null;
+  const template = "paneId" in entry && "description" in entry ? entry as PaneTemplateDef : undefined;
+  return { template, pane: template ? registry.panes.get(template.paneId) : entry as PaneDef };
+}
+
+/**
+ * `fn` and `shot` arguments read with the function's own options: one whose
+ * value is a pair (MARS's `--fx-shift TRY -20`) takes the words after its
+ * flag, which a function that has none would read as its argument.
+ */
+export function parsePaneFunctionArgsFor(
+  registry: PaneFunctionCatalog,
+  args: string[],
+  globalOptions: { limit?: number; tail?: number } = {},
+): ParsedPaneFunctionArgs {
+  const parsed = withKeywordNote(registry, withOpeningWord(registry, parsePaneFunctionArgs(args, globalOptions)));
+  const found = parsed.target ? findPaneFunction(registry, parsed.target) : null;
+  if (!found?.pane) return parsed;
+  const capability = getPaneFunctionCapability(found.template, found.pane);
+  if (!capability.options.some((option) => (option.valueWords ?? 1) > 1 || option.list)) return parsed;
+  const reparsed = parsePaneFunctionArgs(args, globalOptions, (key) => findCapabilityOption(capability, key)?.valueWords ?? 1,
+    (key) => findCapabilityOption(capability, key)?.list === true);
+  return { ...reparsed, target: parsed.target, arg: reparsed.target === parsed.target ? reparsed.arg : parsed.arg,
+    ...(parsed.listingNotes ? { listingNotes: parsed.listingNotes } : {}) };
+}
+
+/**
+ * A word that opens no function by its code or name but names one case of a
+ * function (`discovery.opens`: `VX`, `vix futures`) runs that function on the
+ * case's argument and options, and says so: `fn VX` is `fn CTM VIX`, `fn TVL`
+ * is `fn CRYP defi` though TVL is also one of CRYP's keywords, and `fn PDUFA`
+ * is `fn CATL --type pdufa`. A word typed with an argument or an option of
+ * its own keeps it.
+ */
+function withOpeningWord(registry: PaneFunctionCatalog, parsed: ParsedPaneFunctionArgs): ParsedPaneFunctionArgs {
+  const found = parsed.target ? findPaneFunction(registry, parsed.target) : null;
+  if (!parsed.target || (found?.pane && namesFunction(found.template, found.pane, parsed.target))) return parsed;
+  for (const template of registry.paneTemplates.values()) {
+    const pane = registry.panes.get(template.paneId);
+    const opening = pane ? discoveryOpening(getHeadlessPaneDefinition(template, pane)?.discovery, parsed.target) : null;
+    if (!pane || !opening) continue;
+    const code = paneFunctionCode(template, pane, registry);
+    const arg = parsed.arg.trim() || opening.argument;
+    const preset = Object.entries(opening.options ?? {}).filter(([key]) => !(key in parsed.options));
+    const command = [code, arg, ...preset.map(([key, value]) => `--${key} ${value}`)].filter(Boolean).join(" ");
+    return { ...parsed, target: code, arg, options: { ...Object.fromEntries(preset), ...parsed.options },
+      listingNotes: [...parsed.listingNotes ?? [], `${parsed.target} opened ${command}, ${template.label}.`] };
+  }
+  return parsed;
+}
+
+/**
+ * A word that opens a function as one of its keywords rather than its code or
+ * name (`fn VVIX` opens VIX, whose board lists VVIX) says which function it
+ * opened, so the report is never read as one of its own.
+ */
+function withKeywordNote(registry: PaneFunctionCatalog, parsed: ParsedPaneFunctionArgs): ParsedPaneFunctionArgs {
+  const found = parsed.target ? findPaneFunction(registry, parsed.target) : null;
+  if (!found?.pane || !found.template) return parsed;
+  const { template, pane } = found;
+  if (namesFunction(template, pane, parsed.target)) return parsed;
+  const code = paneFunctionCode(template, pane, registry);
+  return { ...parsed, listingNotes: [...parsed.listingNotes ?? [], `${parsed.target} opened ${code}, ${template.label}.`] };
+}
+
+/** Whether a word is the function's code, an alias or a name, rather than one of its keywords. */
+export function namesFunction(template: PaneTemplateDef | undefined, pane: PaneDef, word: string): boolean {
+  const wanted = normalizeLookupToken(word);
+  const headless = getHeadlessPaneDefinition(template, pane);
+  const names = [template?.shortcut?.prefix, ...template?.shortcut?.aliases ?? [], template?.id, template?.label, pane.id, pane.name,
+    headless?.discovery?.id, ...headless?.discovery?.aliases ?? []];
+  return names.some((name) => name && normalizeLookupToken(name) === wanted);
+}
+
+/**
+ * `fn ANR SAN --exchange EPA` is `fn ANR SAN:EPA`: a function that takes
+ * tickers gets each listing as `quote` reads it (`resolveCliListing`), so
+ * `fn ERN 7203:TSE` is Toyota in Tokyo and an exchange the app does not know
+ * fails with the venues the symbol trades on. With several symbols,
+ * `--exchange` names the venue of the ones that name none. A function whose
+ * data covers US listings only (`usListingsOnly`) answers a listing abroad
+ * with that and the company's US listing, and leaves it out of a list.
+ */
+export async function applyListingArgument(
+  registry: PaneFunctionCatalog,
+  context: MarketContext,
+  args: ParsedPaneFunctionArgs,
+  command: "fn" | "shot" = "fn",
+): Promise<ParsedPaneFunctionArgs> {
+  const found = args.target ? findPaneFunction(registry, args.target) : null;
+  if (!found?.pane || !args.arg) return args;
+  // G's series are text (`fn G AAPL MSFT` is two), but a quoted terminal code in them is one listing.
+  if (found.template?.id === CHART_COMPOSER_TEMPLATE_ID) return withChartTerminalCodes(args, context);
+  const headless = getHeadlessPaneDefinition(found.template, found.pane);
+  const kind = headless?.argument.kind ?? found.template?.shortcut?.argKind;
+  const takesOneTicker = kind === "ticker";
+  const takesList = kind === "tickers" || kind === "symbol-list" || (!headless && kind === "ticker-list");
+  // A function with an exchange option of its own (DIST) keeps it.
+  if (!(takesOneTicker || takesList) || getPaneFunctionCapability(found.template, found.pane).options.some((option) => option.key === "exchange")) {
+    return args;
+  }
+  // A watchlist's or a portfolio's name stands for its symbols, as saved (`fn SIW HY3`, `fn RIPL "Pension Book"`).
+  const watchlist = takesList ? await watchlistArgument(args.arg, context, headless?.argument.maximum) : null;
+  if (watchlist) args = { ...args, arg: watchlist.symbols.join(", ") };
+  // A function that reads FRED series (MDAY) gets FRED:T10Y2Y as typed; any other is told it is no listing.
+  const fred = takesOneTicker && headless?.fredSeriesArgument && typeof args.options.exchange !== "string" ? fredSeriesArgument(args.arg) : null;
+  if (fred) return { ...args, arg: `FRED:${fred}` };
+  const exchange = typeof args.options.exchange === "string" ? args.options.exchange : undefined;
+  // A ticker with spaces is no listing, unless it is a terminal's code for one ("JPM US Equity"). A company's name
+  // typed there (`fn DES "Elbit Systems"`) is the listing search finds for it, read as `quote` reads it ("Read
+  // "Elbit Systems" as ESLT:NASDAQ (Elbit Systems Ltd.); also ESLT:TASE."); one search finds no company for stops
+  // before a report of dashes is drawn, as `quote` words a name that is no ticker.
+  let named: CliListing | null = null;
+  if (takesOneTicker && /\s/.test(args.arg) && !await readTerminalCodeArg(context.dataProvider, args.arg)) {
+    // A line written as a code with a market no venue answers to ("AAPL GP") is refused as the resolver words it.
+    // So is a code no symbol is read from ("GTJPY10Y Govt"), with what has it instead.
+    if (unknownBloombergMarket(args.arg) || unreadBloombergCode(args.arg)) await resolveCliListing(args.arg, undefined, context);
+    named = exchange ? null : await resolveCliListing(args.arg, undefined, context)
+      .catch(logFailure("cli.pane-functions-resolver", "Read a company's name typed for a function failed", null));
+    if (!named?.readAs || /\s/.test(named.symbol)) throw new ListingArgError(await notATickerWords(args.arg, context));
+  }
+  const { exchange: _exchange, ...options } = args.options;
+  // A list entry with spaces, or an argument of words, is a company's name search finds, or the symbols it holds.
+  const entered = takesOneTicker ? [args.arg] : await readNameEntries(splitSymbolArgs([args.arg], { phrases: true }), context.dataProvider);
+  if (entered.length === 0) return args;
+  // A symbol the function reads as another (OPX's BTC is the coin, BTC-USD) is named in a note; --exchange keeps it as typed.
+  const aliases = exchange ? [] : entered.map((raw) => headless?.symbolAlias?.(raw) ?? null);
+  const typed = entered.map((raw, index) => aliases[index]?.symbol ?? raw);
+  // RY.TO is the listing its quote names, RY:TSX, as `quote` reads it: a function's data is read by venue.
+  // A long list is a batch of tickers: its words cost no quote each to be read as companies' names, nor its codes
+  // no source quotes to be read on their listings abroad.
+  const companyWord = typed.length <= MAX_CHOICE_LOOKUPS;
+  let listings = named ? [named] : await Promise.all(typed.map((raw): Promise<CliListing> => {
+    const series = !exchange && headless?.fredSeriesArgument ? fredSeriesArgument(raw) : null;
+    if (series) {
+      const symbol = `FRED:${series}`;
+      return Promise.resolve({ symbol, key: symbol, exchange: "", saved: null, request: { symbol, exchange: "" } });
+    }
+    return resolveCliListing(raw, exchange, context, {
+      ownExchangeWins: typed.length > 1, venueSuffix: true, companyWord, listingAbroad: companyWord,
+    });
+  }));
+  // A separator stuck to the end of a pasted list (`UPST;`) is not part of a symbol; it is named.
+  const notes: string[] = takesOneTicker ? [] : stripStrayEdges(args.arg).notes;
+  notes.push(...aliases.flatMap((alias) => alias ? [alias.note] : []));
+  const token = found.template?.shortcut?.prefix ?? args.target.toUpperCase();
+  // Words search finds no company for, and that are not symbols either, name nothing a function can read: tickers do.
+  const unnamed = takesList ? listings.filter((listing) => /\s/.test(listing.symbol)) : [];
+  if (unnamed.length > 0) {
+    const names = unnamed.map((listing) => typed[listings.indexOf(listing)]!.trim());
+    const answer = `No company found for ${names.map((name) => `"${name}"`).join(", ")}; type tickers`;
+    const details = `Such as gloom ${command} ${token} GME,AMC. Find a company's ticker with gloom search "${names[0]!.replace(/"/g, "")}".`;
+    listings = listings.filter((listing) => !unnamed.includes(listing));
+    if (listings.length === 0) throw new ListingArgError(`${answer}.`, details);
+    notes.push(`${answer}, such as GME,AMC.`);
+  }
+  // What a list leaves out, and why, for an export's rows.
+  const refused: Array<{ symbol: string; reason: string }> = [];
+  // A function with company data answers an index or an ETF with what it is and where its data is, before
+  // any request: its source would only say "Unknown ticker" or come back empty. A list leaves it out.
+  const covered = found.pane.instruments;
+  if (covered?.length) {
+    const outside = (await Promise.all(listings.map(async (listing) => {
+      const instrument = await listingInstrument(listing, context);
+      return instrument && uncoveredInstrumentKind(covered, instrument.kind) ? { listing, instrument } : null;
+    }))).filter((entry) => entry != null);
+    if (outside.length > 0) {
+      const answers = outside.map(({ instrument }) => ({
+        message: uncoveredInstrumentMessage(token, covered, instrument),
+        details: `Try: ${uncoveredInstrumentCommand(instrument)}`,
+      }));
+      listings = listings.filter((listing) => !outside.some((entry) => entry.listing === listing));
+      if (listings.length === 0) {
+        throw new ListingArgError(answers.map((answer) => answer.message).join("\n"), answers.map((answer) => answer.details).join("\n"));
+      }
+      // Several are said in one line (a portfolio's futures and funds), each one's own command left out.
+      notes.push(...outside.length > 1
+        ? [uncoveredInstrumentsMessage(token, covered, outside.map(({ instrument }) => instrument))]
+        : answers.map((answer) => `${answer.message} ${answer.details}`));
+      refused.push(...outside.map(({ listing }, index) => ({ symbol: listing.key, reason: answers[index]!.message })));
+    }
+  }
+  // A listing the function has nothing for (OPX's SOL-USD) says what exists instead; a list leaves it out.
+  const refusals = headless?.refuseSymbol ? listings.flatMap((listing) => {
+    const refusal = headless.refuseSymbol!(listing.key);
+    return refusal ? [{ listing, refusal }] : [];
+  }) : [];
+  if (refusals.length > 0) {
+    listings = listings.filter((listing) => !refusals.some((entry) => entry.listing === listing));
+    if (listings.length === 0) {
+      const details = refusals.flatMap(({ refusal }) => refusal.details ? [refusal.details] : []).join("\n");
+      throw new ListingArgError(refusals.map(({ refusal }) => refusal.message).join("\n"), details || undefined);
+    }
+    notes.push(...refusals.map(({ refusal }) => [refusal.message, refusal.details].filter(Boolean).join(" ")));
+    refused.push(...refusals.map(({ listing, refusal }) => ({ symbol: listing.key, reason: refusal.message })));
+  }
+  const usOnly = headless?.usListingsOnly;
+  const abroad = usOnly ? listings.filter((listing) => {
+    const venue = listingAbroadVenue(listing.key);
+    return venue && !headless?.additionalListingVenues?.includes(venue);
+  }) : [];
+  if (usOnly && abroad.length > 0) {
+    const answers = await Promise.all(abroad.map(async (listing) => {
+      const answer = await usListingsOnlyMessage(usOnly, listing, context, (key) => `gloom ${command} ${token} ${key}`,
+        { otc: headless?.usListingsOtc === true });
+      const hint = headless?.usListingsOnlyHint?.(listing.key);
+      return hint ? { ...answer, details: `${answer.details}\n${hint}` } : answer;
+    }));
+    listings = listings.filter((listing) => !abroad.includes(listing));
+    if (listings.length === 0) {
+      throw new ListingArgError(answers.map((answer) => answer.message).join("\n"), answers.map((answer) => answer.details).join("\n"));
+    }
+    notes.push(...answers.map((answer) => `${answer.message} ${answer.details.replaceAll("\n", " ")}`));
+    refused.push(...abroad.map((listing, index) => ({ symbol: listing.key, reason: answers[index]!.message })));
+  }
+  notes.unshift(...watchlist?.notes ?? []);
+  // One listing's notes come with its choice note; a list's are said here, with a coin's code read as a listing
+  // (CORR RIOT,BTC: BTC is the Grayscale fund) as `quote BTC` says it.
+  if (listings.length > 1) notes.unshift(...listings.flatMap(listingReadNotes), ...await listCoinNotes(listings, context));
+  return {
+    ...args,
+    arg: listings.map((listing) => listing.key).join(", "),
+    options,
+    ...(listings.length === 1 ? { listing: listings[0]! } : {}),
+    ...(notes.length > 0 ? { listingNotes: notes } : {}),
+    ...(refused.length > 0 ? { refusedListings: refused } : {}),
+  };
+}
+
+/**
+ * `fn CSP SQ` is `fn CSP XYZ`: a ticker whose company moved (SQ became XYZ on
+ * 2025-01-21), with nothing new listed under it, is read as the symbol the
+ * company trades as now before the function asks for anything, and the report
+ * says so. Without this a function that reads a company's data by symbol
+ * answers the old one's dead end: a stale quote, no earnings, or a 13F source
+ * that gives up after 20 s. A pane that shows one ticker as Ticker Research
+ * does (`isTickerLinkPeer`), and a function that reads each symbol's fate
+ * itself (`readsSymbolFate`), refuse such a ticker instead and name the new
+ * one; a list longer than a few lookups is read as typed. Null when nothing
+ * moved.
+ */
+export async function withRenamedTickers(
+  context: MarketContext,
+  args: ParsedPaneFunctionArgs,
+  resolved: Pick<ResolvedPaneFunction, "headless" | "template" | "instance">,
+  linkPeer: boolean,
+): Promise<ParsedPaneFunctionArgs | null> {
+  const kind = resolved.headless?.argument.kind ?? resolved.template?.shortcut?.argKind;
+  if (linkPeer || resolved.headless?.readsSymbolFate || !args.arg.trim()
+    || !(kind === "ticker" || kind === "tickers" || kind === "symbol-list" || kind === "ticker-list")) return null;
+  const keys = kind === "ticker" ? [args.arg.trim()] : splitSymbolArgs([args.arg]);
+  if (keys.length === 0 || keys.length > MAX_CHOICE_LOOKUPS) return null;
+  const moved = await Promise.all(keys.map((key) => {
+    if (resolved.headless?.fredSeriesArgument && fredSeriesArgument(key)) return null;
+    // One ticker is asked for as the function will ask for it (on its saved venue); a list's by key.
+    const { symbol, exchange } = keys.length === 1 && args.listing ? args.listing.request : parsePublicTickerKey(key);
+    return movedListing({ symbol, exchange: exchange ?? "" }, context.dataProvider)
+      .catch(logFailure("cli.pane-functions-resolver", "Read whether a ticker moved failed", null));
+  }));
+  if (!moved.some(Boolean)) return null;
+  const listings = await Promise.all(keys.map(async (key, index) => {
+    const change = moved[index];
+    return change ? resolveCliListing(change.tradesAs, undefined, context)
+      .catch(logFailure("cli.pane-functions-resolver", "Read a moved ticker's new symbol failed", null)) : null;
+  }));
+  const read = keys.map((key, index) => listings[index]?.key ?? moved[index]?.tradesAs ?? key);
+  // The same company typed twice (SQ,XYZ) is read once.
+  const arg = [...new Set(read)].join(", ");
+  // One moved ticker is read on its new symbol's listing, or by that symbol alone when it could not be
+  // resolved: never on the old symbol's listing under the new symbol.
+  const { listing: typed, ...rest } = args;
+  const listing = keys.length === 1 ? listings[0] : typed;
+  return {
+    ...rest,
+    arg,
+    ...(listing ? { listing } : {}),
+    listingNotes: [...args.listingNotes ?? [], ...moved.flatMap((change) => change ? [movedListingNote(change)] : [])],
+  };
+}
+
+/**
+ * The function's code as typed when it is one of the function's codes (`DES`
+ * for Ticker Research, whose code is T), else its own: what a command line
+ * the report suggests (a renamed ticker's retry) starts with.
+ */
+export function typedFunctionCode(typed: string, resolved: Pick<ResolvedPaneFunction, "token" | "template">): string {
+  const word = typed.trim().toUpperCase();
+  const shortcut = resolved.template?.shortcut;
+  const codes = [shortcut?.prefix, ...shortcut?.aliases ?? []].filter((code): code is string => !!code);
+  return codes.some((code) => code.toUpperCase() === word) ? word : resolved.token;
+}
+
+/**
+ * A chart's series typed in quotes that is a terminal's code for one listing
+ * (`fn G "VOD LN"`, `"MC FP Equity"`) is that listing, as `quote`, `history`,
+ * HP and GP read it, and says so: its words are not two series (VOD on NASDAQ
+ * and LN, a ticker that stopped trading in 2020). So is each such entry of a
+ * quoted list (`"VOD LN, MC FP"`). Words typed apart (`fn G AAPL MSFT`) are a
+ * series each, and a qualified symbol (VOD:LSE) is read as written.
+ */
+async function withChartTerminalCodes(args: ParsedPaneFunctionArgs, context: MarketContext): Promise<ParsedPaneFunctionArgs> {
+  if (!args.quotedWords) return args;
+  const notes: string[] = [];
+  const readEntry = async (entry: string) => {
+    const typed = entry.trim();
+    const code = /\s/.test(typed) ? await readTerminalCodeArg(context.dataProvider, typed) : null;
+    if (!code) return entry;
+    notes.push(`Read "${typed}" as ${code.key}.`);
+    return entry.replace(typed, code.key);
+  };
+  const words = await Promise.all(args.quotedWords.map(async (word) => /\s/.test(word.trim())
+    ? (await Promise.all(word.split(/([;,\n])/).map((part, index) => index % 2 === 1 ? part : readEntry(part)))).join("")
+    : word));
+  if (notes.length === 0) return args;
+  return { ...args, arg: words.join(" ").trim(), listingNotes: [...args.listingNotes ?? [], ...notes] };
+}
+
+/**
+ * The symbols of the watchlist or portfolio a list argument names by its name
+ * (case aside), as saved, a portfolio's holdings being what it holds now, at
+ * most the function's `maximum` of them, with the note that says the name was
+ * read as that list (`readWatchlistArgument`). A list's id is no name: `main`
+ * is the default portfolio's id and a ticker too. Null when the argument names
+ * neither, or names an empty list a ticker could be named as (an empty
+ * watchlist named AI reads AI); an empty list's name of several words fails,
+ * saying so.
+ */
+async function watchlistArgument(
+  arg: string,
+  context: MarketContext,
+  maximum: number | undefined,
+): Promise<{ symbols: string[]; notes: string[] } | null> {
+  if (/[,;\t\n]/.test(arg)) return null;
+  const wanted = arg.trim().toLowerCase();
+  const named = <T extends { name: string }>(lists: readonly T[]) => lists.find((list) => list.name.trim().toLowerCase() === wanted) ?? null;
+  const watchlist = named(context.config.watchlists);
+  const portfolio = watchlist ? null : named(context.config.portfolios);
+  const list = watchlist ?? portfolio;
+  if (!list) return null;
+  const members = (await context.store.loadAllTickers()).filter((ticker) => watchlist
+    ? ticker.metadata.watchlists.includes(watchlist.id)
+    : ticker.metadata.portfolios.includes(portfolio!.id)
+      || ticker.metadata.positions.some((position) => position.portfolio === portfolio!.id && position.shares !== 0));
+  const symbols = [...new Set(members.map((ticker) => watchlistMemberSymbol(ticker.metadata)))];
+  const kind = watchlist ? "watchlist" : "portfolio";
+  if (symbols.length === 0) {
+    if (!/\s/.test(arg.trim())) return null;
+    throw new ListingArgError(`${kind === "watchlist" ? "Watchlist" : "Portfolio"} "${list.name}" is empty, so there is nothing to read.`,
+      `Add symbols with gloom ${kind} add ${shellWord(list.name)} AAPL, or type tickers.`);
+  }
+  const read = readWatchlistArgument(arg, list, symbols, maximum, kind);
+  return { symbols: read.symbols, notes: [read.note] };
+}
+
+/**
+ * `--section` picks one table of a report's `--csv` or `--ndjson` output. A
+ * function that has a `section` option of its own (CALLS: which part of a
+ * transcript) keeps the flag; its report is one table, so there is nothing to
+ * pick there.
+ */
+function takeTableSection(
+  capability: PaneFunctionCapability,
+  options: ParsedPaneFunctionArgs["options"],
+): { options: ParsedPaneFunctionArgs["options"]; tableSection?: string | true } {
+  if (!("section" in options) || capabilityHasOption(capability, "section")) return { options };
+  const { section, ...rest } = options;
+  return { options: rest, tableSection: section };
+}
+
+/** The plugin answer for a name that opens nothing, given the commands it names (`pluginCodeStop`). */
+export type PluginCodeStopFinder = (name: string, commands: PluginCodeCommands) => Promise<PluginCodeStop | null>;
+
+/** Series a name that opens no function lists, as `search` lists them before pointing at the catalog. */
+const UNKNOWN_NAME_SERIES_LIMIT = 3;
+
+/** A name that opens no function: `details` list the closest ones and where to search for more. */
+export class UnknownPaneFunctionError extends Error {
+  constructor(name: string, readonly details: string, suggestion: string | null = null, message?: string) {
+    super(message ?? `Unknown function or pane "${name}".${suggestion ? ` Did you mean ${suggestion}?` : ""}`);
+    this.name = "UnknownPaneFunctionError";
+  }
+}
+
+/** `RDCF (Reverse DCF)`, `ERN (Earnings) or EPS (EPS Estimates)`. */
+function nearCodesText(near: readonly NearFunctionCode[]): string {
+  const named = near.map(({ code, label }) => `${code} (${label})`);
+  return named.length > 1 ? `${named.slice(0, -1).join(", ")} or ${named.at(-1)}` : named[0]!;
+}
+
+/**
+ * A name that opens no function: the code it is one slip from (`did you mean
+ * RDCF?`) with the command that runs it on the same argument, the functions
+ * the catalog finds for it, and where to search. A name near no code and
+ * found by no search says so plainly and points at the whole catalog.
+ */
+async function unknownPaneFunctionError(
+  registry: PaneFunctionCatalog,
+  context: MarketContext,
+  name: string,
+  arg: string,
+  command: "fn" | "shot",
+  seriesSources: SeriesSources = [],
+  pluginStop?: PluginCodeStopFinder,
+): Promise<UnknownPaneFunctionError> {
+  // NIM is one slip from NI, but a bank figure is in `fundamentals`, not in a function's statement lines.
+  const bank = bankFigurePointer(name, arg);
+  if (bank) return new UnknownPaneFunctionError(name, bank.details, null, bank.message);
+  const word = /^[\w.:-]+$/.test(name) ? name : JSON.stringify(name);
+  const argument = arg.trim() ? ` ${/^[\w.:,=%+@/$^-]+$/.test(arg.trim()) ? arg.trim() : JSON.stringify(arg.trim())}` : "";
+  // A plugin's code (HN, SOC) says which plugin and what to do: install it, turn it on, or open it where it runs.
+  const code = name.trim().toUpperCase();
+  const plugin = await pluginStop?.(name, {
+    rerun: `gloom ${command} ${code}${argument}`,
+    capture: `gloom shot ${code}${argument}`,
+  })
+    .catch(logFailure("cli.pane-functions-resolver", "Find the plugin of a code failed", null));
+  if (plugin) return new UnknownPaneFunctionError(name, plugin.details, null, plugin.message);
+  // A word that asks for a function's data (IVOL for HIVG and OVDV) names them as a slip from a code names it.
+  const suggested = suggestedFunctionCodes(registry, name);
+  const near = [...suggested, ...nearFunctionCodes(registry, name).filter(({ code }) => !suggested.some((entry) => entry.code === code))];
+  // A catalog that cannot be read still leaves the pointer to it.
+  const closest = (await suggestPaneFunctions(registry, context, name).catch(logFailure("cli.pane-functions-resolver", "Find pane function suggestions failed", [])))
+    .filter((entry) => !near.some(({ code }) => code === entry.token));
+  const tokenWidth = Math.max(0, ...closest.map((entry) => entry.token.length));
+  // One code is run on the argument; the functions a word asks for are each.
+  const runs = suggested.length > 0 ? suggested : near.length === 1 ? near : [];
+  // A word no function is near that names data ("nikkei") points at the series `catalog` finds for it.
+  const series = closest.length === 0 && near.length === 0 ? findCatalogSeries(typeof seriesSources === "function" ? seriesSources() : seriesSources, name).slice(0, UNKNOWN_NAME_SERIES_LIMIT) : [];
+  const seriesWidth = Math.max(0, ...series.map((match) => match.expression.length));
+  return new UnknownPaneFunctionError(name, [
+    // A function a word asks for, typed with no argument, shows the one it takes (`<ticker>`).
+    ...runs.map(({ code }, index) => [index === 0 ? "Run:" : "    ", "gloom", command, code,
+      argument.trim() || (suggested.length > 0 ? findFunctionCode(registry, code)?.argument : "")].filter(Boolean).join(" ")),
+    ...closest.length > 0
+      ? ["Closest matches:", ...closest.map((entry) => `  ${entry.token.padEnd(tokenWidth)}  ${entry.label}`), `Search the catalog: gloom catalog ${word}`]
+      : series.length > 0
+      ? ["Series the catalog finds:", ...series.map((match) => `  ${match.expression.padEnd(seriesWidth)}  ${match.name}`),
+        `Chart one: gloom ${command} G ${series[0]!.expression}`, `Search the catalog: gloom catalog ${word}`]
+      : near.length > 0 ? [] : [`No function code is close to ${word}. List every function: gloom catalog`],
+  ].join("\n"), near.length > 0 ? nearCodesText(near) : null);
+}
+
+export async function resolvePaneFunction(
+  registry: PaneFunctionCatalog,
+  context: MarketContext,
+  parsedArgs: ParsedPaneFunctionArgs,
+  resolutionSettings: {
+    strictHeadlessOptions?: boolean;
+    /** `fn`: a rendered view refuses a flag it neither declares nor has a setting for (`normalizeCapabilityOptions`). */
+    strictRenderedOptions?: boolean;
+    tableSection?: boolean;
+    /** `fn`: a `--limit` or `--tail` the function takes no option for picks the report's rows (`rowWindow`). */
+    rowWindow?: boolean;
+    command?: "fn" | "shot";
+    /** The plugins whose catalog series a name that opens nothing is pointed at; a function, to ask for them only then. */
+    seriesSources?: SeriesSources;
+    /** Why a name that opens nothing is a plugin's code (`pluginCodeStop`). */
+    pluginStop?: PluginCodeStopFinder;
+  } = {},
+): Promise<ResolvedPaneFunction> {
+  let args = parsedArgs;
+  if (!args.target) {
+    throw new Error("Usage: gloom fn <function-or-pane> [argument] [--key value]");
+  }
+
+  const found = findPaneFunction(registry, args.target);
+  if (!found) {
+    throw await unknownPaneFunctionError(registry, context, args.target, args.arg, resolutionSettings.command ?? "fn",
+      resolutionSettings.seriesSources, resolutionSettings.pluginStop);
+  }
+
+  const { template, pane } = found;
+  if (!pane) {
+    throw new Error(`Template "${template?.id}" points at missing pane "${template?.paneId}".`);
+  }
+  const headless = getHeadlessPaneDefinition(template, pane);
+  // A report that reads a list for a pane that shows one ticker (FA, INS): a capture of the list is refused with
+  // both commands, rather than read as one ticker named by the whole list.
+  const asked = argumentSymbols(args.arg ?? "");
+  if (resolutionSettings.command === "shot" && headless?.argument.kind === "tickers" && template?.shortcut?.argKind === "ticker"
+    && !template.opensTickerList && asked.length > 1) {
+    const code = paneFunctionCode(template, pane, registry);
+    throw new Error(`${code}'s pane shows one ticker: gloom shot ${code} ${asked[0]}. Its report reads all ${asked.length} in one table: gloom fn ${code} ${asked.join(" ")}`);
+  }
+  const createOptions = withTickerList(template, buildCreateOptions(template, args.arg), headless, args.arg, paneFunctionCode(template, pane, registry));
+  const capability = getPaneFunctionCapability(template, pane);
+  let tableSection: string | true | undefined;
+  if (resolutionSettings.tableSection) {
+    const taken = takeTableSection(capability, args.options);
+    args = { ...args, options: taken.options };
+    tableSection = taken.tableSection;
+  }
+  // What the user types for the function, which every error about it names.
+  const token = paneFunctionCode(template, pane, registry);
+  // A word after a function that takes none is most often one of its option values (`fn JODI gas`).
+  // Every function the catalog lists with no argument refuses one, a rendered view (HALT) as a report (CBR).
+  // The catalog lists templates and the panes no template opens (HELP); a pane opened by its id stands for its templates.
+  const listed = template !== undefined || ![...registry.paneTemplates.values()].some((entry) => entry.paneId === pane.id);
+  const refusesArgument = listed ? takesNoArgument(paneFunctionArgument(template, pane)) : headless?.argument.kind === "none";
+  if (refusesArgument && args.arg?.trim()) {
+    // BANK opens CBR, but `fn BANK JPM` asks for that bank's figures.
+    const bank = bankWordPointer(args.target, args.arg);
+    if (bank) throw new UnknownPaneFunctionError(args.target, bank.details, null, bank.message);
+    throw new Error(noArgumentMessage(capability.options, token, args.arg, resolutionSettings.command ?? "fn"));
+  }
+  // `--limit` and `--tail` are global options: a report whose function has none of its own keeps the rows they say.
+  const rowWindow = resolutionSettings.rowWindow ? reportRowWindow(capability, args.options) : null;
+  if (rowWindow) args = { ...args, options: rowWindow.options };
+  const normalizedOptions = normalizeCapabilityOptions(capability, args.options, {
+    strict: args.requireBotSafe || capability.strictOptions === true || (!!headless && resolutionSettings.strictHeadlessOptions === true),
+    code: token,
+    argument: args.arg || null,
+    strictRendered: resolutionSettings.strictRenderedOptions === true,
+  });
+  const settings = {
+    // A view that takes only its declared options gets only their settings.
+    ...capability.strictOptions ? {} : optionSettings(args.options),
+    ...capabilityPaneSettings(capability, normalizedOptions),
+  };
+  if (args.requireBotSafe) {
+    validateTickerCardinality(capability, createOptions, token);
+  }
+  const resolved: ResolvedPaneFunction = {
+    token,
+    label: template?.label ?? pane.name,
+    description: template?.description ?? `Open the ${pane.name} pane.`,
+    shortcut: template?.shortcut?.prefix,
+    pane,
+    template,
+    ...(headless ? { headless } : {}),
+    instance: {} as PaneInstanceConfig,
+    createOptions,
+    optionSettings: settings,
+    capability,
+    options: normalizedOptions,
+    ...(rowWindow ? { rowWindow: rowWindow.window } : {}),
+    ...(tableSection !== undefined ? { tableSection } : {}),
+  };
+  resolved.instance = await buildPaneInstance(resolved, context, args.arg, resolutionSettings.command ?? "fn");
+  return resolved;
+}
+
+/**
+ * The `--limit` and `--tail` a function with no option of that name leaves to the report, taken out of its options;
+ * null when neither was given or the function reads both itself. A function with options of its own for them
+ * (DVD's `--limit`) checks and reads them there.
+ */
+function reportRowWindow(
+  capability: PaneFunctionCapability,
+  options: Record<string, string | true>,
+): { window: RowWindowOptions; options: Record<string, string | true> } | null {
+  const window: RowWindowOptions = {};
+  const rest = { ...options };
+  for (const key of ["limit", "tail"] as const) {
+    const value = options[key];
+    if (value === undefined || capabilityHasOption(capability, key)) continue;
+    const count = Number(value);
+    if (value === true || !Number.isInteger(count) || count < 1) throw new Error(`--${key} must be a positive integer.`);
+    window[key] = count;
+    delete rest[key];
+  }
+  if (window.limit != null && window.tail != null) throw new Error("--limit and --tail each pick rows; give one of them.");
+  return window.limit != null || window.tail != null ? { window, options: rest } : null;
+}
+
+/**
+ * A one-ticker template whose pane also opens on a list (`opensTickerList`:
+ * DVD's ranking): the list is passed as `symbols`, so `shot` draws the same
+ * tickers `fn` reads, in one pane, and fetches each; past the most the
+ * function's report takes, it is refused as `fn` refuses it. One ticker, and
+ * any other template, stays as it was.
+ */
+export function withTickerList(
+  template: PaneTemplateDef | undefined,
+  createOptions: PaneTemplateCreateOptions | undefined,
+  headless: HeadlessPaneDefinition | undefined,
+  arg: string,
+  token = template?.shortcut?.prefix ?? "",
+): PaneTemplateCreateOptions | undefined {
+  if (!template?.opensTickerList || !createOptions || createOptions.symbols?.length) return createOptions;
+  const symbols = [...new Set(arg.split(/[,\s]+/).map((word) => cleanTickerInput(word)).filter(Boolean))];
+  if (symbols.length < 2) return createOptions;
+  if (headless) validateSymbolCount(headless, token, symbols, "shot");
+  return { ...createOptions, symbol: symbols[0]!, arg: symbols.join(","), symbols };
+}
+
+function validateTickerCardinality(
+  capability: PaneFunctionCapability,
+  createOptions: PaneTemplateCreateOptions | undefined,
+  code: string,
+): void {
+  if (!capability.botSafe || capability.tickerCardinality === "none") return;
+  const count = createOptions?.symbols?.length
+    ?? (createOptions?.symbol ? 1 : 0);
+  const valid = capability.tickerCardinality === "one"
+    ? count === 1
+    : capability.tickerCardinality === "one-or-more"
+      ? count >= 1
+      : capability.tickerCardinality === "two-or-more"
+        ? count >= 2
+        : count >= 1 && count <= 2;
+  if (valid) return;
+
+  const expectation = capability.tickerCardinality === "one"
+    ? "exactly one ticker"
+    : capability.tickerCardinality === "one-or-more"
+      ? "at least one ticker"
+      : capability.tickerCardinality === "two-or-more"
+        ? "at least two tickers"
+        : "one or two tickers";
+  throw new Error(`${code} requires ${expectation}.`);
+}

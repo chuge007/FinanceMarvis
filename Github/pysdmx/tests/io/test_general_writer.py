@@ -1,0 +1,1046 @@
+from io import StringIO
+from pathlib import Path
+
+import pandas as pd
+import pytest
+
+from pysdmx.errors import Invalid
+from pysdmx.io import read_sdmx
+from pysdmx.io.format import Format
+from pysdmx.io.pd import PandasDataset
+from pysdmx.io.writer import write_sdmx
+from pysdmx.model import (
+    Annotation,
+    AvailabilityConstraint,
+    Component,
+    Components,
+    Concept,
+    ConstraintAttachment,
+    CubeKeyValue,
+    CubeRegion,
+    CubeValue,
+    Facets,
+    MetadataAttribute,
+    MetadataReport,
+    Role,
+    Schema,
+)
+
+CSV_1_0_PATH = Path(__file__).parent / "csv" / "sdmx10" / "reader" / "samples"
+CSV_2_0_PATH = Path(__file__).parent / "csv" / "sdmx20" / "reader" / "samples"
+XML_2_1_PATH = Path(__file__).parent / "xml" / "sdmx21" / "reader" / "samples"
+XML_3_0_PATH = Path(__file__).parent / "xml" / "sdmx30" / "reader" / "samples"
+XML_STR_PATH = Path(__file__).parent / "samples"
+JSN_2_0_PATH = Path(__file__).parent.parent / "api" / "fmr" / "samples"
+JSN_2_0_PATH_ALT = (
+    Path(__file__).parent / "json" / "sdmxjson2" / "deser" / "samples"
+)
+
+DIMENSIONS = [
+    "FREQ",
+    "DER_TYPE",
+    "DER_INSTR",
+    "DER_RISK",
+    "DER_REP_CTY",
+    "DER_SECTOR_CPY",
+    "DER_CPC",
+    "DER_SECTOR_UDL",
+    "DER_CURR_LEG1",
+    "DER_CURR_LEG2",
+    "DER_ISSUE_MAT",
+    "DER_RATING",
+    "DER_EX_METHOD",
+    "DER_BASIS",
+    "TIME_PERIOD",
+]
+
+ATTRIBUTES = ["AVAILABILITY", "COLLECTION", "OBS_STATUS", "OBS_CONF"]
+
+MEASURES = ["OBS_VALUE"]
+
+GEN_STRUCTURE = (
+    Schema(
+        context="datastructure",
+        id="TEST",
+        agency="MD",
+        version="1.0",
+        components=Components(
+            [
+                Component(
+                    id=id_,
+                    role=(
+                        Role.DIMENSION
+                        if id_ in DIMENSIONS
+                        else (
+                            Role.ATTRIBUTE
+                            if id_ in ATTRIBUTES
+                            else Role.MEASURE
+                        )
+                    ),
+                    concept=Concept(id=id_),
+                    required=True,
+                    attachment_level="O" if id_ in ATTRIBUTES else None,
+                )
+                for id_ in DIMENSIONS + ATTRIBUTES + MEASURES
+            ]
+        ),
+    ),
+)
+
+
+@pytest.fixture
+def data_path_reference(test_path, reference_file):
+    base_path = Path(__file__).parent / test_path / reference_file
+    return str(base_path)
+
+
+@pytest.fixture
+def reference(data_path_reference, validate):
+    return read_sdmx(data_path_reference, validate=validate)
+
+
+@pytest.fixture
+def data_path_optional():
+    base_path = Path(__file__).parent / "samples" / "df_optional.json"
+    return str(base_path)
+
+
+@pytest.fixture
+def dsd_path():
+    base_path = Path(__file__).parent / "samples" / "datastructure_for_csv.xml"
+    return str(base_path)
+
+
+@pytest.fixture
+def csv_optionals():
+    base_path = Path(__file__).parent / "samples" / "csv_optionals.csv"
+    return str(base_path)
+
+
+@pytest.fixture
+def schema_bis_der():
+    base_path = Path(__file__).parent / "samples" / "datastructure.xml"
+    msg = read_sdmx(str(base_path))
+    dsds = msg.get_data_structure_definitions()
+    return dsds[0].to_schema()
+
+
+@pytest.fixture
+def extension(format_):
+    return (
+        "csv"
+        if format_ in [Format.DATA_SDMX_CSV_1_0_0, Format.DATA_SDMX_CSV_2_0_0]
+        else "xml"
+    )
+
+
+@pytest.fixture
+def output_path(extension, tmpdir):
+    return tmpdir / f"output.{extension}"
+
+
+@pytest.mark.parametrize(
+    ("format_", "test_path", "reference_file", "params", "validate"),
+    [
+        (Format.DATA_SDMX_CSV_1_0_0, CSV_1_0_PATH, "data_v1.csv", {}, True),
+        (Format.DATA_SDMX_CSV_2_0_0, CSV_2_0_PATH, "data_v2.csv", {}, True),
+        (
+            Format.DATA_SDMX_ML_2_1_GEN,
+            XML_2_1_PATH,
+            "gen_all.xml",
+            {"dimension_at_observation": {}},
+            True,
+        ),
+        (Format.DATA_SDMX_ML_2_1_STR, XML_2_1_PATH, "str_all.xml", {}, True),
+        (
+            Format.DATA_SDMX_ML_3_0,
+            XML_3_0_PATH,
+            "data_dataflow_3.0.xml",
+            {},
+            True,
+        ),
+        (
+            Format.STRUCTURE_SDMX_ML_2_1,
+            XML_STR_PATH,
+            "datastructure.xml",
+            {},
+            True,
+        ),
+        (
+            Format.STRUCTURE_SDMX_ML_3_0,
+            XML_STR_PATH,
+            "datastructure3_0.xml",
+            {},
+            True,
+        ),
+        (
+            Format.STRUCTURE_SDMX_JSON_2_0_0,
+            JSN_2_0_PATH,
+            "cat/categorisation.json",
+            {},
+            True,
+        ),
+        (
+            Format.STRUCTURE_SDMX_JSON_2_0_0,
+            JSN_2_0_PATH,
+            "cat/cs.json",
+            {},
+            True,
+        ),
+        (
+            Format.STRUCTURE_SDMX_JSON_2_0_0,
+            JSN_2_0_PATH,
+            "code/freq.json",
+            {},
+            True,
+        ),
+        (
+            Format.STRUCTURE_SDMX_JSON_2_0_0,
+            JSN_2_0_PATH,
+            "code/vl.json",
+            {},
+            True,
+        ),
+        (
+            Format.STRUCTURE_SDMX_JSON_2_0_0,
+            JSN_2_0_PATH,
+            "concept/cs_no_urn.json",
+            {},
+            True,
+        ),
+        (
+            Format.STRUCTURE_SDMX_JSON_2_0_0,
+            JSN_2_0_PATH_ALT,
+            "constraints/cube.json",
+            {},
+            True,
+        ),
+        (
+            Format.STRUCTURE_SDMX_JSON_2_0_0,
+            JSN_2_0_PATH_ALT,
+            "dsd/dsd_only.json",
+            {},
+            True,
+        ),
+        (
+            Format.STRUCTURE_SDMX_JSON_2_0_0,
+            JSN_2_0_PATH,
+            "df/flows.json",
+            {},
+            True,
+        ),
+        (
+            Format.STRUCTURE_SDMX_JSON_2_0_0,
+            JSN_2_0_PATH,
+            "refmeta/msd_alone.json",
+            {},
+            True,
+        ),
+        (
+            Format.STRUCTURE_SDMX_JSON_2_0_0,
+            JSN_2_0_PATH,
+            "refmeta/mdf.json",
+            {},
+            True,
+        ),
+        (
+            Format.STRUCTURE_SDMX_JSON_2_0_0,
+            JSN_2_0_PATH_ALT,
+            "constraints/keyset.json",
+            {},
+            True,
+        ),
+        (
+            Format.STRUCTURE_SDMX_JSON_2_0_0,
+            JSN_2_0_PATH_ALT,
+            "hassoc/assoc.json",
+            {},
+            True,
+        ),
+        (
+            Format.STRUCTURE_SDMX_JSON_2_0_0,
+            JSN_2_0_PATH_ALT,
+            "hier/hier.json",
+            {},
+            True,
+        ),
+        (
+            Format.STRUCTURE_SDMX_JSON_2_0_0,
+            JSN_2_0_PATH,
+            "map/code_map.json",
+            {},
+            True,
+        ),
+        (
+            Format.STRUCTURE_SDMX_JSON_2_0_0,
+            JSN_2_0_PATH,
+            "map/sm.json",
+            {},
+            True,
+        ),
+        (
+            Format.STRUCTURE_SDMX_JSON_2_0_0,
+            JSN_2_0_PATH,
+            "pa/pa.json",
+            {},
+            True,
+        ),
+        (
+            Format.STRUCTURE_SDMX_JSON_2_0_0,
+            JSN_2_0_PATH,
+            "pa/mpa.json",
+            {},
+            True,
+        ),
+        (
+            Format.STRUCTURE_SDMX_JSON_2_0_0,
+            JSN_2_0_PATH,
+            "orgs/providers.json",
+            {},
+            True,
+        ),
+        (
+            Format.STRUCTURE_SDMX_JSON_2_0_0,
+            JSN_2_0_PATH,
+            "orgs/metadata_providers.json",
+            {},
+            True,
+        ),
+        (
+            Format.STRUCTURE_SDMX_JSON_2_0_0,
+            JSN_2_0_PATH,
+            "vtl/cts.json",
+            {},
+            True,
+        ),
+        (
+            Format.STRUCTURE_SDMX_JSON_2_0_0,
+            JSN_2_0_PATH,
+            "vtl/nps.json",
+            {},
+            True,
+        ),
+        (
+            Format.STRUCTURE_SDMX_JSON_2_0_0,
+            JSN_2_0_PATH,
+            "vtl/udos.json",
+            {},
+            True,
+        ),
+        (
+            Format.STRUCTURE_SDMX_JSON_2_0_0,
+            JSN_2_0_PATH,
+            "vtl/tsa.json",
+            {},
+            True,
+        ),
+        (
+            Format.STRUCTURE_SDMX_JSON_2_0_0,
+            JSN_2_0_PATH,
+            "vtl/rs.json",
+            {},
+            True,
+        ),
+        (
+            Format.STRUCTURE_SDMX_JSON_2_0_0,
+            JSN_2_0_PATH,
+            "vtl/vms.json",
+            {},
+            True,
+        ),
+        (
+            Format.REFMETA_SDMX_JSON_2_0_0,
+            JSN_2_0_PATH,
+            "refmeta/report.json",
+            {},
+            False,
+        ),
+        (
+            Format.STRUCTURE_SDMX_JSON_2_1_0,
+            JSN_2_0_PATH,
+            "code/freq.json",
+            {},
+            True,
+        ),
+        (
+            Format.REFMETA_SDMX_JSON_2_1_0,
+            JSN_2_0_PATH,
+            "refmeta/report.json",
+            {},
+            False,
+        ),
+        # False due to schema validation issues
+        # in reference file from URN error in Schemas
+    ],
+)
+def test_write_sdmx(
+    format_,
+    params,
+    reference,
+    output_path,
+    schema_bis_der,
+    validate,
+):
+    if reference.reports:
+        data = reference.reports
+    elif reference.structures:
+        data = reference.structures
+    else:
+        data = reference.data
+        data[0].structure = schema_bis_der
+    if format_ == Format.DATA_SDMX_ML_2_1_GEN:
+        data[0].structure = GEN_STRUCTURE[0]
+    params["header"] = reference.header
+
+    write_sdmx(data, format_, str(output_path), **params)
+    assert output_path.exists(), f"Output file {output_path} was not created."
+
+    written_content = read_sdmx(output_path, validate=validate)
+
+    assert written_content is not None, "Written content should not be None."
+    assert written_content.header == reference.header, "Headers do not match."
+    if reference.data:
+        for actual, ref in zip(written_content.data, reference.data):
+            actual.data.equals(ref.data), "Data does not match reference."
+    elif reference.reports:
+        assert written_content.reports == reference.reports, (
+            "Metadata reports do not match reference."
+        )
+    else:
+        assert written_content.structures == reference.structures, (
+            "Structures do not match reference."
+        )
+
+
+@pytest.mark.parametrize(
+    ("format_", "test_path", "reference_file", "params"),
+    [
+        (Format.STRUCTURE_SDMX_JSON_2_0_0, JSN_2_0_PATH, "code/freq.json", {}),
+        (
+            Format.REFMETA_SDMX_JSON_2_0_0,
+            JSN_2_0_PATH,
+            "refmeta/report.json",
+            {},
+        ),
+    ],
+)
+def test_write_sdmx_no_header(
+    format_, test_path, reference_file, params, output_path
+):
+    reference_this_test = read_sdmx(test_path / reference_file, validate=False)
+    if reference_this_test.reports:
+        data = reference_this_test.reports
+    elif reference_this_test.structures:
+        data = reference_this_test.structures
+    else:
+        data = reference_this_test.data
+    if format_ == Format.DATA_SDMX_ML_2_1_GEN:
+        data[0].structure = GEN_STRUCTURE[0]
+    params["header"] = None
+    params["prettyprint"] = False
+
+    write_sdmx(data, format_, Path(str(output_path)), **params)
+    assert output_path.exists(), f"Output file {output_path} was not created."
+
+    written_content = read_sdmx(output_path, validate=False)
+
+    assert written_content.header is not None, "The header is missing."
+    assert written_content.header.sender.id == "ZZZ", "Unexpected sender."
+
+
+@pytest.mark.parametrize(
+    ("format_", "test_path", "reference_file", "params"),
+    [
+        (Format.STRUCTURE_SDMX_JSON_2_0_0, JSN_2_0_PATH, "code/freq.json", {}),
+        (
+            Format.REFMETA_SDMX_JSON_2_0_0,
+            JSN_2_0_PATH,
+            "refmeta/report.json",
+            {},
+        ),
+    ],
+)
+def test_write_sdmx_no_output_file(
+    format_, test_path, reference_file, params, output_path
+):
+    reference = read_sdmx(test_path / reference_file, validate=False)
+    if reference.reports:
+        data = reference.reports
+    elif reference.structures:
+        data = reference.structures
+    else:
+        data = reference.data
+    if format_ == Format.DATA_SDMX_ML_2_1_GEN:
+        data[0].structure = GEN_STRUCTURE[0]
+    params["header"] = None
+    params["prettyprint"] = False
+
+    out = write_sdmx(data, format_, **params)
+
+    written_content = read_sdmx(out, validate=False)
+
+    assert written_content.header is not None, "The header is missing."
+    assert written_content.header.sender.id == "ZZZ", "Unexpected sender."
+    assert written_content is not None, "Written content should not be None."
+    if reference.reports:
+        assert written_content.reports == reference.reports, (
+            "Metadata reports do not match reference."
+        )
+    else:
+        assert written_content.structures == reference.structures, (
+            "Structures do not match reference."
+        )
+
+
+def test_invalid_format(tmpdir):
+    with pytest.raises(
+        Invalid,
+        match="No writer found for format",
+    ):
+        write_sdmx(
+            sdmx_objects=[],
+            sdmx_format=Format.ERROR_SDMX_ML_2_1,
+            output_path=tmpdir / "output.invalid",
+        )
+
+
+def test_invalid_sdmx_object_data(tmpdir):
+    with pytest.raises(
+        Invalid,
+        match="Only Datasets can be written to data formats",
+    ):
+        write_sdmx(
+            sdmx_objects=GEN_STRUCTURE,
+            sdmx_format=Format.DATA_SDMX_CSV_1_0_0,
+            output_path=tmpdir / "output.invalid",
+        )
+
+
+def test_invalid_sdmx_object_structure(tmpdir):
+    with pytest.raises(
+        Invalid,
+        match=(
+            "Only maintainable artefacts or availability constraints "
+            "can be written to structure formats."
+        ),
+    ):
+        write_sdmx(
+            sdmx_objects=PandasDataset(
+                structure="DataStructure=MD:TEST_DSD(1.0)", data=pd.DataFrame()
+            ),
+            sdmx_format=Format.STRUCTURE_SDMX_ML_2_1,
+            output_path=tmpdir / "output.invalid",
+        )
+
+
+def test_write_sdmx_csv_optionals(data_path_optional, dsd_path, csv_optionals):
+    result = read_sdmx(dsd_path).get_data_structure_definitions()
+    dsd = result[0]
+    schema = dsd.to_schema()
+    dataset = PandasDataset(
+        attributes={},
+        data=pd.read_json(data_path_optional, orient="records"),
+        structure=schema,
+    )
+    result_csv = write_sdmx(
+        sdmx_objects=[dataset],
+        sdmx_format=Format.DATA_SDMX_CSV_2_1_0,
+        labels="both",
+        time_format="original",
+        keys="both",
+    )
+    result_df = pd.read_csv(StringIO(result_csv)).astype(str)
+    reference_df = pd.read_csv(csv_optionals).astype(str)
+    pd.testing.assert_frame_equal(
+        result_df.fillna("").replace("nan", ""),
+        reference_df.replace("nan", ""),
+        check_like=True,
+    )
+
+
+def test_invalid_sdmx_object_refmeta(tmpdir):
+    with pytest.raises(
+        Invalid,
+        match=(
+            "Only metadata reports can be written to "
+            "reference metadata formats."
+        ),
+    ):
+        write_sdmx(
+            sdmx_objects=PandasDataset(
+                structure="DataStructure=MD:TEST_DSD(1.0)", data=pd.DataFrame()
+            ),
+            sdmx_format=Format.REFMETA_SDMX_JSON_2_0_0,
+            output_path=tmpdir / "output.invalid",
+        )
+
+
+@pytest.mark.parametrize(
+    "format",
+    [
+        Format.STRUCTURE_SDMX_ML_3_0,
+        Format.STRUCTURE_SDMX_ML_3_1,
+    ],
+)
+def test_write_maps(tmpdir, format):
+    data_path = Path(__file__).parent / "samples" / "maps.xml"
+    reference = read_sdmx(data_path, validate=True)
+    assert reference.structures is not None
+    structures = reference.structures
+    header = reference.header
+
+    out_path = tmpdir / "maps_written.xml"
+    write_sdmx(
+        structures, sdmx_format=format, output_path=out_path, header=header
+    )
+    written = read_sdmx(out_path, validate=True)
+
+    assert reference == written, "Written structures do not match reference."
+
+
+@pytest.mark.parametrize(
+    "format",
+    [
+        Format.STRUCTURE_SDMX_ML_3_0,
+        Format.STRUCTURE_SDMX_ML_3_1,
+    ],
+)
+def test_write_representation_map_datatype_tags(tmpdir, format):
+    data_path = Path(__file__).parent / "samples" / "maps.xml"
+    reference = read_sdmx(data_path, validate=True)
+
+    out_path = tmpdir / "maps_written.xml"
+    write_sdmx(
+        reference.structures,
+        sdmx_format=format,
+        output_path=out_path,
+        header=reference.header,
+    )
+    xml_content = out_path.read_text("utf-8")
+
+    # Codelist-based RepresentationMap uses SourceCodelist/TargetCodelist
+    assert "SourceCodelist>" in xml_content
+    assert "TargetCodelist>" in xml_content
+    # DataType-based RepresentationMap uses SourceDataType/TargetDataType
+    assert "SourceDataType>String</str:SourceDataType>" in xml_content
+    assert "TargetDataType>String</str:TargetDataType>" in xml_content
+
+
+def test_write_maps_xml_json_roundtrip(tmpdir):
+    from pysdmx.model import (
+        DataType,
+        MultiRepresentationMap,
+        RepresentationMap,
+    )
+
+    data_path = Path(__file__).parent / "samples" / "maps.xml"
+    from_xml = read_sdmx(data_path, validate=True)
+
+    json_path = Path(str(tmpdir)) / "maps.json"
+    write_sdmx(
+        from_xml.structures,
+        sdmx_format=Format.STRUCTURE_SDMX_JSON_2_0_0,
+        output_path=json_path,
+    )
+    from_json = read_sdmx(json_path, validate=True)
+
+    def find_rm(structures, rm_id):
+        return next(
+            s
+            for s in structures
+            if isinstance(s, (RepresentationMap, MultiRepresentationMap))
+            and s.id == rm_id
+        )
+
+    # Codelist-based RepresentationMap round-trips correctly
+    xml_sex = find_rm(from_xml.structures, "REPMAP_SEX")
+    json_sex = find_rm(from_json.structures, "REPMAP_SEX")
+    assert xml_sex.source == json_sex.source
+    assert xml_sex.target == json_sex.target
+
+    # DataType-based RepresentationMap preserves DataType enum
+    xml_dt = find_rm(from_xml.structures, "RM_INDICATOR")
+    json_dt = find_rm(from_json.structures, "RM_INDICATOR")
+    assert isinstance(xml_dt.source, DataType)
+    assert isinstance(json_dt.source, DataType)
+    assert xml_dt.source == json_dt.source
+    assert xml_dt.target == json_dt.target
+    assert xml_dt.maps == json_dt.maps
+
+    # MultiRepresentationMap (N-N) round-trips correctly
+    xml_nn = find_rm(from_xml.structures, "REPMAP_NN")
+    json_nn = find_rm(from_json.structures, "REPMAP_NN")
+    assert isinstance(xml_nn, MultiRepresentationMap)
+    assert isinstance(json_nn, MultiRepresentationMap)
+    assert list(xml_nn.source) == list(json_nn.source)
+    assert list(xml_nn.target) == list(json_nn.target)
+    assert xml_nn.maps == json_nn.maps
+
+
+@pytest.mark.parametrize(
+    "format",
+    [
+        Format.STRUCTURE_SDMX_ML_3_0,
+        Format.STRUCTURE_SDMX_ML_3_1,
+    ],
+)
+def test_write_multi_datatype_representation_map(tmpdir, format):
+    from pysdmx.model import DataType, MultiRepresentationMap
+
+    data_path = Path(__file__).parent / "samples" / "maps_datatype_multi.xml"
+    reference = read_sdmx(data_path, validate=True)
+
+    out_path = tmpdir / "maps_dt_written.xml"
+    write_sdmx(
+        reference.structures,
+        sdmx_format=format,
+        output_path=out_path,
+        header=reference.header,
+    )
+    written = read_sdmx(out_path, validate=True)
+
+    assert reference == written
+    rep_map = written.structures[0]
+    assert isinstance(rep_map, MultiRepresentationMap)
+    assert list(rep_map.source) == [DataType.STRING, DataType.INTEGER]
+    assert list(rep_map.target) == [DataType.STRING, DataType.INTEGER]
+
+    xml_content = out_path.read_text("utf-8")
+    assert xml_content.count("<str:SourceDataType>") == 2
+    assert xml_content.count("<str:TargetDataType>") == 2
+
+
+REFMETA_PATH = JSN_2_0_PATH / "refmeta"
+PA_PATH = JSN_2_0_PATH / "pa"
+
+
+@pytest.mark.parametrize(
+    "sdmx_format",
+    [Format.STRUCTURE_SDMX_ML_3_0, Format.STRUCTURE_SDMX_ML_3_1],
+)
+def test_metadata_structure_json_to_xml_roundtrip(tmpdir, sdmx_format):
+    # An MSD read from SDMX-JSON resolves each component's concept to a full
+    # Concept because the referenced ConceptScheme is present in the message.
+    # Writing the MSD together with that ConceptScheme to SDMX-ML lets the
+    # concepts resolve again on read-back, so the MSD round-trips unchanged --
+    # exactly as the SDMX-JSON reader resolves them (no writer-side fabrication
+    # of the scheme).
+    from_json = read_sdmx(REFMETA_PATH / "msd.json")
+    json_msds = from_json.get_metadata_structures()
+    assert json_msds[0].components[0].concept.name is not None
+
+    structures = [*json_msds, *from_json.get_concept_schemes()]
+    out_path = Path(str(tmpdir)) / "msd.xml"
+    write_sdmx(structures, sdmx_format=sdmx_format, output_path=str(out_path))
+
+    from_xml = read_sdmx(out_path, validate=True)
+    assert json_msds == from_xml.get_metadata_structures()
+
+
+@pytest.mark.parametrize(
+    "sdmx_format",
+    [Format.STRUCTURE_SDMX_ML_3_0, Format.STRUCTURE_SDMX_ML_3_1],
+)
+def test_metadataflow_json_to_xml_roundtrip(tmpdir, sdmx_format):
+    # A metadataflow read from SDMX-JSON stores its structure and targets as
+    # full URNs. Writing it to SDMX-ML 3.0/3.1 and reading it back must
+    # preserve those full URNs (and the targets), matching the SDMX-JSON
+    # reader.
+    from_json = read_sdmx(REFMETA_PATH / "mdf.json")
+    json_flows = from_json.get_metadataflows()
+    assert json_flows[0].structure == (
+        "urn:sdmx:org.sdmx.infomodel.metadatastructure."
+        "MetadataStructure=TEST:DF_CNF(1.0)"
+    )
+    assert json_flows[0].targets == (
+        "urn:sdmx:org.sdmx.infomodel.datastructure.Dataflow=*:*(*)",
+    )
+
+    out_path = Path(str(tmpdir)) / "mdf.xml"
+    write_sdmx(json_flows, sdmx_format=sdmx_format, output_path=str(out_path))
+
+    from_xml = read_sdmx(out_path, validate=True)
+    assert json_flows == from_xml.get_metadataflows()
+
+
+def test_metadataflow_21_json_to_xml_structure_roundtrip(tmpdir):
+    # SDMX-ML 2.1 metadataflows carry a structure reference (as a <Ref>) but
+    # have no representation for targets. The structure full URN must
+    # round-trip; the targets are dropped because the 2.1 schema has no
+    # <str:Target> element for a metadataflow.
+    from_json = read_sdmx(REFMETA_PATH / "mdf.json")
+    json_flow = from_json.get_metadataflows()[0]
+
+    out_path = Path(str(tmpdir)) / "mdf_21.xml"
+    write_sdmx(
+        from_json.get_metadataflows(),
+        sdmx_format=Format.STRUCTURE_SDMX_ML_2_1,
+        output_path=str(out_path),
+    )
+
+    from_xml = read_sdmx(out_path, validate=True)
+    xml_flow = from_xml.get_metadataflows()[0]
+    assert xml_flow.structure == json_flow.structure
+    # Targets are not representable in SDMX-ML 2.1 metadataflows.
+    assert xml_flow.targets == ()
+
+
+@pytest.mark.parametrize(
+    "sdmx_format",
+    [Format.STRUCTURE_SDMX_ML_3_0, Format.STRUCTURE_SDMX_ML_3_1],
+)
+def test_metadata_provision_agreement_json_to_xml_roundtrip(
+    tmpdir, sdmx_format
+):
+    # A metadata provision agreement read from SDMX-JSON stores its
+    # metadataflow and metadata provider references as full URNs. Writing it
+    # to SDMX-ML and reading it back must preserve those full URNs.
+    from_json = read_sdmx(PA_PATH / "mpa.json")
+    json_mpas = from_json.get_metadata_provision_agreements()
+    assert json_mpas[0].metadataflow == (
+        "urn:sdmx:org.sdmx.infomodel.metadatastructure."
+        "Metadataflow=TEST:DF_CNF(1.0)"
+    )
+    assert json_mpas[0].metadata_provider == (
+        "urn:sdmx:org.sdmx.infomodel.base."
+        "MetadataProvider=SDMX:METADATA_PROVIDERS(1.0).TEST"
+    )
+
+    out_path = Path(str(tmpdir)) / "mpa.xml"
+    write_sdmx(json_mpas, sdmx_format=sdmx_format, output_path=str(out_path))
+
+    from_xml = read_sdmx(out_path, validate=True)
+    assert json_mpas == from_xml.get_metadata_provision_agreements()
+
+
+@pytest.mark.parametrize("sample", ["report.json", "mult_reports.json"])
+@pytest.mark.parametrize(
+    "sdmx_format",
+    [Format.REFMETA_SDMX_ML_3_0, Format.REFMETA_SDMX_ML_3_1],
+)
+def test_metadata_report_json_to_xml_roundtrip(tmpdir, sample, sdmx_format):
+    # A metadata report read from SDMX-JSON stores its metadataflow / targets
+    # / metadataProvisionAgreement references as full URNs. Writing it to
+    # SDMX-ML (GenericMetadata) and reading it back must preserve them. The
+    # SDMX-JSON samples are FMR responses that do not conform to the strict
+    # SDMX-JSON metadata schema, so they are read with validate=False; the
+    # SDMX-ML output is validated on read-back.
+    from_json = read_sdmx(REFMETA_PATH / sample, validate=False)
+    json_reports = from_json.get_reports()
+
+    out_path = Path(str(tmpdir)) / "report.xml"
+    write_sdmx(
+        json_reports, sdmx_format=sdmx_format, output_path=str(out_path)
+    )
+
+    from_xml = read_sdmx(out_path, validate=True)
+    assert json_reports == from_xml.get_reports()
+
+
+@pytest.mark.parametrize(
+    "sdmx_format",
+    [Format.REFMETA_SDMX_JSON_2_0_0, Format.REFMETA_SDMX_JSON_2_1_0],
+)
+def test_metadata_report_json_roundtrip_keeps_attribute_annotations(
+    sdmx_format,
+):
+    # Reading SDMX-JSON dropped the annotations and format of the reported
+    # attributes, including those of a multi-valued attribute, which is
+    # written as one attribute per value.
+    note = Annotation(id="note", text="Checked")
+    fmt = Facets(max_length=50)
+    report = MetadataReport(
+        id="RPT1",
+        name="Report 1",
+        agency="BIS",
+        version="1.0.0",
+        metadataflow=(
+            "urn:sdmx:org.sdmx.infomodel.metadatastructure."
+            "Metadataflow=BIS:MDF_TEST(1.0.0)"
+        ),
+        targets=(
+            "urn:sdmx:org.sdmx.infomodel.datastructure.Dataflow=BIS:DF(1.0.0)",
+        ),
+        attributes=(
+            MetadataAttribute(
+                "CONTACT",
+                attributes=(
+                    MetadataAttribute(
+                        "EMAIL",
+                        ("john@example.org", "doe@example.org"),
+                        annotations=(note,),
+                        format=fmt,
+                    ),
+                ),
+                annotations=(note,),
+            ),
+            MetadataAttribute(
+                "NOTE", "A note", annotations=(note,), format=fmt
+            ),
+        ),
+    )
+
+    out = write_sdmx(report, sdmx_format)
+
+    assert read_sdmx(out, validate=True).get_reports() == (report,)
+
+
+@pytest.mark.parametrize(
+    "sdmx_format",
+    [
+        Format.STRUCTURE_SDMX_ML_2_1,
+        Format.STRUCTURE_SDMX_ML_3_0,
+        Format.STRUCTURE_SDMX_ML_3_1,
+    ],
+)
+def test_categorisation_full_urn_json_to_xml_roundtrip(tmpdir, sdmx_format):
+    # A categorisation read from SDMX-JSON stores full URNs in its
+    # Source/Target. Writing it to SDMX-ML (2.1/3.0/3.1) must produce
+    # valid documents and reading them back must preserve those full
+    # URNs, so the categorisation round-trips unchanged.
+    json_path = JSN_2_0_PATH / "cat" / "categorisation.json"
+    from_json = read_sdmx(json_path)
+    json_cats = from_json.get_categorisations()
+    assert json_cats[0].source == (
+        "urn:sdmx:org.sdmx.infomodel.datastructure."
+        "Dataflow=TEST:TEST_FACETS_FLOW(1.0)"
+    )
+    assert json_cats[0].target == (
+        "urn:sdmx:org.sdmx.infomodel.categoryscheme."
+        "Category=TEST:TEST_CS(1.0).TWO.TWO_KID"
+    )
+
+    out_path = Path(str(tmpdir)) / "categorisation.xml"
+    write_sdmx(json_cats, sdmx_format=sdmx_format, output_path=str(out_path))
+
+    from_xml = read_sdmx(out_path, validate=True)
+    assert from_json.get_categorisations() == from_xml.get_categorisations()
+
+
+@pytest.mark.parametrize(
+    "sdmx_format",
+    [
+        Format.STRUCTURE_SDMX_ML_2_1,
+        Format.STRUCTURE_SDMX_ML_3_0,
+        Format.STRUCTURE_SDMX_ML_3_1,
+    ],
+)
+def test_json_agency_scheme_roundtrip_uses_local_ids(sdmx_format):
+    # An AgencyScheme owned by "BIS" stores its sub-agency ids as
+    # "BIS.DST"/"BIS.CMP" in the model (mirroring the SDMX-JSON reader),
+    # but SDMX-ML must serialize the local ids ("DST"/"CMP") to satisfy
+    # the SDMX id pattern. Reading the file back must reconstruct the
+    # owner-prefixed ids so the round-trip reproduces the JSON model.
+    # This lives here (not under tests/io/xml/) because reading SDMX-JSON
+    # pulls in the json extra, so it must run with all extras installed.
+    jp = read_sdmx(JSN_2_0_PATH / "orgs" / "agencies.json")
+    result = write_sdmx(jp.get_agency_schemes(), sdmx_format)
+
+    assert 'id="DST"' in result
+    assert 'id="CMP"' in result
+    assert 'id="BIS.DST"' not in result
+    assert 'id="BIS.CMP"' not in result
+
+    xp = read_sdmx(result, validate=True)
+    assert jp.get_agency_schemes() == xp.get_agency_schemes()
+
+
+@pytest.mark.parametrize(
+    "sdmx_format",
+    [
+        Format.STRUCTURE_SDMX_ML_2_1,
+        Format.STRUCTURE_SDMX_ML_3_0,
+        Format.STRUCTURE_SDMX_ML_3_1,
+    ],
+)
+def test_category_scheme_json_to_xml_roundtrip(tmpdir, sdmx_format):
+    # A category scheme read from SDMX-JSON must round-trip through
+    # SDMX-ML (2.1/3.0/3.1) unchanged. The SDMX-JSON reader must build
+    # the category containers (items, sub-categories, annotations) as
+    # tuples -- the model default that the SDMX-ML reader also uses --
+    # so the re-read scheme compares equal to the original.
+    json_path = JSN_2_0_PATH / "cat" / "cs.json"
+    from_json = read_sdmx(json_path)
+
+    out_path = Path(str(tmpdir)) / "cs.xml"
+    write_sdmx(
+        from_json.get_category_schemes(),
+        sdmx_format=sdmx_format,
+        output_path=str(out_path),
+    )
+
+    from_xml = read_sdmx(out_path, validate=True)
+    assert from_json.get_category_schemes() == from_xml.get_category_schemes()
+
+
+@pytest.mark.parametrize(
+    "sdmx_format",
+    [
+        Format.STRUCTURE_SDMX_ML_2_1,
+        Format.STRUCTURE_SDMX_ML_3_0,
+        Format.STRUCTURE_SDMX_ML_3_1,
+    ],
+)
+def test_json_data_provider_scheme_roundtrip(sdmx_format):
+    # A DataProviderScheme read from SDMX-JSON must survive a
+    # JSON -> SDMX-ML -> read round-trip unchanged. Regression test for the
+    # scheme-level annotations being read as a list from SDMX-JSON but a
+    # tuple from SDMX-ML, which broke equality (see PR #629 review).
+    jp = read_sdmx(JSN_2_0_PATH / "orgs" / "providers.json")
+    result = write_sdmx(jp.get_data_provider_schemes(), sdmx_format)
+
+    xp = read_sdmx(result, validate=True)
+    assert jp.get_data_provider_schemes() == xp.get_data_provider_schemes()
+
+
+@pytest.mark.parametrize(
+    "sdmx_format",
+    [
+        Format.STRUCTURE_SDMX_ML_3_0,
+        Format.STRUCTURE_SDMX_ML_3_1,
+    ],
+)
+def test_json_metadata_provider_scheme_roundtrip(sdmx_format):
+    # MetadataProviderScheme is absent from the SDMX-ML 2.1
+    # OrganisationSchemes content model, so the round-trip is only
+    # exercised for 3.0/3.1. Same scheme-level annotations regression as
+    # the data provider scheme above.
+    jp = read_sdmx(JSN_2_0_PATH / "orgs" / "metadata_providers.json")
+    result = write_sdmx(jp.get_metadata_provider_schemes(), sdmx_format)
+
+    xp = read_sdmx(result, validate=True)
+    assert (
+        jp.get_metadata_provider_schemes()
+        == xp.get_metadata_provider_schemes()
+    )
+
+
+def test_write_sdmx_availability_constraint_structure_format():
+    # Regression test: write_sdmx guarded structure formats with
+    # isinstance(x, MaintainableArtefact), so the (annotable, non-
+    # maintainable) AvailabilityConstraint was rejected for every
+    # structure format, including its own native SDMX-ML 3.1
+    # representation.
+    ac = AvailabilityConstraint(
+        constraint_attachment=ConstraintAttachment(
+            data_provider=None,
+            dataflows=(
+                "urn:sdmx:org.sdmx.infomodel.datastructure."
+                "Dataflow=TEST_AGENCY:DF_TEST(1.0)",
+            ),
+        ),
+        cube_region=CubeRegion(
+            key_values=(
+                CubeKeyValue(id="FREQ", values=(CubeValue(value="M"),)),
+            )
+        ),
+        series_count=3,
+        obs_count=42,
+    )
+
+    out = write_sdmx(ac, Format.STRUCTURE_SDMX_ML_3_1)
+
+    result = read_sdmx(out, validate=True)
+    constraints = result.get_availability_constraints()
+    assert len(constraints) == 1
+    assert constraints[0] == ac

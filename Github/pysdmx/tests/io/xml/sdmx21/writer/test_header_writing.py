@@ -1,0 +1,213 @@
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+
+from pysdmx.io.xml.__write_aux import (
+    __write_header as write_header_aux,
+)
+from pysdmx.model import Organisation
+from pysdmx.model.message import Header
+
+
+@pytest.fixture
+def header():
+    return Header(
+        id="ID",
+        test="true",
+        prepared=datetime.strptime("2021-01-01", "%Y-%m-%d"),
+        sender=Organisation(
+            id="ZZZ",
+            name="unknown",
+        ),
+        receiver=[Organisation(id="AR2"), Organisation(id="UY2")],
+        source=None,
+        dataset_action=None,
+        structure={"DataStructure=MD:TEST(1.0)": "AllDimensions"},
+        dataset_id=None,
+    )
+
+
+@pytest.fixture
+def header_no_name():
+    return Header(
+        id="ID",
+        test="true",
+        prepared=datetime.strptime("2021-01-01", "%Y-%m-%d"),
+        sender=Organisation(
+            id="ZZZ",
+            uri=None,
+            urn=None,
+            name=None,
+            description=None,
+            contacts=(),
+            dataflows=(),
+            annotations=(),
+        ),
+        receiver=None,
+        source=None,
+        dataset_action=None,
+        structure={"DataStructure=MD:TEST(1.0)": "AllDimensions"},
+        dataset_id=None,
+    )
+
+
+@pytest.fixture
+def header_warning():
+    return Header(
+        id="ID",
+        test="true",
+        prepared=datetime.strptime("2021-01-01", "%Y-%m-%d"),
+        sender=Organisation(
+            id="ZZZ",
+        ),
+        receiver=Organisation(
+            id="ZZZ",
+            name="unknown",
+            description="Description",
+        ),
+        source=None,
+        dataset_action=None,
+        structure={"DataStructure=MD:TEST(1.0)": "AllDimensions"},
+        dataset_id=None,
+    )
+
+
+@pytest.fixture
+def header_structure_usage():
+    return Header(
+        id="ID",
+        test="true",
+        prepared=datetime.strptime("2021-01-01", "%Y-%m-%d"),
+        sender=Organisation(
+            id="ZZZ",
+        ),
+        receiver=Organisation(
+            id="ZZZ",
+            name="unknown",
+        ),
+        source=None,
+        dataset_action=None,
+        structure={"Dataflow=MD:TEST(1.0)": "AllDimensions"},
+        dataset_id=None,
+    )
+
+
+@pytest.fixture
+def header_provision_agrement():
+    return Header(
+        id="ID",
+        test="true",
+        prepared=datetime.strptime("2021-01-01", "%Y-%m-%d"),
+        sender=Organisation(
+            id="ZZZ",
+        ),
+        receiver=Organisation(
+            id="ZZZ",
+            name="unknown",
+        ),
+        source=None,
+        dataset_action=None,
+        structure={"ProvisionAgrement=MD:TEST(1.0)": "AllDimensions"},
+        dataset_id=None,
+    )
+
+
+@pytest.fixture
+def samples_folder():
+    return Path(__file__).parent / "samples"
+
+
+def test_write_header(header, samples_folder):
+    file_path = samples_folder / "header.xml"
+    header = write_header_aux(header, False, False, True)
+    with open(file_path, "r") as f:
+        expected = f.read()
+    assert header == expected
+
+
+def test_write_header_no_name(header_no_name, samples_folder):
+    file_path = samples_folder / "header_no_name.xml"
+    header = write_header_aux(header_no_name, False, False, True)
+    with open(file_path, "r") as f:
+        expected = f.read()
+    assert header == expected
+
+
+def test_write_header_namespace(header_no_name, samples_folder):
+    file_path = samples_folder / "header_namespace.xml"
+    header = write_header_aux(header_no_name, False, True, True)
+    with open(file_path, "r") as f:
+        expected = f.read()
+    assert header == expected
+
+
+def test_write_header_warning(header_warning, samples_folder, recwarn):
+    file_path = samples_folder / "header_warning.xml"
+    header = write_header_aux(header_warning, False, False, True)
+    with open(file_path, "r") as f:
+        expected = f.read()
+    assert header == expected
+    assert len(recwarn) == 1
+
+
+def test_write_header_structure_usage(header_structure_usage, samples_folder):
+    file_path = samples_folder / "header_structure_usage.xml"
+    header = write_header_aux(header_structure_usage, True, False, True)
+    with open(file_path, "r") as f:
+        expected = f.read()
+    assert header == expected
+
+
+def test_write_header_provision_agreement(
+    header_provision_agrement, samples_folder
+):
+    file_path = samples_folder / "header_provision_agrement.xml"
+    header = write_header_aux(header_provision_agrement, True, False, True)
+    with open(file_path, "r") as f:
+        expected = f.read()
+    assert header == expected
+
+
+def test_write_header_structure_usage_namespace(
+    header_structure_usage,
+):
+    header = write_header_aux(header_structure_usage, True, True, True)
+    exp = "urn:sdmx:org.sdmx.infomodel.datastructure.Dataflow="
+    suffix = ":ObsLevelDim:AllDimensions"
+    assert f'namespace="{exp}MD:TEST(1.0){suffix}"' in header
+
+
+def test_write_header_provision_agreement_namespace(
+    header_provision_agrement,
+):
+    header = write_header_aux(header_provision_agrement, True, True, True)
+    exp = "urn:sdmx:org.sdmx.infomodel.registry.ProvisionAgreement="
+    suffix = ":ObsLevelDim:AllDimensions"
+    assert f'namespace="{exp}MD:TEST(1.0){suffix}"' in header
+
+
+def test_write_header_prepared_without_timezone_is_assumed_utc(header):
+    result = write_header_aux(header, False, False, True)
+
+    assert "<mes:Prepared>2021-01-01T00:00:00Z</mes:Prepared>" in result
+
+
+def test_write_header_prepared_keeps_its_timezone(header):
+    header.prepared = datetime(2021, 1, 1, tzinfo=timezone(timedelta(hours=2)))
+
+    result = write_header_aux(header, False, False, True)
+
+    assert "<mes:Prepared>2021-01-01T00:00:00+02:00</mes:Prepared>" in result
+
+
+def test_write_header_escapes_text(header):
+    header.sender = Organisation(id="ZZZ", name="Banque d'Italie & Co")
+    header.receiver = [Organisation(id="AR2", name='The "<receiver>"')]
+    header.source = "It's a 'source'"
+
+    result = write_header_aux(header, False, False, True)
+
+    assert "<com:Name>Banque d'Italie &amp; Co</com:Name>" in result
+    assert '<com:Name>The "&lt;receiver&gt;"</com:Name>' in result
+    assert "<mes:Source>It's a 'source'</mes:Source>" in result

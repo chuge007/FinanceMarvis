@@ -1,0 +1,889 @@
+"""Portfolio Overview Model Tests"""
+
+# ruff: noqa: PLR2004
+
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from financetoolkit.portfolio.overview_model import (
+    _calculate_portfolio_volatility,
+    calculate_contributed_capital,
+    create_portfolio_overview,
+    create_positions_overview,
+    create_profit_and_loss_overview,
+    is_open_position,
+)
+
+
+@pytest.fixture
+def sample_portfolio_data():
+    """Sample portfolio data for testing"""
+    dates = pd.to_datetime(["2023-01-01", "2023-01-02", "2023-01-03"])
+    tickers = ["AAPL", "MSFT", "AMZN"]
+
+    # Create MultiIndex for (Date, Ticker)
+    index = pd.MultiIndex.from_product([dates, tickers], names=["Date", "Ticker"])
+
+    return pd.DataFrame(
+        {
+            "Volume": [100, 50, 200, 0, 25, 100, 50, 0, 150],
+            "Price": [150.0, 250.0, 100.0, 0.0, 260.0, 95.0, 155.0, 0.0, 98.0],
+            "Costs": [1.0, 2.0, 3.0, 0.0, 1.5, 2.5, 1.0, 0.0, 2.0],
+            "Name": ["Apple Inc"] * 3 + ["Microsoft Corp"] * 3 + ["Amazon.com Inc"] * 3,
+        },
+        index=index,
+    )
+
+
+@pytest.fixture
+def sample_latest_returns():
+    """Sample latest returns data"""
+    return pd.Series([160.0, 255.0, 110.0], index=["AAPL", "MSFT", "AMZN"])
+
+
+@pytest.fixture
+def sample_benchmark_data():
+    """Sample benchmark data"""
+    return pd.Series([500.0, 510.0, 520.0], index=["AAPL", "MSFT", "AMZN"])
+
+
+@pytest.fixture
+def sample_volatilities():
+    """Sample volatilities data"""
+    return pd.Series(
+        [0.25, 0.30, 0.35, 0.20], index=["AAPL", "MSFT", "AMZN", "Benchmark"]
+    )
+
+
+@pytest.fixture
+def sample_betas():
+    """Sample betas data"""
+    return pd.Series([1.2, 0.8, 1.5], index=["AAPL", "MSFT", "AMZN"])
+
+
+@pytest.mark.filterwarnings(
+    "ignore:DataFrameGroupBy.apply operated on the grouping columns:DeprecationWarning"
+)
+def test_create_profit_and_loss_overview():
+    """Test create_profit_and_loss_overview function"""
+    transactions_overview = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2023-01-01", "2023-01-02", "2023-01-03"]),
+            "Ticker": ["AAPL", "AAPL", "AAPL"],
+            "Volume": [100, -50, 25],  # Buy, sell, buy
+            "Price": [150.0, 160.0, 155.0],
+            "Costs": [1.0, 2.0, 1.5],
+        }
+    )
+
+    result = create_profit_and_loss_overview(
+        transactions_overview=transactions_overview,
+        ticker_column="Ticker",
+        volume_column="Volume",
+        price_column="Price",
+        method="FIFO",
+    )
+
+    assert isinstance(result, pd.DataFrame)
+    assert len(result) == 3
+    assert "PnL" in result.columns
+    assert "Cumulative PnL" in result.columns
+
+
+@pytest.mark.filterwarnings(
+    "ignore:DataFrameGroupBy.apply operated on the grouping columns:DeprecationWarning"
+)
+def test_create_profit_and_loss_overview_lifo():
+    """Test create_profit_and_loss_overview with LIFO method"""
+    transactions_overview = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2023-01-01", "2023-01-02", "2023-01-03"]),
+            "Ticker": ["AAPL", "AAPL", "AAPL"],
+            "Volume": [100, -50, 25],
+            "Price": [150.0, 160.0, 155.0],
+            "Costs": [1.0, 2.0, 1.5],
+        }
+    )
+
+    result = create_profit_and_loss_overview(
+        transactions_overview=transactions_overview,
+        ticker_column="Ticker",
+        volume_column="Volume",
+        price_column="Price",
+        method="LIFO",
+    )
+
+    assert isinstance(result, pd.DataFrame)
+    assert len(result) == 3
+    assert "PnL" in result.columns
+    assert "Cumulative PnL" in result.columns
+
+
+@pytest.mark.filterwarnings(
+    "ignore:DataFrameGroupBy.apply operated on the grouping columns:DeprecationWarning"
+)
+def test_create_profit_and_loss_overview_average():
+    """Test create_profit_and_loss_overview with AVERAGE method"""
+    transactions_overview = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2023-01-01", "2023-01-02", "2023-01-03"]),
+            "Ticker": ["AAPL", "AAPL", "AAPL"],
+            "Volume": [100, -50, 25],
+            "Price": [150.0, 160.0, 155.0],
+            "Costs": [1.0, 2.0, 1.5],
+        }
+    )
+
+    result = create_profit_and_loss_overview(
+        transactions_overview=transactions_overview,
+        ticker_column="Ticker",
+        volume_column="Volume",
+        price_column="Price",
+        method="AVERAGE",
+    )
+
+    assert isinstance(result, pd.DataFrame)
+    assert len(result) == 3
+    assert "PnL" in result.columns
+    assert "Cumulative PnL" in result.columns
+
+
+def test_create_portfolio_overview_with_missing_data():
+    """Test create_portfolio_overview with missing data"""
+    portfolio_name = pd.Series(["Apple Inc", "Microsoft Corp"], index=["AAPL", "MSFT"])
+    portfolio_volume = pd.Series([100, 50], index=["AAPL", "MSFT"])
+    portfolio_price = pd.Series([150.0, 250.0], index=["AAPL", "MSFT"])
+    portfolio_costs = pd.Series([1.0, 2.0], index=["AAPL", "MSFT"])
+
+    # Missing latest returns for MSFT
+    latest_returns = pd.Series([160.0], index=["AAPL"])
+
+    benchmark_prices = pd.Series([500.0, 510.0], index=["AAPL", "MSFT"])
+    benchmark_latest_prices = pd.Series([520.0, 530.0], index=["AAPL", "MSFT"])
+    volatilities = pd.Series([0.25, 0.30, 0.20], index=["AAPL", "MSFT", "Benchmark"])
+    betas = pd.Series([1.2, 0.8], index=["AAPL", "MSFT"])
+
+    with pytest.raises(KeyError):
+        create_portfolio_overview(
+            portfolio_name=portfolio_name,
+            portfolio_volume=portfolio_volume,
+            portfolio_price=portfolio_price,
+            portfolio_costs=portfolio_costs,
+            latest_returns=latest_returns,
+            benchmark_prices=benchmark_prices,
+            benchmark_latest_prices=benchmark_latest_prices,
+            volatilities=volatilities,
+            betas=betas,
+            include_portfolio=True,
+        )
+
+
+def _dividend_paying_stock():
+    """A stock that closes at 100 every day and pays two dividends of 5, with the back-adjusted close."""
+    dates = pd.period_range("2022-01-03", periods=500, freq="D")
+    close = pd.Series(100.0, index=dates)
+    dividends = pd.Series(0.0, index=dates)
+    dividends.iloc[[200, 400]] = 5.0
+    factor = pd.Series(1.0, index=dates)
+    for location in [200, 400]:
+        factor.iloc[:location] *= 1 - 5.0 / 100.0
+    historical = pd.DataFrame(
+        {
+            ("Close", "X"): close,
+            ("Adj Close", "X"): close * factor,
+            ("Dividends", "X"): dividends,
+        }
+    )
+    historical.columns = pd.MultiIndex.from_tuples(historical.columns)
+    return dates, historical
+
+
+def test_portfolio_overview_adds_dividends_to_a_position_at_the_traded_close():
+    """A flat stock bought at its close returns its dividends, as does the same stock as benchmark."""
+    dates, _ = _dividend_paying_stock()
+    index = pd.MultiIndex.from_tuples([(dates[0], "X")], names=["Date", "Identifier"])
+
+    overview = create_portfolio_overview(
+        portfolio_name=pd.Series(["X"], index=index),
+        portfolio_volume=pd.Series([1.0], index=index),
+        portfolio_price=pd.Series([100.0], index=index),
+        portfolio_costs=pd.Series([0.0], index=index),
+        latest_returns=pd.Series({"X": 100.0}),
+        benchmark_prices=pd.Series([100.0], index=index),
+        benchmark_latest_prices=pd.Series({"X": 100.0}),
+        volatilities=pd.Series({"X": 0.0, "Benchmark": 0.0}),
+        betas=pd.Series({"X": 1.0}),
+        include_portfolio=True,
+        dividends=pd.Series([10.0], index=index),
+        benchmark_dividends=pd.Series([10.0], index=index),
+    )
+
+    assert overview.loc["X", "Latest Value"] == pytest.approx(100.0)
+    assert overview.loc["X", "Dividends"] == pytest.approx(10.0)
+    assert overview.loc["X", "Return"] == pytest.approx(0.10)
+    assert overview.loc["X", "Benchmark Return"] == pytest.approx(0.10)
+    assert overview.loc["X", "Alpha"] == pytest.approx(0.0)
+    assert overview.loc["Portfolio", "Return"] == pytest.approx(0.10)
+
+
+def test_positions_overview_is_a_total_return_from_the_first_day():
+    """No loss on the day of purchase; each dividend is received by the units held the day before."""
+    from financetoolkit.portfolio.overview_model import (  # noqa: PLC0415
+        create_positions_overview,
+    )
+
+    dates, historical = _dividend_paying_stock()
+    index = pd.MultiIndex.from_tuples(
+        [(dates[0], "X"), (dates[400], "X")], names=["Date", "Identifier"]
+    )
+    transactions = pd.DataFrame(
+        {"Volume": [1.0, 1.0], "Price": [100.0, 100.0], "Costs": [0.0, 0.0]},
+        index=index,
+    )
+
+    positions = create_positions_overview(["X"], dates, transactions, historical)
+
+    assert positions[("Cumulative Return", "X")].iloc[0] == pytest.approx(0.0)
+    assert positions[("Current Value", "X")].iloc[0] == pytest.approx(100.0)
+    # The unit bought on the second ex-date does not receive that dividend.
+    assert positions[("Dividends", "X")].iloc[-1] == pytest.approx(10.0)
+    assert positions[("Cumulative Return", "X")].iloc[-1] == pytest.approx(0.05)
+
+
+def test_positions_overview_return_is_missing_before_the_first_purchase():
+    """The return is undefined before any capital was deployed, the other columns are zero."""
+    from financetoolkit.portfolio.overview_model import (  # noqa: PLC0415
+        create_positions_overview,
+    )
+
+    dates, historical = _dividend_paying_stock()
+    index = pd.MultiIndex.from_tuples([(dates[10], "X")], names=["Date", "Identifier"])
+    transactions = pd.DataFrame(
+        {"Volume": [1.0], "Price": [100.0], "Costs": [0.0]}, index=index
+    )
+
+    positions = create_positions_overview(["X"], dates, transactions, historical)
+
+    assert positions[("Cumulative Return", "X")].iloc[:10].isna().all()
+    assert (positions[("Invested Amount", "X")].iloc[:10] == 0).all()
+    assert positions[("Cumulative Return", "X")].iloc[10] == pytest.approx(0.0)
+
+
+def test_transactions_performance_follows_the_units_bought_in_the_period():
+    """A sale of units bought in an earlier period does not enter the return of this period."""
+    from financetoolkit.portfolio.overview_model import (  # noqa: PLC0415
+        create_transactions_performance,
+    )
+
+    dates = pd.PeriodIndex(["2022-06-01", "2023-03-01", "2023-06-01"], freq="D")
+    index = pd.MultiIndex.from_arrays(
+        [dates, ["X", "X", "X"]], names=["Date", "Identifier"]
+    )
+    transactions = pd.DataFrame(
+        {"Volume": [10.0, 1.0, -10.0], "Price": [50.0, 100.0, 100.0], "Costs": 0.0},
+        index=index,
+    )
+    year_end = pd.DataFrame(
+        {"X": [100.0, 110.0]}, index=pd.PeriodIndex(["2022", "2023"], freq="Y")
+    )
+    cumulative_dividends = pd.DataFrame(
+        {"X": [0.0, 2.0]}, index=pd.PeriodIndex(["2022", "2023"], freq="Y")
+    )
+
+    performance = create_transactions_performance(
+        transactions,
+        "Identifier",
+        "Date",
+        "Volume",
+        "Price",
+        "Costs",
+        period_prices=year_end,
+        period_string="Y",
+        benchmark_specific_prices=pd.Series([50.0, 100.0, 100.0], index=index),
+        benchmark_period_prices=year_end["X"],
+        period_dividends=cumulative_dividends,
+        transaction_dividends=pd.Series([0.0, 0.0, 2.0], index=index),
+        benchmark_period_dividends=cumulative_dividends["X"],
+        benchmark_transaction_dividends=pd.Series([0.0, 0.0, 2.0], index=index),
+    )
+
+    row = performance.loc[(pd.Period("2023", freq="Y"), "X")]
+    # One unit bought at 100, worth 110 at the end of 2023 plus a dividend of 2.
+    assert row["Invested Amount"] == pytest.approx(100.0)
+    assert row["Current Value"] == pytest.approx(110.0)
+    assert row["Dividends"] == pytest.approx(2.0)
+    assert row["Realized Proceeds"] == pytest.approx(1000.0)
+    assert row["Return"] == pytest.approx(0.12)
+    assert row["Alpha"] == pytest.approx(0.0)
+
+
+def test_trailing_volatility_and_beta_use_the_last_252_trading_days():
+    """A volatile first year does not count once 252 calmer days have passed."""
+    from financetoolkit.portfolio.overview_model import (  # noqa: PLC0415
+        calculate_trailing_beta,
+        calculate_trailing_volatility,
+    )
+
+    dates = pd.period_range("2023-01-02", periods=600, freq="D")
+    rng = np.random.default_rng(0)
+    benchmark = pd.Series(rng.normal(0, 0.01, 600), index=dates)
+    asset = pd.DataFrame({"X": benchmark * 3.0})
+    asset.iloc[-252:, 0] = benchmark.iloc[-252:] * 0.5
+
+    volatility = calculate_trailing_volatility(asset)
+    expected = benchmark.iloc[-252:].mul(0.5).std() * np.sqrt(252)
+
+    assert volatility["X"] == pytest.approx(expected)
+    assert calculate_trailing_beta(asset, benchmark)["X"] == pytest.approx(0.5)
+
+
+def _rebalanced_sixty_forty():
+    """A 60/40 portfolio of 10,000 rebalanced quarterly, with dividends on the second asset."""
+    from financetoolkit.portfolio import definition_model  # noqa: PLC0415
+
+    rng = np.random.default_rng(0)
+    dates = pd.period_range("2020-01-01", "2024-12-31", freq="D")
+    dates = dates[dates.dayofweek < 5]
+    prices = pd.DataFrame(
+        {
+            "A": 100 * np.exp(np.cumsum(rng.normal(0.0006, 0.02, len(dates)))),
+            "B": 50 * np.exp(np.cumsum(rng.normal(0.0001, 0.005, len(dates)))),
+        },
+        index=dates,
+    )
+    dividends = pd.DataFrame(0.0, index=dates, columns=["A", "B"])
+    dividends.iloc[60::63, 1] = 0.5
+
+    transactions = definition_model.build_transactions(
+        definition_model.PortfolioDefinition.from_weights(
+            {"A": 0.6, "B": 0.4}, rebalancing="quarterly"
+        ),
+        prices,
+        currencies={"A": "USD", "B": "USD"},
+        initial_value=10000,
+        dividends=dividends,
+    )
+    transactions["Date"] = pd.PeriodIndex(transactions["Date"], freq="D")
+    dataset = transactions.set_index(["Date", "Identifier"])[
+        ["Volume", "Price", "Costs"]
+    ]
+
+    return dates, prices, dividends, dataset
+
+
+def test_the_contributed_capital_of_a_rebalanced_portfolio_is_its_initial_value():
+    dates, prices, dividends, dataset = _rebalanced_sixty_forty()
+    positions = create_positions_overview(
+        ["A", "B"],
+        dates,
+        dataset,
+        pd.concat({"Close": prices, "Dividends": dividends}, axis=1),
+    )
+
+    capital = calculate_contributed_capital(positions)
+
+    assert capital == pytest.approx(10000)
+    # The rebalancing buys add up to far more than the capital that was put in.
+    assert positions["Invested Amount"].iloc[-1].sum() > 1.5 * capital
+
+    # The backtest's own value: the shares held plus the dividends paid since the last trade.
+    shares = dataset.groupby(level=1)["Volume"].sum()
+    last_trade = dataset.index.get_level_values(0).max()
+    final_value = (shares * prices.iloc[-1]).sum() + sum(
+        shares[ticker] * dividends.loc[dividends.index > last_trade, ticker].sum()
+        for ticker in ["A", "B"]
+    )
+
+    cumulative = dividends.cumsum()
+    locations = dates.get_indexer(dataset.index.get_level_values(0))
+    tickers = dataset.index.get_level_values(1)
+    since = pd.Series(
+        [
+            cumulative[ticker].iloc[-1] - cumulative[ticker].iloc[location]
+            for location, ticker in zip(locations, tickers, strict=True)
+        ],
+        index=dataset.index,
+    )
+    # The first asset is its own benchmark.
+    benchmark_prices = pd.Series(prices["A"].to_numpy()[locations], index=dataset.index)
+    benchmark_since = pd.Series(
+        [
+            cumulative["A"].iloc[-1] - cumulative["A"].iloc[location]
+            for location in locations
+        ],
+        index=dataset.index,
+    )
+
+    overview = create_portfolio_overview(
+        portfolio_name=pd.Series(tickers, index=dataset.index),
+        portfolio_volume=dataset["Volume"],
+        portfolio_price=dataset["Price"],
+        portfolio_costs=dataset["Costs"],
+        latest_returns=prices.iloc[-1],
+        benchmark_prices=benchmark_prices,
+        benchmark_latest_prices=prices["A"].iloc[-1],
+        volatilities=pd.Series({"A": 0.3, "B": 0.1, "Benchmark": 0.3}),
+        betas=pd.Series({"A": 1.0, "B": 0.1}),
+        dividends=since,
+        benchmark_dividends=benchmark_since,
+        contributed_capital=capital,
+    )
+
+    assert overview.loc["Portfolio", "Return"] == pytest.approx(final_value / 10000 - 1)
+    # The benchmark receives the same cash flows and is measured against the same capital.
+    value = dataset["Volume"] * dataset["Price"]
+    benchmark_units = value / benchmark_prices
+    benchmark_gain = (
+        benchmark_units.sum() * prices["A"].iloc[-1]
+        + (benchmark_units * benchmark_since).sum()
+        - value.sum()
+        - dataset["Costs"].abs().sum()
+    )
+    assert overview.loc["Portfolio", "Benchmark Return"] == pytest.approx(
+        benchmark_gain / capital
+    )
+    # Every asset keeps the return on its own invested amount.
+    assert overview.loc["A", "Return"] == pytest.approx(
+        overview.loc["A", "Return Value"] / overview.loc["A", "Invested"]
+    )
+
+
+def test_the_contributed_capital_of_buys_is_lowered_by_a_dividend_between_them():
+    dates = pd.period_range("2023-01-02", periods=6, freq="D")
+    prices = pd.DataFrame({"A": [10.0, 11, 12, 13, 14, 15]}, index=dates)
+    dividends = pd.DataFrame({"A": [0.0, 0, 1, 0, 0, 0]}, index=dates)
+    dataset = pd.DataFrame(
+        {"Volume": [10.0, 10.0], "Price": [10.0, 13.0], "Costs": [-1.0, -1.0]},
+        index=pd.MultiIndex.from_tuples(
+            [(dates[0], "A"), (dates[3], "A")], names=["Date", "Identifier"]
+        ),
+    )
+    positions = create_positions_overview(
+        ["A"],
+        dates,
+        dataset,
+        pd.concat({"Close": prices, "Dividends": dividends}, axis=1),
+    )
+
+    # The dividend of 10 received before the second buy pays for part of it: 101 + 131 - 10.
+    assert calculate_contributed_capital(positions) == pytest.approx(222.0)
+
+
+def test_a_sale_listed_before_a_purchase_on_the_same_day_realizes_its_pnl():
+    day = pd.Period("2024-02-01", freq="D")
+    transactions = pd.DataFrame(
+        {"Identifier": ["A", "A"], "Volume": [-10.0, 10.0], "Price": [110.0, 105.0]},
+        index=pd.Index([day, day], name="Date"),
+    ).set_index("Identifier", append=True)
+
+    pnl = create_profit_and_loss_overview(transactions, "Identifier", "Volume", "Price")
+
+    # The rows come back in their own order: the sale first, matched against the purchase.
+    assert pnl["PnL"].tolist() == [50.0, 0.0]
+
+
+def test_selling_more_than_held_warns(caplog):
+    dates = pd.period_range("2024-01-02", periods=2, freq="D")
+    transactions = pd.DataFrame(
+        {"Identifier": ["A", "A"], "Volume": [10.0, -15.0], "Price": [100.0, 110.0]},
+        index=pd.Index(dates, name="Date"),
+    ).set_index("Identifier", append=True)
+
+    with caplog.at_level("WARNING"):
+        pnl = create_profit_and_loss_overview(
+            transactions, "Identifier", "Volume", "Price", method="AVERAGE"
+        )
+
+    assert pnl["PnL"].tolist() == [0.0, 100.0]
+    assert "More units are sold than held for A" in caplog.text
+
+
+def test_units_without_a_price_have_no_value_and_no_return():
+    dates = pd.period_range("2024-01-02", periods=4, freq="D")
+    # B is bought before its first price.
+    prices = pd.DataFrame(
+        {"A": [10.0, 10, 10, 10], "B": [np.nan, np.nan, 20.0, 22.0]}, index=dates
+    )
+    dataset = pd.DataFrame(
+        {"Volume": [1.0, 1.0], "Price": [10.0, 20.0], "Costs": [0.0, 0.0]},
+        index=pd.MultiIndex.from_tuples(
+            [(dates[0], "A"), (dates[1], "B")], names=["Date", "Identifier"]
+        ),
+    )
+
+    positions = create_positions_overview(
+        ["A", "B"], dates, dataset, pd.concat({"Close": prices}, axis=1)
+    )
+
+    # Before it is bought B is worth nothing; once held without a price its value is unknown.
+    assert positions[("Current Value", "B")].iloc[0] == 0.0
+    assert np.isnan(positions[("Current Value", "B")].iloc[1])
+    assert np.isnan(positions[("Cumulative Return", "B")].iloc[1])
+    assert positions[("Cumulative Return", "B")].iloc[3] == pytest.approx(0.1)
+
+
+def test_the_return_of_a_period_without_investment_stays_missing():
+    from financetoolkit.portfolio.overview_model import (  # noqa: PLC0415
+        create_portfolio_performance,
+    )
+
+    dates = pd.period_range("2024-01-01", "2024-03-31", freq="D")
+    prices = pd.DataFrame({"A": 10.0}, index=dates)
+    dataset = pd.DataFrame(
+        {"Volume": [1.0], "Price": [10.0], "Costs": [0.0]},
+        index=pd.MultiIndex.from_tuples(
+            [(pd.Period("2024-03-01", freq="D"), "A")], names=["Date", "Identifier"]
+        ),
+    )
+    positions = create_positions_overview(
+        ["A"], dates, dataset, pd.concat({"Close": prices}, axis=1)
+    )
+
+    performance = create_portfolio_performance(positions, "Date", "Identifier", "M")
+
+    assert np.isnan(performance.loc[(pd.Period("2024-01", freq="M"), "A"), "Return"])
+    assert performance.loc[(pd.Period("2024-03", freq="M"), "A"), "Return"] == 0.0
+
+
+def test_the_portfolio_beta_ignores_a_sold_position_without_a_beta():
+    dates = pd.period_range("2023-01-02", periods=3, freq="D")
+    index = pd.MultiIndex.from_tuples(
+        [(dates[0], "A"), (dates[0], "OLD"), (dates[1], "OLD")],
+        names=["Date", "Identifier"],
+    )
+
+    overview = create_portfolio_overview(
+        portfolio_name=pd.Series(["A", "OLD", "OLD"], index=index),
+        portfolio_volume=pd.Series([10.0, 10.0, -10.0], index=index),
+        portfolio_price=pd.Series([100.0, 50.0, 50.0], index=index),
+        portfolio_costs=pd.Series([0.0, 0.0, 0.0], index=index),
+        latest_returns=pd.Series({"A": 100.0, "OLD": 50.0}),
+        benchmark_prices=pd.Series([100.0, 100.0, 100.0], index=index),
+        benchmark_latest_prices=pd.Series({"A": 100.0, "OLD": 100.0}),
+        volatilities=pd.Series({"A": 0.2, "OLD": np.nan, "Benchmark": 0.1}),
+        betas=pd.Series({"A": 1.2, "OLD": np.nan}),
+        include_portfolio=True,
+    )
+
+    assert overview.loc["Portfolio", "Beta"] == pytest.approx(1.2)
+
+
+def test_a_buy_at_zero_cost_has_no_return_of_its_own_but_counts_in_the_totals():
+    from financetoolkit.portfolio.overview_model import (  # noqa: PLC0415
+        create_transactions_overview,
+    )
+
+    day = pd.Period("2024-01-02", freq="D")
+    index = pd.MultiIndex.from_tuples(
+        [(day, "A"), (day, "GIFT")], names=["Date", "Identifier"]
+    )
+
+    transactions = create_transactions_overview(
+        portfolio_volume=pd.Series([10.0, 5.0], index=index),
+        portfolio_price=pd.Series([100.0, 0.0], index=index),
+        portfolio_costs=pd.Series([0.0, 0.0], index=index),
+        latest_returns=pd.Series({"A": 120.0, "GIFT": 30.0}),
+    )
+    overview = create_portfolio_overview(
+        portfolio_name=pd.Series(["A", "GIFT"], index=index),
+        portfolio_volume=pd.Series([10.0, 5.0], index=index),
+        portfolio_price=pd.Series([100.0, 0.0], index=index),
+        portfolio_costs=pd.Series([0.0, 0.0], index=index),
+        latest_returns=pd.Series({"A": 120.0, "GIFT": 30.0}),
+        benchmark_prices=pd.Series([100.0, 100.0], index=index),
+        benchmark_latest_prices=pd.Series({"A": 110.0, "GIFT": 110.0}),
+        volatilities=pd.Series({"A": 0.2, "GIFT": 0.3, "Benchmark": 0.1}),
+        betas=pd.Series({"A": 1.0, "GIFT": 1.5}),
+        include_portfolio=True,
+    )
+
+    assert np.isnan(transactions.loc[(day, "GIFT"), "% Return"])
+    assert transactions.loc[(day, "GIFT"), "Return"] == pytest.approx(150.0)
+    assert np.isnan(overview.loc["GIFT", "Return"])
+    numbers = overview.select_dtypes("number").to_numpy(dtype=float)
+    assert not np.isinf(numbers).any()
+    assert overview.loc["Portfolio", "Invested"] == pytest.approx(1000.0)
+    assert overview.loc["Portfolio", "Latest Value"] == pytest.approx(1350.0)
+    assert overview.loc["Portfolio", "Return"] == pytest.approx(0.35)
+
+
+@pytest.mark.parametrize(
+    ("volumes", "method"),
+    [
+        ([0.1, 0.2, -0.3], "FIFO"),
+        # A small sale after a large position leaves residue in proportion to the position.
+        ([0.1, 1e8, -1e8, -0.1], "FIFO"),
+        ([0.1, 1e8, -1e8, -0.1], "AVERAGE"),
+    ],
+)
+def test_selling_everything_held_in_fractions_does_not_warn(caplog, volumes, method):
+    dates = pd.period_range("2024-01-02", periods=len(volumes), freq="D")
+    transactions = pd.DataFrame(
+        {
+            "Identifier": ["A"] * len(volumes),
+            "Volume": volumes,
+            "Price": [100.0] * len(volumes),
+        },
+        index=pd.Index(dates, name="Date"),
+    ).set_index("Identifier", append=True)
+
+    with caplog.at_level("WARNING"):
+        create_profit_and_loss_overview(
+            transactions, "Identifier", "Volume", "Price", method=method
+        )
+
+    assert "More units are sold than held" not in caplog.text
+
+
+def test_a_position_sold_in_fractions_is_closed_and_a_short_one_open():
+    volume = pd.Series(
+        {"SOLD": (1.1 + 2.2) - 3.3, "LARGE": 1e8 + 0.1 - 1e8 - 0.1, "SHORT": -5.0}
+    )
+    largest_volume = pd.Series({"SOLD": 3.3, "LARGE": 1e8, "SHORT": 5.0})
+
+    assert volume["SOLD"] > 0
+    assert is_open_position(volume, largest_volume).to_dict() == {
+        "SOLD": False,
+        "LARGE": False,
+        "SHORT": True,
+    }
+
+    # The identifier is the last level of a performance index.
+    by_period = pd.Series(
+        [volume["SOLD"], -5.0],
+        index=pd.MultiIndex.from_tuples([("2024", "SOLD"), ("2024", "SHORT")]),
+    )
+    assert is_open_position(by_period, largest_volume).tolist() == [False, True]
+
+
+def test_the_portfolio_beta_ignores_a_position_sold_in_fractions():
+    # 1.1 + 2.2 - 3.3 leaves 4.4e-16 units, a sliver with a weight but without a beta.
+    dates = pd.period_range("2023-01-02", periods=4, freq="D")
+    index = pd.MultiIndex.from_tuples(
+        [(dates[0], "A"), (dates[0], "OLD"), (dates[1], "OLD"), (dates[2], "OLD")],
+        names=["Date", "Identifier"],
+    )
+
+    overview = create_portfolio_overview(
+        portfolio_name=pd.Series(["A", "OLD", "OLD", "OLD"], index=index),
+        portfolio_volume=pd.Series([10.0, 1.1, 2.2, -3.3], index=index),
+        portfolio_price=pd.Series([100.0, 50.0, 50.0, 50.0], index=index),
+        portfolio_costs=pd.Series([0.0, 0.0, 0.0, 0.0], index=index),
+        latest_returns=pd.Series({"A": 100.0, "OLD": 50.0}),
+        benchmark_prices=pd.Series([100.0] * 4, index=index),
+        benchmark_latest_prices=pd.Series({"A": 100.0, "OLD": 100.0}),
+        volatilities=pd.Series({"A": 0.2, "OLD": np.nan, "Benchmark": 0.1}),
+        betas=pd.Series({"A": 1.2, "OLD": np.nan}),
+        include_portfolio=True,
+    )
+
+    assert overview.loc["OLD", "Weight"] != 0
+    assert overview.loc["Portfolio", "Beta"] == pytest.approx(1.2)
+
+
+def test_a_holding_without_a_price_leaves_the_value_of_the_portfolio_unknown():
+    """The cost of a holding without a price is invested, its value is unknown rather than zero."""
+    dates = pd.period_range("2024-01-02", periods=2, freq="D")
+    index = pd.MultiIndex.from_tuples(
+        [(dates[0], "A"), (dates[0], "B"), (dates[0], "C"), (dates[1], "C")],
+        names=["Date", "Identifier"],
+    )
+    overview = create_portfolio_overview(
+        portfolio_name=pd.Series(["A", "B", "C", "C"], index=index),
+        portfolio_volume=pd.Series([10.0, 5.0, 2.0, -2.0], index=index),
+        portfolio_price=pd.Series([100.0, 200.0, 50.0, 50.0], index=index),
+        portfolio_costs=pd.Series(0.0, index=index),
+        # B is held without a price; C is sold and has no price either.
+        latest_returns=pd.Series({"A": 150.0, "B": np.nan, "C": np.nan}),
+        benchmark_prices=pd.Series(100.0, index=index),
+        benchmark_latest_prices=pd.Series({"A": 110.0, "B": 110.0, "C": 110.0}),
+        volatilities=pd.Series({"A": 0.2, "B": np.nan, "C": np.nan, "Benchmark": 0.1}),
+        betas=pd.Series({"A": 1.2, "B": np.nan, "C": np.nan}),
+        include_portfolio=True,
+    )
+
+    portfolio = overview.loc["Portfolio"]
+    # The known amounts add up: 1000 in A, 1000 in B and 100 in C.
+    assert portfolio["Invested"] == pytest.approx(2100.0)
+    assert portfolio["Volume"] == pytest.approx(15.0)
+    for column in [
+        "Latest Price",
+        "Latest Value",
+        "Return",
+        "Return Value",
+        "Alpha",
+        "Volatility",
+        "Beta",
+        "Weight",
+    ]:
+        assert np.isnan(portfolio[column]), column
+    assert overview["Weight"].isna().all()
+    # The benchmark does not depend on the prices of the assets.
+    # 20 benchmark units worth 110 plus the 100 received for C, against the 2100 invested.
+    assert portfolio["Benchmark Return"] == pytest.approx(200.0 / 2100.0)
+    # A sold position is worth nothing, priced or not, so its result is known.
+    assert overview.loc["C", "Latest Value"] == 0.0
+    assert overview.loc["C", "Return"] == pytest.approx(0.0)
+    assert overview.loc["A", "Return"] == pytest.approx(0.5)
+
+
+def test_a_priced_portfolio_keeps_its_totals_when_a_sold_position_has_no_price():
+    dates = pd.period_range("2024-01-02", periods=2, freq="D")
+    index = pd.MultiIndex.from_tuples(
+        [(dates[0], "A"), (dates[0], "C"), (dates[1], "C")],
+        names=["Date", "Identifier"],
+    )
+    overview = create_portfolio_overview(
+        portfolio_name=pd.Series(["A", "C", "C"], index=index),
+        portfolio_volume=pd.Series([10.0, 2.0, -2.0], index=index),
+        portfolio_price=pd.Series([100.0, 50.0, 60.0], index=index),
+        portfolio_costs=pd.Series(0.0, index=index),
+        latest_returns=pd.Series({"A": 150.0, "C": np.nan}),
+        benchmark_prices=pd.Series(100.0, index=index),
+        benchmark_latest_prices=pd.Series({"A": 110.0, "C": 110.0}),
+        volatilities=pd.Series({"A": 0.2, "C": np.nan, "Benchmark": 0.1}),
+        betas=pd.Series({"A": 1.2, "C": np.nan}),
+        include_portfolio=True,
+    )
+
+    assert overview.loc["Portfolio", "Latest Value"] == pytest.approx(1500.0)
+    # 500 gain on A and 20 on C against the 1100 invested.
+    assert overview.loc["Portfolio", "Return"] == pytest.approx(520.0 / 1100.0)
+    assert overview.loc["Portfolio", "Weight"] == pytest.approx(1.0)
+    assert overview.loc["Portfolio", "Beta"] == pytest.approx(1.2)
+
+
+def test_the_weights_are_unknown_on_dates_a_holding_has_no_price():
+    from financetoolkit.portfolio.overview_model import (  # noqa: PLC0415
+        create_portfolio_performance,
+    )
+
+    dates = pd.period_range("2024-01-02", periods=4, freq="D")
+    prices = pd.DataFrame(
+        {"A": [10.0, 10, 10, 10], "B": [np.nan, np.nan, 20.0, 30.0]}, index=dates
+    )
+    dataset = pd.DataFrame(
+        {"Volume": [1.0, 1.0], "Price": [10.0, 20.0], "Costs": [0.0, 0.0]},
+        index=pd.MultiIndex.from_tuples(
+            [(dates[0], "A"), (dates[1], "B")], names=["Date", "Identifier"]
+        ),
+    )
+
+    positions = create_positions_overview(
+        ["A", "B"], dates, dataset, pd.concat({"Close": prices}, axis=1)
+    )
+
+    weights = positions["Current Weight"]
+    # Before B is bought A is the whole portfolio; while B is held without a price nothing is known.
+    assert weights.iloc[0].tolist() == [1.0, 0.0]
+    assert weights.iloc[1].isna().all()
+    assert weights.iloc[3].tolist() == pytest.approx([0.25, 0.75])
+
+    performance = create_portfolio_performance(positions, "Date", "Identifier", "D")
+    assert np.isnan(performance.loc[(dates[1], "A"), "Current Weight"])
+    assert performance.loc[(dates[3], "B"), "Current Weight"] == pytest.approx(0.75)
+
+
+def test_units_bought_without_a_price_have_an_unknown_value_in_the_transactions():
+    from financetoolkit.portfolio.overview_model import (  # noqa: PLC0415
+        create_transactions_overview,
+        create_transactions_performance,
+    )
+
+    dates = pd.PeriodIndex(["2023-03-01", "2023-03-01", "2023-06-01"], freq="D")
+    index = pd.MultiIndex.from_arrays(
+        [dates, ["A", "B", "B"]], names=["Date", "Identifier"]
+    )
+    volume = pd.Series([10.0, 5.0, -2.0], index=index)
+    price = pd.Series([100.0, 200.0, 210.0], index=index)
+    costs = pd.Series(0.0, index=index)
+
+    overview = create_transactions_overview(
+        volume, price, costs, pd.Series({"A": 110.0, "B": np.nan})
+    )
+
+    assert overview["% Return"].iloc[0] == pytest.approx(0.1)
+    assert overview.iloc[1][["Current Value", "% Return", "Return"]].isna().all()
+    assert overview["Invested Amount"].iloc[1] == pytest.approx(1000.0)
+    # A sale has no value or return of its own, priced or not.
+    assert overview.iloc[2][["Current Value", "% Return", "Return"]].tolist() == [
+        0.0,
+        0.0,
+        0.0,
+    ]
+
+    transactions = pd.DataFrame({"Volume": volume, "Price": price, "Costs": costs})
+    year_end = pd.DataFrame(
+        {"A": [110.0], "B": [np.nan]}, index=pd.PeriodIndex(["2023"], freq="Y")
+    )
+    performance = create_transactions_performance(
+        transactions,
+        "Identifier",
+        "Date",
+        "Volume",
+        "Price",
+        "Costs",
+        period_prices=year_end,
+        period_string="Y",
+        benchmark_specific_prices=pd.Series(100.0, index=index),
+        benchmark_period_prices=pd.Series([110.0], index=year_end.index),
+    )
+
+    # The sale of B in the same year does not turn the unknown value of its purchase into zero.
+    row = performance.loc[(pd.Period("2023", freq="Y"), "B")]
+    assert np.isnan(row["Current Value"])
+    assert np.isnan(row["Return"])
+    assert performance.loc[
+        (pd.Period("2023", freq="Y"), "A"), "Return"
+    ] == pytest.approx(0.1)
+
+
+@pytest.mark.parametrize("method", ["FIFO", "LIFO", "AVERAGE"])
+def test_a_sale_in_the_morning_is_matched_before_a_purchase_in_the_afternoon(method):
+    dates = pd.PeriodIndex(["2021-01-04", "2022-01-03", "2022-01-03"], freq="D")
+    # In the order they were made: bought, sold at 09:30 and bought back at 15:59.
+    transactions = pd.DataFrame(
+        {
+            "Identifier": ["AAPL"] * 3,
+            "Volume": [10.0, -10.0, 10.0],
+            "Price": [129.41, 177.83, 182.01],
+        },
+        index=pd.Index(dates, name="Date"),
+    ).set_index("Identifier", append=True)
+
+    in_order = create_profit_and_loss_overview(
+        transactions, "Identifier", "Volume", "Price", method, purchases_first=False
+    )
+    purchases_first = create_profit_and_loss_overview(
+        transactions, "Identifier", "Volume", "Price", method
+    )
+
+    # Every method sells the units bought in 2021: 10 x (177.83 - 129.41).
+    assert in_order["PnL"].tolist() == pytest.approx([0.0, 484.2, 0.0])
+    if method == "LIFO":
+        assert purchases_first["PnL"].tolist() == pytest.approx([0.0, -41.8, 0.0])
+
+
+def test_the_portfolio_volatility_uses_one_set_of_dates_for_every_pair():
+    rng = np.random.default_rng(1)
+    index = pd.period_range("2022-01-03", periods=250, freq="D")
+    market = rng.normal(0, 0.03, 250)
+    returns = pd.DataFrame(
+        {"LONG": market, "SHORT": -market + rng.normal(0, 0.001, 250)}, index=index
+    )
+    # The inverse fund lists later and misses a holiday of its own.
+    returns.iloc[:116, 1] = np.nan
+    returns.iloc[200, 1] = np.nan
+    weights = pd.Series({"LONG": 0.5, "SHORT": 0.5, "SOLD": 0.0})
+
+    volatility = _calculate_portfolio_volatility(
+        weights, pd.Series({"LONG": 0.5, "SHORT": 0.5, "SOLD": 0.5}), returns
+    )
+
+    common = returns.iloc[116:].fillna(0.0)
+    expected = float((common @ weights.drop("SOLD")).std() * np.sqrt(252))
+    assert volatility == pytest.approx(expected)
+    # Far below either asset's volatility of about 0.48, as they offset each other.
+    assert volatility < 0.1

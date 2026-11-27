@@ -1,0 +1,294 @@
+"""Collection of SDMX-JSON schemas for dataflow queries."""
+
+from typing import List, Optional, Sequence, Union
+
+from msgspec import Struct
+
+from pysdmx import errors
+from pysdmx.io.json.sdmxjson2.messages.code import JsonCodelist, JsonValuelist
+from pysdmx.io.json.sdmxjson2.messages.concept import JsonConceptScheme
+from pysdmx.io.json.sdmxjson2.messages.constraint import (
+    JsonAvailabilityConstraint,
+    JsonDataConstraint,
+)
+from pysdmx.io.json.sdmxjson2.messages.core import (
+    JsonAnnotation,
+    MaintainableType,
+    _self_link,
+    _self_link_href,
+)
+from pysdmx.io.json.sdmxjson2.messages.dsd import JsonDataStructure
+from pysdmx.io.json.sdmxjson2.messages.provider import JsonDataProviderScheme
+from pysdmx.model import (
+    Agency,
+    Components,
+    Dataflow,
+    DataflowInfo,
+    DataProvider,
+    DataStructureDefinition,
+)
+from pysdmx.model.dataflow import Group
+from pysdmx.util import (
+    ensure_tz_aware,
+    is_final,
+    parse_urn,
+    semver_final_pattern,
+)
+
+
+def __parse_annotation_metrics(
+    const: JsonDataConstraint,
+) -> tuple[Optional[int], Optional[int]]:
+    if const.annotations:
+        obs = None
+        series = None
+        for a in const.annotations:
+            if a.type == "sdmx_metrics" and a.title:
+                if a.id == "obs_count":
+                    obs = int(a.title)
+                else:
+                    series = int(a.title)
+        return obs, series
+    else:
+        return None, None
+
+
+def _extract_metrics(
+    df: "JsonDataflow",
+    constraints: Sequence[JsonDataConstraint],
+    availability_constraints: Sequence[JsonAvailabilityConstraint],
+) -> tuple[Optional[int], Optional[int]]:
+    dfurn = (
+        "urn:sdmx:org.sdmx.infomodel.datastructure.Dataflow="
+        f"{df.agency}:{df.id}({df.version})"
+    )
+    legacy_constraints = [
+        c
+        for c in constraints
+        if c.role == "Actual"
+        and c.constraintAttachment
+        and c.constraintAttachment.dataflows
+        and dfurn in c.constraintAttachment.dataflows
+    ]
+    native_constraints = [
+        c
+        for c in availability_constraints
+        if c.constraintAttachment and c.constraintAttachment.dataflow == dfurn
+    ]
+    matches = legacy_constraints + native_constraints
+    if len(matches) > 1:
+        raise errors.Invalid(
+            "Invalid availability constraints",
+            f"Two availability constraints for the same dataflow: {dfurn}.",
+        )
+    if not matches:
+        return None, None
+    constraint = matches[0]
+    if isinstance(constraint, JsonAvailabilityConstraint):
+        return constraint.obsCount, constraint.seriesCount
+    return __parse_annotation_metrics(constraint)
+
+
+class JsonDataflow(MaintainableType, frozen=True, omit_defaults=True):
+    """SDMX-JSON payload for a dataflow."""
+
+    structure: Optional[str] = None
+
+    def to_model(
+        self,
+        dsds: Sequence[JsonDataStructure] = (),
+        concepts: Sequence[JsonConceptScheme] = (),
+        valuelists: Sequence[JsonValuelist] = (),
+        codelists: Sequence[JsonCodelist] = (),
+        constraints: Sequence[JsonDataConstraint] = (),
+        availability_constraints: Sequence[JsonAvailabilityConstraint] = (),
+    ) -> Dataflow:
+        """Converts a FusionDataflow to a standard dataflow."""
+        dsd: Optional[Union[DataStructureDefinition, str]] = None
+        if len(dsds) > 0 and self.structure:
+            ref = parse_urn(self.structure)
+            m = [
+                d
+                for d in dsds
+                if d.agency == ref.agency
+                and d.id == ref.id
+                and d.version == ref.version
+            ]
+            if len(m) == 1:
+                dsd = m[0].to_model(concepts, codelists, valuelists, ())
+        dsd = dsd if dsd is not None else self.structure
+        obs_count, series_count = _extract_metrics(
+            self, constraints, availability_constraints
+        )
+        return Dataflow(
+            id=self.id,
+            agency=self.agency,
+            name=self.name,
+            description=self.description,
+            version=self.version,
+            is_final=is_final(self.version),
+            structure=dsd,
+            annotations=tuple([a.to_model() for a in self.annotations]),
+            is_external_reference=self.isExternalReference,
+            structure_url=_self_link_href(self.links),
+            valid_from=ensure_tz_aware(self.validFrom),
+            valid_to=ensure_tz_aware(self.validTo),
+            obs_count=obs_count,
+            series_count=series_count,
+        )
+
+    @classmethod
+    def from_model(self, df: Dataflow) -> "JsonDataflow":
+        """Converts a pysdmx dataflow to an SDMX-JSON one."""
+        if not df.name:
+            raise errors.Invalid(
+                "Invalid input",
+                "SDMX-JSON dataflows must have a name",
+                {"dataflow": df.id},
+            )
+        if not df.structure:
+            raise errors.Invalid(
+                "Invalid input",
+                "SDMX-JSON dataflows must reference a DSD.",
+                {"dataflow": df.id},
+            )
+        if isinstance(df.structure, DataStructureDefinition):
+            dsdref = (
+                "urn:sdmx:org.sdmx.infomodel.datastructure.DataStructure="
+                f"{df.structure.agency}:{df.structure.id}({df.structure.version})"
+            )
+        else:
+            dsdref = df.structure
+        return JsonDataflow(
+            agency=(
+                df.agency.id if isinstance(df.agency, Agency) else df.agency
+            ),
+            id=df.id,
+            name=df.name,
+            version=df.version,
+            isExternalReference=df.is_external_reference,
+            validFrom=ensure_tz_aware(df.valid_from),
+            validTo=ensure_tz_aware(df.valid_to),
+            description=df.description,
+            annotations=tuple(
+                [JsonAnnotation.from_model(a) for a in df.annotations]
+            ),
+            links=_self_link(df.structure_url),
+            structure=dsdref,
+        )
+
+
+class JsonDataflows(Struct, frozen=True, omit_defaults=True):
+    """SDMX-JSON payload for the list of dataflows."""
+
+    dataflows: Sequence[JsonDataflow]
+    dataProviderSchemes: Sequence[JsonDataProviderScheme] = ()
+    dataStructures: Sequence[JsonDataStructure] = ()
+    conceptSchemes: Sequence[JsonConceptScheme] = ()
+    valuelists: Sequence[JsonValuelist] = ()
+    codelists: Sequence[JsonCodelist] = ()
+    dataConstraints: Sequence[JsonDataConstraint] = ()
+    availabilityConstraints: Sequence[JsonAvailabilityConstraint] = ()
+
+    def __filter(
+        self, df: JsonDataflow, agency: str, id_: str, version: str
+    ) -> bool:
+        if version not in ["~", "+", "latest"]:
+            return (
+                df.agency == agency and df.id == id_ and df.version == version
+            )
+        elif version == "+":
+            return (
+                df.agency == agency
+                and df.id == id_
+                and bool(semver_final_pattern.fullmatch(df.version))
+            )
+        else:
+            return df.agency == agency and df.id == id_
+
+    def to_model(
+        self,
+        components: Components,
+        grps: Optional[Sequence[Group]],
+        agency: str,
+        id_: str,
+        version: str,
+    ) -> DataflowInfo:
+        """Returns the requested dataflow details."""
+        prvs: List[DataProvider] = []
+        for dps in self.dataProviderSchemes:
+            prvs.extend(dps.dataProviders)
+        dfs = list(
+            filter(
+                lambda df: self.__filter(df, agency, id_, version),
+                self.dataflows,
+            )
+        )
+
+        if not dfs:
+            raise errors.NotFound(
+                "No matching dataflow",
+                "No matching dataflow was found in the message",
+                {"agency": agency, "id": id, "version": version},
+            )
+
+        df = dfs[0]
+
+        obs_count, series_count = _extract_metrics(
+            df, self.dataConstraints, self.availabilityConstraints
+        )
+
+        return DataflowInfo(
+            id=df.id,
+            components=components,
+            agency=Agency(df.agency),
+            name=df.name,
+            description=df.description,
+            version=df.version,
+            providers=tuple(prvs),
+            dsd_ref=df.structure,
+            groups=grps,
+            obs_count=obs_count,
+            series_count=series_count,
+        )
+
+    def to_generic_model(self) -> Sequence[Dataflow]:
+        """Returns the requested dataflows."""
+        return [
+            df.to_model(
+                self.dataStructures,
+                self.conceptSchemes,
+                self.valuelists,
+                self.codelists,
+                self.dataConstraints,
+                self.availabilityConstraints,
+            )
+            for df in self.dataflows
+        ]
+
+
+class JsonDataflowMessage(Struct, frozen=True, omit_defaults=True):
+    """SDMX-JSON payload for /dataflow queries (with details)."""
+
+    data: JsonDataflows
+
+    def to_model(
+        self,
+        components: Components,
+        grps: Optional[Sequence[Group]],
+        agency: str,
+        id_: str,
+        version: str,
+    ) -> DataflowInfo:
+        """Returns the requested dataflow details."""
+        return self.data.to_model(components, grps, agency, id_, version)
+
+
+class JsonDataflowsMessage(Struct, frozen=True, omit_defaults=True):
+    """SDMX-JSON payload for /dataflow queries."""
+
+    data: JsonDataflows
+
+    def to_model(self) -> Sequence[Dataflow]:
+        """Returns the requested dataflows."""
+        return self.data.to_generic_model()

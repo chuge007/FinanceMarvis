@@ -7,7 +7,11 @@
  * 由 DataHealthBar 统一展示，页面上只保留一处提示。
  */
 
-export type SourceId = 'convex' | 'fred' | 'yahoo' | 'cboe' | 'news' | 'fed' | 'twse' | 'eastmoney' | 'tencent' | 'sina' | 'treasury';
+export type SourceId =
+  | 'convex' | 'fred' | 'yahoo' | 'cboe' | 'news' | 'fed' | 'twse'
+  | 'eastmoney' | 'tencent' | 'sina' | 'treasury' | 'data-sidecar'
+  | 'tushare' | 'fmp' | 'edgar' | 'ccxt' | 'akshare' | 'baostock'
+  | 'python-runtime' | 'strategy-runner';
 
 export interface SourceHealth {
   id: SourceId;
@@ -30,6 +34,15 @@ const LABELS: Record<SourceId, string> = {
   tencent: '腾讯行业板块',
   sina: '新浪板块',
   treasury: '美国财政部收益率曲线',
+  'data-sidecar': 'Python 数据侧车（AkShare / EDGAR / ccxt）',
+  tushare: 'Tushare Pro（A 股财务主源）',
+  fmp: 'FMP（美股 EOD 高价值标的）',
+  edgar: 'SEC EDGAR（美股财报一手）',
+  ccxt: 'ccxt（加密交易所行情）',
+  akshare: 'AkShare（龙虎榜 / 基金净值备源）',
+  baostock: 'baostock（A 股 K 线备源）',
+  'python-runtime': 'Python 3.11+ 运行时',
+  'strategy-runner': '本地回测 / 绩效计算',
 };
 
 const state = new Map<SourceId, SourceHealth>();

@@ -1,0 +1,2123 @@
+"""FinancialModelingPrep Endpoint Tests"""
+
+# The company, fund, transcript and news endpoints added in 2.2.2. Every response is
+# faked by replacing get_financial_data, so these run offline and check what the
+# Finance Toolkit does with a response: the shaping, the date filtering, the conversion
+# of percentages to decimals and the routing between endpoints.
+
+import json
+from urllib.parse import parse_qs, urlsplit
+
+import pandas as pd
+import pytest
+import requests
+
+from financetoolkit import currencies_model, fmp_model, toolkit_controller
+from financetoolkit.cache import cache_controller
+
+
+@pytest.fixture(name="responses")
+def fixture_responses(monkeypatch):
+    """Serve canned responses by endpoint and record every requested url."""
+    canned: dict[str, list[dict]] = {}
+    requested: list[str] = []
+
+    def fake_get_financial_data(
+        url, sleep_timer=True, raw=False, user_subscription="Free"
+    ):  # noqa: ARG001
+        requested.append(url)
+        endpoint = url.split("/stable/")[1].split("?")[0]
+        records = canned.get(endpoint, [])
+
+        return records if raw else pd.DataFrame(records)
+
+    monkeypatch.setattr(fmp_model, "get_financial_data", fake_get_financial_data)
+
+    return canned, requested
+
+
+@pytest.fixture(name="cache_location")
+def fixture_cache_location(tmp_path):
+    """Point every Toolkit created in a test at an isolated cache database."""
+    cache_controller.reset_cache_registry()
+
+    yield str(tmp_path)
+
+    cache_controller.clear_active_cache()
+    cache_controller.reset_cache_registry()
+
+
+def test_employee_count_keeps_the_latest_filing_per_period(responses):
+    canned, requested = responses
+    canned["historical-employee-count"] = [
+        {
+            "periodOfReport": "2024-09-28",
+            "filingDate": "2024-11-01",
+            "employeeCount": 164000,
+        },
+        {
+            "periodOfReport": "2024-09-28",
+            "filingDate": "2024-12-01",
+            "employeeCount": 164500,
+        },
+        {
+            "periodOfReport": "2023-09-30",
+            "filingDate": "2023-11-03",
+            "employeeCount": 161000,
+        },
+        {
+            "periodOfReport": "2015-09-26",
+            "filingDate": "2015-10-28",
+            "employeeCount": 110000,
+        },
+    ]
+
+    employees, missing = fmp_model.get_employee_count(
+        ["AAPL"], "key", start_date="2020-01-01", user_subscription="Free"
+    )
+
+    # The amended filing wins, the period before the start date is left out.
+    assert employees["AAPL"].to_dict() == {
+        pd.Period("2023", "Y"): 161000,
+        pd.Period("2024", "Y"): 164500,
+    }
+    assert missing == []
+    # The Free plan is capped at five records, like the other endpoints.
+    assert "limit=5" in requested[0]
+
+
+def test_employee_count_of_a_year_ending_in_early_january_is_the_year_before(responses):
+    canned, _ = responses
+    # A 52/53-week year: fiscal 2021 ends on 1 January 2022, fiscal 2022 on 31 December.
+    canned["historical-employee-count"] = [
+        {
+            "periodOfReport": "2022-01-01",
+            "filingDate": "2022-02-20",
+            "employeeCount": 300,
+        },
+        {
+            "periodOfReport": "2022-12-31",
+            "filingDate": "2023-02-20",
+            "employeeCount": 400,
+        },
+    ]
+
+    employees, _ = fmp_model.get_employee_count(
+        ["K"], "key", start_date="2020-01-01", user_subscription="Free"
+    )
+
+    assert employees["K"].to_dict() == {
+        pd.Period("2021", "Y"): 300,
+        pd.Period("2022", "Y"): 400,
+    }
+
+
+def test_employee_count_of_a_year_ending_on_the_first_sunday_of_january(responses):
+    canned, _ = responses
+    # Fiscal years ending on the first Sunday of January, 7 January included.
+    year_ends = ["2018-01-07", "2019-01-06", "2020-01-05", "2024-01-07", "2025-01-05"]
+    canned["historical-employee-count"] = [
+        {"periodOfReport": end, "filingDate": end, "employeeCount": 100 * (number + 1)}
+        for number, end in enumerate(year_ends)
+    ]
+
+    employees, _ = fmp_model.get_employee_count(
+        ["K"], "key", start_date="2017-01-01", user_subscription="Free"
+    )
+
+    assert employees["K"].to_dict() == {
+        pd.Period(year, "Y"): count
+        for year, count in zip(
+            ["2017", "2018", "2019", "2023", "2024"],
+            [100, 200, 300, 400, 500],
+            strict=True,
+        )
+    }
+
+
+def test_toolkit_employee_count_keeps_the_year_before_for_the_first_quarters(
+    responses, cache_location, known_fmp_plan
+):
+    canned, _ = responses
+    canned["historical-employee-count"] = [
+        {"periodOfReport": end, "filingDate": end, "employeeCount": count}
+        for end, count in [("2021-12-31", 100), ("2022-12-31", 200)]
+    ]
+
+    toolkit = toolkit_controller.Toolkit(
+        ["MSFT"],
+        api_key="test-key",
+        start_date="2022-01-01",
+        end_date="2023-06-30",
+        sleep_timer=False,
+        use_cached_data=cache_location,
+        benchmark_ticker=None,
+    )
+
+    # The rows shown start at the start date's year; the quarters of 2022 use the count of
+    # 2021, which is collected as well.
+    assert toolkit.get_employee_count()["MSFT"].to_dict() == {
+        pd.Period("2022", "Y"): 200
+    }
+    assert toolkit._employee_count["MSFT"].to_dict() == {
+        pd.Period("2021", "Y"): 100,
+        pd.Period("2022", "Y"): 200,
+    }
+
+
+def test_shares_float_and_etf_weights_are_decimals(responses):
+    canned, _ = responses
+    canned["shares-float"] = [
+        {
+            "date": "2026-10-04",
+            "freeFloat": 99.5,
+            "floatShares": 995,
+            "outstandingShares": 1000,
+            "source": "url",
+        }
+    ]
+    canned["etf/country-weightings"] = [
+        {"country": "United States", "weightPercentage": "97.31%"}
+    ]
+    canned["etf/sector-weightings"] = [
+        {"symbol": "QQQ", "sector": "Technology", "weightPercentage": 52.5}
+    ]
+
+    shares_float, _ = fmp_model.get_shares_float(["AAPL"], "key")
+    countries, _ = fmp_model.get_etf_country_weightings(["QQQ"], "key")
+    sectors, _ = fmp_model.get_etf_sector_weightings(["QQQ"], "key")
+
+    assert shares_float.loc["Free Float", "AAPL"] == pytest.approx(0.995)
+    assert countries.loc["United States", "QQQ"] == pytest.approx(0.9731)
+    assert sectors.loc["Technology", "QQQ"] == pytest.approx(0.525)
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("Microsoft Corporation", "Microsoft"),
+        ("Apple Inc.", "Apple"),
+        ("ASML Holding N.V.", "ASML"),
+        ("Shell plc", "Shell"),
+        ("Coca-Cola Co", "Coca-Cola"),
+    ],
+)
+def test_company_name_is_shortened_for_the_search(name, expected):
+    assert fmp_model._search_name(name) == expected
+
+
+def test_mergers_acquisitions_keeps_only_the_tickers_own_deals(responses):
+    canned, requested = responses
+    canned["mergers-acquisitions-search"] = [
+        {
+            "symbol": "MSFT",
+            "companyName": "MICROSOFT",
+            "targetedSymbol": None,
+            "targetedCompanyName": "ChipSoft",
+            "transactionDate": "1995-02-09",
+            "acceptedDate": "1995-02-09",
+            "link": "a",
+        },
+        {
+            "symbol": "ORCL",
+            "companyName": "ORACLE",
+            "targetedSymbol": "MSFT",
+            "targetedCompanyName": "Microsoft",
+            "transactionDate": "2001-01-01",
+            "acceptedDate": "2001-01-01",
+            "link": "b",
+        },
+        {
+            "symbol": "MSFTX",
+            "companyName": "Microsoftish Ltd",
+            "targetedSymbol": None,
+            "targetedCompanyName": "Other",
+            "transactionDate": "2010-01-01",
+            "acceptedDate": "2010-01-01",
+            "link": "c",
+        },
+    ]
+
+    deals, _ = fmp_model.get_mergers_acquisitions(
+        ["MSFT"], {"MSFT": "Microsoft Corporation"}, "key"
+    )
+
+    assert "name=Microsoft&" in requested[0]
+    assert deals.loc["MSFT", "Role"].tolist() == ["Acquirer", "Target"]
+    assert "MSFTX" not in deals["Acquirer Symbol"].tolist()
+
+
+def test_insider_statistics_are_indexed_by_quarter(responses):
+    canned, _ = responses
+    canned["insider-trading/statistics"] = [
+        {
+            "year": 2026,
+            "quarter": quarter,
+            "acquiredTransactions": quarter,
+            "disposedTransactions": 1,
+            "acquiredDisposedRatio": quarter,
+            "totalAcquired": 1,
+            "totalDisposed": 1,
+            "averageAcquired": 1,
+            "averageDisposed": 1,
+            "totalPurchases": 0,
+            "totalSales": 0,
+        }
+        for quarter in (3, 2, 1)
+    ]
+
+    statistics, _ = fmp_model.get_insider_trade_statistics(
+        ["AAPL"], "key", start_date="2026-04-01"
+    )
+
+    assert statistics.loc["AAPL"].index.tolist() == [
+        pd.Period("2026Q2"),
+        pd.Period("2026Q3"),
+    ]
+
+
+def test_stock_grades_are_indexed_by_date_and_grading_company(responses):
+    canned, _ = responses
+    canned["grades"] = [
+        {
+            "date": "2026-10-01",
+            "gradingCompany": "Needham",
+            "previousGrade": "Hold",
+            "newGrade": "Buy",
+            "action": "upgrade",
+        },
+        {
+            "date": "2026-01-01",
+            "gradingCompany": "Needham",
+            "previousGrade": "Hold",
+            "newGrade": "Hold",
+            "action": "maintain",
+        },
+    ]
+
+    grades, _ = fmp_model.get_stock_grades(["AAPL"], "key", start_date="2026-06-01")
+
+    assert grades.index.names[1:] == ["Date", "Grading Company"]
+    assert grades["Action"].tolist() == ["Upgrade"]
+
+
+def test_etf_identifiers_stay_text_and_a_stock_returns_no_data(responses):
+    canned, _ = responses
+    canned["etf/info"] = [
+        {
+            "name": "Invesco QQQ Trust",
+            "isin": "US46090E1038",
+            "securityCusip": "46090E103",
+            "assetClass": "Equity",
+            "expenseRatio": 0.18,
+            "holdingsCount": 102,
+        }
+    ]
+
+    information, missing = fmp_model.get_etf_information(["QQQ"], "key")
+
+    # Parsed as JSON by pandas, "46090E103" would become the number 4.609e+107.
+    assert information.loc["CUSIP", "QQQ"] == "46090E103"
+    assert information.loc["Expense Ratio", "QQQ"] == pytest.approx(0.0018)
+    assert missing == []
+
+    canned["etf/info"] = []
+    information, missing = fmp_model.get_etf_information(["AAPL"], "key")
+
+    assert information.empty
+    assert missing == ["AAPL"]
+
+
+def test_transcripts_only_retrieve_what_is_needed_and_cache_each_one(
+    responses, cache_location
+):
+    canned, requested = responses
+    canned["earning-call-transcript-dates"] = [
+        {"fiscalYear": 2026, "quarter": quarter, "date": date}
+        for quarter, date in [(3, "2026-07-30"), (2, "2026-04-30"), (1, "2026-01-29")]
+    ]
+    canned["earning-call-transcript"] = [
+        {"symbol": "AAPL", "content": "Good afternoon."}
+    ]
+    cache_controller.set_active_cache(
+        cache_controller.get_cache(location=cache_location, enabled=True)
+    )
+
+    latest, _ = fmp_model.get_earnings_call_transcripts(["AAPL"], "key")
+
+    assert latest.loc["AAPL"].index.tolist() == ["2026Q3"]
+    assert sum("earning-call-transcript?" in url for url in requested) == 1
+
+    requested.clear()
+    history, _ = fmp_model.get_earnings_call_transcripts(
+        ["AAPL"], "key", start_date="2026-04-01", latest=False
+    )
+
+    # 2026Q2 and 2026Q3 are in the range; 2026Q3 was already retrieved, so only 2026Q2 is requested.
+    assert history.loc["AAPL"].index.tolist() == ["2026Q2", "2026Q3"]
+    assert [url for url in requested if "earning-call-transcript?" in url] == [
+        "https://financialmodelingprep.com/stable/earning-call-transcript?symbol=AAPL&year=2026&quarter=2&apikey=key"
+    ]
+
+
+def test_a_transcript_is_retrieved_for_one_fiscal_period(responses, caplog):
+    canned, requested = responses
+    canned["earning-call-transcript-dates"] = [
+        {"fiscalYear": 2026, "quarter": quarter, "date": date}
+        for quarter, date in [(3, "2026-07-30"), (2, "2026-04-30"), (1, "2026-01-29")]
+    ]
+    canned["earning-call-transcript"] = [
+        {"symbol": "AAPL", "content": "Good afternoon."}
+    ]
+
+    transcripts, _ = fmp_model.get_earnings_call_transcripts(
+        ["AAPL"], "key", fiscal_period="Q2 2026"
+    )
+
+    assert transcripts.loc["AAPL"].index.tolist() == ["2026Q2"]
+    assert [url for url in requested if "earning-call-transcript?" in url] == [
+        "https://financialmodelingprep.com/stable/earning-call-transcript?symbol=AAPL&year=2026&quarter=2&apikey=key"
+    ]
+
+    # A period without a transcript names the periods that do have one.
+    transcripts, missing = fmp_model.get_earnings_call_transcripts(
+        ["AAPL"], "key", fiscal_period="2030Q1"
+    )
+
+    assert transcripts.empty
+    assert missing == ["AAPL"]
+    assert "2026Q3, 2026Q2, 2026Q1" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("period", "expected"),
+    [("2025Q4", (2025, 4)), ("2025-q1", (2025, 1)), ("Q3 2024", (2024, 3))],
+)
+def test_fiscal_periods_are_read_in_several_forms(period, expected):
+    assert fmp_model.parse_fiscal_period(period) == expected
+
+
+def test_an_unreadable_fiscal_period_is_an_error():
+    with pytest.raises(ValueError, match="2025Q4"):
+        fmp_model.parse_fiscal_period("last quarter")
+
+
+@pytest.mark.parametrize(
+    ("ticker", "expected"),
+    [
+        ("EURUSD", True),
+        ("EURUSD=X", True),
+        ("usdjpy=x", True),
+        ("BTCUSD", False),
+        ("TSLA", False),
+        ("MSFT.AS", False),
+    ],
+)
+def test_currency_pairs_are_recognised(ticker, expected):
+    assert currencies_model.is_currency_pair(ticker) is expected
+
+
+def test_news_is_routed_by_ticker_type(cache_location, monkeypatch, known_fmp_plan):
+    calls: dict[str, list[str]] = {}
+
+    def fake_search(feed):
+        def search(symbols, **kwargs):  # noqa: ARG001
+            calls[feed] = list(symbols)
+            rows = [s for s in symbols if feed != "crypto" or s.endswith("USD")]
+            return pd.DataFrame(
+                {"Symbol": rows, "URL": [f"{feed}/{s}" for s in rows]},
+                index=pd.DatetimeIndex(
+                    ["2026-10-01"] * len(rows), name="Published Date"
+                ),
+            )
+
+        return search
+
+    for feed in ("stock", "crypto", "forex"):
+        monkeypatch.setattr(
+            toolkit_controller, f"_search_{feed}_news", fake_search(feed)
+        )
+
+    toolkit = toolkit_controller.Toolkit(
+        ["AAPL", "BTCUSD", "EURUSD=X"],
+        api_key="test-key",
+        sleep_timer=False,
+        use_cached_data=cache_location,
+        benchmark_ticker=None,
+    )
+    news = toolkit.get_stock_news()
+
+    # The pair goes to the forex feed without "=X"; the crypto feed claims BTCUSD, so
+    # only AAPL is left for the stock feed.
+    assert calls == {
+        "crypto": ["AAPL", "BTCUSD"],
+        "stock": ["AAPL"],
+        "forex": ["EURUSD"],
+    }
+    assert sorted(news["Symbol"]) == ["AAPL", "BTCUSD", "EURUSD"]
+
+
+def test_etf_methods_do_not_remove_tickers_that_are_not_funds(
+    cache_location, monkeypatch, known_fmp_plan
+):
+    monkeypatch.setattr(
+        toolkit_controller,
+        "_get_etf_holdings",
+        lambda tickers, **kwargs: (pd.DataFrame(), list(tickers)),
+    )
+
+    toolkit = toolkit_controller.Toolkit(
+        ["AAPL", "MSFT"],
+        api_key="test-key",
+        sleep_timer=False,
+        use_cached_data=cache_location,
+    )
+    holdings = toolkit.etf.get_holdings()
+
+    assert holdings.empty
+    assert toolkit._tickers == ["AAPL", "MSFT"]
+
+
+def test_executives_list_the_best_paid_first(responses):
+    canned, _ = responses
+    canned["key-executives"] = [
+        {"name": "Undisclosed", "title": "Vice President", "pay": None},
+        {"name": "Chief", "title": "Chief Executive Officer", "pay": 16759518},
+        {"name": "Counsel", "title": "General Counsel", "pay": 5022482},
+    ]
+
+    executives, _ = fmp_model.get_executives(["AAPL"], "key")
+
+    assert list(executives.loc["AAPL"].index) == ["Chief", "Counsel", "Undisclosed"]
+
+
+def test_a_sector_a_fund_does_not_hold_weighs_zero(
+    cache_location, monkeypatch, known_fmp_plan
+):
+    weightings = pd.DataFrame(
+        {"QQQ": [0.6, None], "VTI": [0.4, 0.02]},
+        index=pd.Index(["Technology", "Real Estate"], name="Sector"),
+    )
+    monkeypatch.setattr(
+        toolkit_controller,
+        "_get_etf_sector_weightings",
+        lambda tickers, **kwargs: (weightings, []),
+    )
+
+    toolkit = toolkit_controller.Toolkit(
+        ["QQQ", "VTI"],
+        api_key="test-key",
+        sleep_timer=False,
+        use_cached_data=cache_location,
+    )
+    sectors = toolkit.etf.get_sector_weightings()
+
+    assert sectors.loc["Real Estate", "QQQ"] == 0
+    assert list(sectors.index) == ["Technology", "Real Estate"]
+
+
+@pytest.fixture(name="calendar_requests")
+def fixture_calendar_requests(monkeypatch):
+    """Serve a small economic calendar and record the requested urls."""
+    from financetoolkit.economics.sources import fmp_model as economics_fmp_model
+
+    requested: list[str] = []
+    releases = [
+        {
+            "date": "2026-09-04 12:30:00",
+            "country": "US",
+            "event": "Non Farm Payrolls",
+            "currency": "USD",
+            "previous": 21,
+            "actual": 162,
+            "changePercentage": 671.43,
+            "impact": "High",
+            "unit": "K",
+        },
+        {
+            "date": "2026-09-04 08:00:00",
+            "country": "EU",
+            "event": "ECB Decision",
+            "currency": "EUR",
+            "previous": 2.4,
+            "actual": 2.15,
+            "changePercentage": -10.42,
+            "impact": "High",
+            "unit": "%",
+        },
+        {
+            "date": "2026-09-05 09:00:00",
+            "country": "UK",
+            "event": "Retail Sales",
+            "currency": "GBP",
+            "impact": "Medium",
+        },
+        {
+            "date": "2026-09-05 02:00:00",
+            "country": "VN",
+            "event": "Inflation",
+            "currency": "VND",
+            "impact": "Low",
+        },
+    ]
+
+    def fake_get_cached_financial_data(
+        url, user_subscription="Free", sleep_timer=True
+    ):  # noqa: ARG001
+        requested.append(url)
+        return pd.DataFrame(releases)
+
+    monkeypatch.setattr(
+        economics_fmp_model, "get_cached_financial_data", fake_get_cached_financial_data
+    )
+
+    return economics_fmp_model, requested
+
+
+def test_economic_calendar_filters_by_country_name_or_code(calendar_requests):
+    economics_fmp_model, _ = calendar_requests
+
+    by_name = economics_fmp_model.get_economic_calendar(
+        "key", "2026-09-01", "2026-09-30", countries="United States"
+    )
+    by_code = economics_fmp_model.get_economic_calendar(
+        "key", "2026-09-01", "2026-09-30", countries="us"
+    )
+    combined = economics_fmp_model.get_economic_calendar(
+        "key",
+        "2026-09-01",
+        "2026-09-30",
+        countries=["Euro Area", "United Kingdom"],
+        currencies="EUR,GBP",
+        impact="High",
+    )
+
+    assert by_name.equals(by_code)
+    assert by_name["Event"].tolist() == ["Non Farm Payrolls"]
+    assert by_name[["Country", "Country Code"]].iloc[0].tolist() == [
+        "United States",
+        "US",
+    ]
+    # The UK release is Medium impact, so only the ECB decision is left.
+    assert combined["Event"].tolist() == ["ECB Decision"]
+
+
+def test_economic_calendar_converts_percentages_to_decimals(calendar_requests):
+    economics_fmp_model, _ = calendar_requests
+
+    calendar = economics_fmp_model.get_economic_calendar(
+        "key", "2026-09-01", "2026-09-30"
+    ).set_index("Event")
+
+    # The ECB rate is quoted in percent, the payrolls in thousands of jobs.
+    assert calendar.loc[
+        "ECB Decision", ["Previous", "Actual"]
+    ].tolist() == pytest.approx([0.024, 0.0215])
+    assert calendar.loc["Non Farm Payrolls", ["Previous", "Actual"]].tolist() == [
+        21,
+        162,
+    ]
+    assert calendar.loc[
+        ["ECB Decision", "Non Farm Payrolls"], "Change %"
+    ].tolist() == pytest.approx([-0.1042, 6.7143])
+
+
+def test_economic_calendar_impact_all_keeps_every_release(calendar_requests):
+    economics_fmp_model, _ = calendar_requests
+
+    everything = economics_fmp_model.get_economic_calendar(
+        "key", "2026-09-01", "2026-09-30", impact="All"
+    )
+    high = economics_fmp_model.get_economic_calendar(
+        "key", "2026-09-01", "2026-09-30", impact="High"
+    )
+
+    assert len(everything) == 4
+    assert set(high["Impact"]) == {"High"}
+
+
+def test_economic_calendar_splits_long_ranges_into_windows(calendar_requests):
+    economics_fmp_model, requested = calendar_requests
+
+    calendar = economics_fmp_model.get_economic_calendar(
+        "key", "2026-01-01", "2026-09-30"
+    )
+
+    # Requested in parallel, so in any order.
+    assert sorted(url.split("&from=")[1] for url in requested) == [
+        "2026-01-01&to=2026-03-31",
+        "2026-04-01&to=2026-06-29",
+        "2026-06-30&to=2026-09-27",
+        "2026-09-28&to=2026-09-30",
+    ]
+    # Every window returned the same releases; they are kept once.
+    assert len(calendar) == 4
+
+
+def test_economic_calendar_only_falls_back_to_requested_dates(
+    calendar_requests, monkeypatch
+):
+    from financetoolkit import Economics
+    from financetoolkit.economics.sources import gmdb_model
+
+    _, requested = calendar_requests
+    monkeypatch.setattr(
+        gmdb_model,
+        "collect_global_macro_database_dataset",
+        lambda cache=None: pd.DataFrame(),
+    )
+
+    Economics(
+        api_key="key", start_date="2026-09-20", end_date="2026-10-03"
+    ).get_economic_calendar()
+    Economics(api_key="key").get_economic_calendar()
+
+    # The first uses the dates it was created with, the second the endpoint's default
+    # rather than a hundred years of 90-day windows.
+    assert requested[0].endswith("&from=2026-09-20&to=2026-10-03")
+    assert requested[1].endswith("economic-calendar?apikey=key")
+    assert len(requested) == 2
+
+
+def test_market_risk_premium_is_returned_as_decimals(monkeypatch):
+    from financetoolkit import fmp_model
+
+    monkeypatch.setattr(
+        fmp_model,
+        "get_financial_data",
+        lambda url: pd.DataFrame(  # noqa: ARG005
+            [
+                {
+                    "country": "United States",
+                    "continent": "North America",
+                    "countryRiskPremium": 0.23,
+                    "totalEquityRiskPremium": 4.46,
+                }
+            ]
+        ),
+    )
+
+    premium = fmp_model.get_market_risk_premium(api_key="key")
+
+    assert premium.loc[
+        "United States", ["Country Risk Premium", "Total Equity Risk Premium"]
+    ].tolist() == (pytest.approx([0.0023, 0.0446]))
+
+
+class _Response:
+    """A response with a status code and a body, as requests returns it."""
+
+    def __init__(self, status_code: int, text: str = "[]"):
+        self.status_code = status_code
+        self.text = text
+
+    def raise_for_status(self):
+        if self.status_code >= 400:  # noqa: PLR2004
+            raise requests.exceptions.HTTPError(response=self)
+
+    def json(self):
+        return []
+
+
+def test_a_server_error_is_retried(monkeypatch):
+    responses = [_Response(503, "Service Unavailable"), _Response(200, '[{"a": 1}]')]
+    monkeypatch.setattr(fmp_model, "get_request", lambda *_, **__: responses.pop(0))
+    monkeypatch.setattr(fmp_model.time, "sleep", lambda _: None)
+
+    assert fmp_model.get_financial_data("https://example.com").to_dict("list") == {
+        "a": [1]
+    }
+
+
+def test_a_timeout_is_reported_instead_of_raised(monkeypatch):
+    attempts = []
+
+    def timeout(*_, **__):
+        attempts.append(1)
+        raise requests.exceptions.ReadTimeout("Read timed out.")
+
+    monkeypatch.setattr(fmp_model, "get_request", timeout)
+    monkeypatch.setattr(fmp_model.time, "sleep", lambda _: None)
+
+    result = fmp_model.get_financial_data("https://example.com")
+
+    assert list(result.columns) == ["REQUEST FAILED"]
+    assert len(attempts) == fmp_model.TRANSIENT_RETRY_LIMIT + 1
+
+
+def test_an_error_message_instead_of_prices_is_no_data(monkeypatch):
+    monkeypatch.setattr(
+        fmp_model,
+        "get_financial_data",
+        lambda *_, **__: {"Error Message": "Something went wrong."},
+    )
+
+    result = fmp_model.get_historical_data(
+        ticker="AAPL", api_key="KEY", start="2024-01-01", end="2024-02-01"
+    )
+
+    assert result.empty
+
+
+def test_identifiers_keep_their_leading_zeros(monkeypatch):
+    body = (
+        '[{"symbol": "AAPL", "cik": "0000320193", "cusip": "037833100", "price": 1.5}]'
+    )
+    monkeypatch.setattr(fmp_model, "get_request", lambda *_, **__: _Response(200, body))
+
+    result = fmp_model.get_financial_data("https://example.com").iloc[0]
+
+    assert result["cik"] == "0000320193"
+    assert result["cusip"] == "037833100"
+    assert result["price"] == 1.5  # noqa: PLR2004
+
+
+def test_a_rating_with_a_missing_score_is_kept(responses):
+    canned, _ = responses
+    canned["ratings-historical"] = [
+        {
+            "symbol": "AAPL",
+            "date": "2024-01-02",
+            "rating": "A",
+            "overallScore": 4,
+            "priceToBookScore": None,
+        },
+        {
+            "symbol": "AAPL",
+            "date": "2024-01-03",
+            "rating": "A-",
+            "overallScore": 3,
+            "priceToBookScore": 2,
+        },
+    ]
+
+    ratings, _ = fmp_model.get_rating(tickers="AAPL", api_key="KEY")
+
+    assert ratings["Rating"].tolist() == ["A", "A-"]
+
+
+def test_the_rating_of_a_single_ticker_is_cached_and_filtered_by_date(
+    responses, cache_location
+):
+    canned, requested = responses
+    canned["ratings-historical"] = [
+        {"symbol": "AMZN", "date": date, "rating": rating, "overallScore": score}
+        for date, rating, score in [
+            ("2026-01-05", "A-", 4),
+            ("2025-12-31", "B+", 3),
+            ("2020-12-31", "B", 3),
+        ]
+    ]
+
+    # The ticker level stays on the model's answer, which the cache splits on.
+    ratings, _ = fmp_model.get_rating(tickers="AMZN", api_key="KEY")
+    assert ratings.index.get_level_values(0).unique().tolist() == ["AMZN"]
+
+    toolkit = toolkit_controller.Toolkit(
+        ["AMZN"],
+        api_key="test-key",
+        sleep_timer=False,
+        use_cached_data=cache_location,
+        start_date="2021-01-01",
+        end_date="2025-12-31",
+    )
+    rating = toolkit.get_rating()
+
+    # One ticker returns its dates only, limited to the start and end date.
+    assert rating.index.tolist() == ["2025-12-31"]
+    assert rating["Rating"].tolist() == ["B+"]
+
+    # A second Toolkit is answered from the cache rather than finding it marked as missing.
+    calls = len(requested)
+    again = toolkit_controller.Toolkit(
+        ["AMZN"],
+        api_key="test-key",
+        sleep_timer=False,
+        use_cached_data=cache_location,
+    ).get_rating()
+
+    # Only the probe of the key's plan may go out, which the canned answers leave undecided.
+    assert [url for url in requested[calls:] if "ratings-historical" in url] == []
+    assert again["Rating"].tolist() == ["B+", "A-"]
+
+
+def test_yahoo_finance_symbols_are_requested_as_financial_modeling_prep_writes_them(
+    monkeypatch,
+):
+    requested = []
+
+    def fake_get_request(url, timeout):  # noqa: ARG001
+        requested.append(url)
+        return _Response(200, "[]")
+
+    monkeypatch.setattr(fmp_model, "get_request", fake_get_request)
+
+    fmp_model.get_financial_data(
+        "https://financialmodelingprep.com/stable/batch-quote?symbols=AAPL,EURUSD=X,BTC-USD&apikey=K"
+    )
+
+    assert "symbols=AAPL,EURUSD,BTCUSD&" in requested[0]
+
+
+def test_dividends_are_split_adjusted_like_the_prices(responses):
+    canned, _ = responses
+    dates = ["2020-08-06", "2020-08-07", "2020-11-05", "2020-11-06"]
+    canned["historical-price-eod/full"] = [
+        {
+            "date": date,
+            "open": 110.0,
+            "high": 111.0,
+            "low": 109.0,
+            "close": 110.0,
+            "volume": 1,
+        }
+        for date in dates
+    ]
+    canned["historical-price-eod/dividend-adjusted"] = [
+        {"date": date, "adjClose": 110.0} for date in dates
+    ]
+    # Apple's 2020 dividends: 0.82 as paid before the 4-for-1 split, 0.205 per share today.
+    canned["dividends"] = [
+        {"date": "2020-11-06", "dividend": 0.205, "adjDividend": 0.205},
+        {"date": "2020-08-07", "dividend": 0.82, "adjDividend": 0.205},
+    ]
+
+    historical = fmp_model.get_historical_data(
+        "AAPL", "key", start="2020-08-06", end="2020-11-06", sleep_timer=False
+    )
+
+    assert historical.loc["2020-08-07", "Dividends"] == pytest.approx(0.205)
+    assert historical.loc["2020-11-06", "Dividends"] == pytest.approx(0.205)
+
+
+def test_profile_and_quote_changes_are_decimals(responses):
+    canned, _ = responses
+    canned["profile"] = [
+        {
+            "symbol": "AAPL",
+            "price": 250.0,
+            "changePercentage": 1.25,
+            "companyName": "Apple Inc.",
+            "image": "",
+            "defaultImage": False,
+            "isEtf": False,
+            "isActivelyTrading": True,
+            "isAdr": False,
+            "isFund": False,
+        }
+    ]
+    canned["quote"] = [
+        {
+            "symbol": "AAPL",
+            "name": "Apple Inc.",
+            "price": 250.0,
+            "changePercentage": -0.5,
+        }
+    ]
+
+    profile, _ = fmp_model.get_profile("AAPL", api_key="K")
+    quote, _ = fmp_model.get_quote("AAPL", api_key="K")
+
+    # Published in percent, returned as decimals like every other change.
+    assert profile.loc["Change %", "AAPL"] == pytest.approx(0.0125)
+    assert quote.loc["Change %", "AAPL"] == pytest.approx(-0.005)
+    assert profile.loc["Company Name", "AAPL"] == "Apple Inc."
+
+
+def test_quote_change_has_no_float_residue(responses):
+    canned, _ = responses
+    canned["quote"] = [{"symbol": "AAPL", "price": 250.0, "changePercentage": -0.75391}]
+    canned["profile"] = [
+        {
+            "symbol": "AAPL",
+            "price": 250.0,
+            "changePercentage": -0.75391,
+            "image": "",
+            "defaultImage": False,
+            "isEtf": False,
+            "isActivelyTrading": True,
+            "isAdr": False,
+            "isFund": False,
+        }
+    ]
+
+    quote, _ = fmp_model.get_quote("AAPL", api_key="K")
+    profile, _ = fmp_model.get_profile("AAPL", api_key="K")
+
+    # -0.75391 / 100 is -0.007539100000000001 in floating point.
+    assert repr(quote.loc["Change %", "AAPL"]) == "-0.0075391"
+    assert repr(profile.loc["Change %", "AAPL"]) == "-0.0075391"
+
+
+def test_two_fiscal_periods_in_one_calendar_period_are_reported(responses, caplog):
+    """After a change of fiscal year end, the dropped period is named in a warning."""
+    canned, _ = responses
+    canned["income-statement"] = [
+        {"date": "2023-12-31", "symbol": "XYZ", "revenue": 300},
+        {"date": "2023-06-30", "symbol": "XYZ", "revenue": 200},
+        {"date": "2022-06-30", "symbol": "XYZ", "revenue": 100},
+    ]
+
+    with caplog.at_level("WARNING"):
+        statement = fmp_model.get_financial_statement(
+            "XYZ", statement="income", api_key="key"
+        )
+
+    assert statement.loc["revenue"].tolist() == [300, 100]
+    warning = " ".join(record.getMessage() for record in caplog.records)
+    assert "XYZ" in warning
+    assert "2023-12-31, 2023-06-30" in warning
+    assert "(2023)" in warning
+
+
+def test_statements_keep_the_fiscal_period_end_date(responses):
+    canned, _ = responses
+    canned["income-statement"] = [
+        {
+            "date": "2024-01-28",
+            "symbol": "NVDA",
+            "reportedCurrency": "USD",
+            "revenue": 2.0,
+        },
+        {
+            "date": "2023-01-29",
+            "symbol": "NVDA",
+            "reportedCurrency": "USD",
+            "revenue": 1.0,
+        },
+    ]
+
+    statement = fmp_model.get_financial_statement(
+        ticker="NVDA", statement="income", api_key="key", quarter=False
+    )
+
+    # The columns are the calendar years holding most of each fiscal year, while the
+    # actual last day of the fiscal year is kept as a statistic.
+    assert [str(period) for period in statement.columns] == ["2023", "2022"]
+    assert statement.loc["periodEndDate"].tolist() == ["2024-01-28", "2023-01-29"]
+
+
+def test_a_certificate_error_is_reported_without_retrying(monkeypatch):
+    attempts = []
+
+    def certificate_error(*_, **__):
+        attempts.append(1)
+        raise requests.exceptions.SSLError("certificate verify failed")
+
+    monkeypatch.setattr(fmp_model, "get_request", certificate_error)
+    monkeypatch.setattr(fmp_model.time, "sleep", lambda _: None)
+
+    assert fmp_model.get_financial_data("https://example.com").empty
+    assert len(attempts) == 1
+
+
+def test_a_refused_connection_is_retried_a_few_times(monkeypatch):
+    attempts = []
+
+    def refused(*_, **__):
+        attempts.append(1)
+        raise requests.exceptions.ConnectionError("Name or service not known")
+
+    monkeypatch.setattr(fmp_model, "get_request", refused)
+    monkeypatch.setattr(fmp_model.time, "sleep", lambda _: None)
+
+    assert fmp_model.get_financial_data("https://example.com").empty
+    assert len(attempts) == fmp_model.TRANSIENT_RETRY_LIMIT + 1
+
+
+def test_an_unrecognised_error_is_logged_without_the_api_key(monkeypatch, caplog):
+    url = (
+        "https://financialmodelingprep.com/stable/profile?symbol=X&apikey=SECRETKEY123"
+    )
+
+    def forbidden(*_, **__):
+        response = requests.models.Response()
+        response.status_code = 403
+        response.url = url
+        response.raise_for_status()
+
+    monkeypatch.setattr(fmp_model, "get_request", forbidden)
+
+    with caplog.at_level("ERROR"):
+        result = fmp_model.get_financial_data(url)
+
+    assert list(result.columns) == ["REQUEST FAILED"]
+    assert "unrecognised error" in caplog.text
+    assert "SECRETKEY123" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("adjusted_error", "incomplete"),
+    [("LIMIT REACH", True), ("PREMIUM QUERY PARAMETER", False)],
+)
+def test_prices_are_incomplete_only_after_a_temporary_failure(
+    monkeypatch, adjusted_error, incomplete
+):
+    prices = [
+        {"date": "2024-01-02", "open": 1, "high": 1, "low": 1, "close": 1, "volume": 1}
+    ]
+
+    def fake(url, **kwargs):  # noqa: ARG001
+        if "dividend-adjusted" in url:
+            return pd.DataFrame(columns=[adjusted_error])
+        if "/dividends" in url:
+            return []
+        return prices
+
+    monkeypatch.setattr(fmp_model, "get_financial_data", fake)
+
+    data = fmp_model.get_historical_data(
+        "AAPL", api_key="KEY", start="2024-01-01", end="2024-01-05"
+    )
+
+    assert data.attrs.get("incomplete", False) is incomplete
+    assert data["Adj Close"].tolist() == data["Close"].tolist()
+
+
+def _fake_prices_with_a_dividend(monkeypatch, dividends):
+    """Serve five closes with FMP's adjusted close for a dividend of 2 on 2024-01-04."""
+    days = ["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05", "2024-01-08"]
+    closes = [100, 101, 99, 100, 102.0]
+    factor = 1 - 2 / 101
+    adjusted = [round(100 * factor, 2), round(101 * factor, 2), 99, 100, 102.0]
+
+    def fake(url, **kwargs):  # noqa: ARG001
+        if "dividend-adjusted" in url:
+            return [{"date": d, "adjClose": a} for d, a in zip(days, adjusted)]
+        if "/dividends" in url:
+            return dividends
+        return [
+            {"date": d, "open": c, "high": c, "low": c, "close": c, "volume": 1}
+            for d, c in zip(days, closes)
+        ]
+
+    monkeypatch.setattr(fmp_model, "get_financial_data", fake)
+
+    return adjusted
+
+
+@pytest.mark.parametrize(
+    "dividends",
+    [pd.DataFrame(columns=["LIMIT REACH"]), []],
+    ids=["failed", "none returned"],
+)
+def test_adjusted_close_is_kept_from_fmp_without_the_dividends(monkeypatch, dividends):
+    adjusted = _fake_prices_with_a_dividend(monkeypatch, dividends)
+
+    data = fmp_model.get_historical_data(
+        "X",
+        api_key="KEY",
+        start="2024-01-02",
+        end="2024-01-08",
+        user_subscription="Premium",
+    )
+
+    # Rebuilding from the close with no dividends would make the ex-dividend day a loss
+    # of 99 / 101 - 1 = -1.98%; FMP's adjusted close holds the dividend (a 0% return).
+    assert data["Adj Close"].tolist() == adjusted
+    assert data["Return"].iloc[2] == pytest.approx(0)
+
+
+def test_adjusted_close_is_kept_from_fmp_when_older_free_dividends_are_missing(
+    monkeypatch,
+):
+    # A Free plan's five latest payments, the first after the start of the prices.
+    latest = [{"date": f"2024-01-0{day}", "adjDividend": 0.0001} for day in range(4, 9)]
+    adjusted = _fake_prices_with_a_dividend(monkeypatch, latest)
+    monkeypatch.setattr(
+        fmp_model,
+        "_complete_older_dividends",
+        lambda ticker, paid: (paid, False),  # noqa: ARG005
+    )
+
+    data = fmp_model.get_historical_data(
+        "X", api_key="KEY", start="2024-01-02", end="2024-01-08"
+    )
+
+    assert data["Adj Close"].tolist() == adjusted
+
+
+def test_adjusted_close_is_rebuilt_unrounded_with_every_dividend(monkeypatch):
+    _fake_prices_with_a_dividend(
+        monkeypatch, [{"date": "2024-01-04", "adjDividend": 2.0}]
+    )
+
+    data = fmp_model.get_historical_data(
+        "X",
+        api_key="KEY",
+        start="2024-01-02",
+        end="2024-01-08",
+        user_subscription="Premium",
+    )
+
+    assert data["Adj Close"].iloc[0] == pytest.approx(100 * (1 - 2 / 101))
+    assert data["Return"].iloc[2] == pytest.approx(0)
+
+
+def test_dividends_are_divided_with_the_prices(monkeypatch):
+    _fake_prices_with_a_dividend(
+        monkeypatch, [{"date": "2024-01-04", "adjDividend": 2.0}]
+    )
+
+    data = fmp_model.get_historical_data(
+        "X",
+        api_key="KEY",
+        start="2024-01-02",
+        end="2024-01-08",
+        divide_ohlc_by=100,
+        user_subscription="Premium",
+    )
+
+    # The dividend yield of the ex-dividend day is 2 / 99, whatever the divisor.
+    assert data["Close"].iloc[2] == pytest.approx(0.99)
+    assert data["Dividends"].iloc[2] == pytest.approx(0.02)
+    assert data["Return"].iloc[2] == pytest.approx(0)
+
+
+def test_free_plan_dividends_are_completed_with_older_yahoo_payments(monkeypatch):
+    import yfinance as yf
+
+    from financetoolkit import fmp_model
+
+    latest = pd.Series(
+        [0.25] * 5,
+        index=pd.period_range("2024-02-01", periods=5, freq="Q").asfreq("D", "start"),
+    )
+    yahoo = pd.Series(
+        [0.2, 0.2, 0.25],
+        index=pd.DatetimeIndex(
+            ["2023-05-01", "2023-08-01", "2024-02-01"], tz="America/New_York"
+        ),
+    )
+    monkeypatch.setattr(
+        yf, "Ticker", lambda symbol: type("T", (), {"dividends": yahoo})()
+    )
+
+    completed, complete = fmp_model._complete_older_dividends("AAPL", latest)
+
+    assert complete
+
+    # The two earlier payments come first; the overlapping one is kept from FMP.
+    assert completed.index[:2].astype(str).tolist() == ["2023-05-01", "2023-08-01"]
+    assert completed.iloc[2:].equals(latest)
+
+
+def test_free_plan_dividends_without_yahoo_history_warn(monkeypatch):
+    import yfinance as yf
+
+    from financetoolkit import fmp_model
+
+    latest = pd.Series(
+        [0.25] * 5, index=pd.period_range("2024-01-01", periods=5, freq="D")
+    )
+    monkeypatch.setattr(
+        yf,
+        "Ticker",
+        lambda symbol: type("T", (), {"dividends": pd.Series(dtype=float)})(),
+    )
+
+    from unittest.mock import patch
+
+    with patch.object(fmp_model.logger, "warning") as warning:
+        completed, complete = fmp_model._complete_older_dividends("XYZ", latest)
+
+    assert completed.equals(latest)
+    assert not complete
+
+    assert warning.call_args[0][0].startswith("No dividend data is available for")
+
+
+def _raising_ticker(symbol):
+    raise RuntimeError("Too Many Requests")
+
+
+@pytest.mark.parametrize(
+    "ticker",
+    [lambda symbol: type("T", (), {"dividends": None})(), _raising_ticker],
+    ids=["none", "raises"],
+)
+def test_free_plan_dividends_when_yahoo_fails(monkeypatch, ticker):
+    import yfinance as yf
+
+    from financetoolkit import fmp_model
+
+    latest = pd.Series(
+        [0.25] * 5, index=pd.period_range("2025-01-01", periods=5, freq="D")
+    )
+    # yfinance returns None for the dividends when Yahoo answers with an error, and the
+    # request itself can raise; both count as no older payments.
+    monkeypatch.setattr(yf, "Ticker", ticker)
+
+    from unittest.mock import patch
+
+    with patch.object(fmp_model.logger, "warning") as warning:
+        completed, complete = fmp_model._complete_older_dividends("AAPL", latest)
+
+    assert completed.equals(latest)
+    assert not complete
+
+    assert warning.call_args[0][0].startswith("No dividend data is available for")
+
+
+def test_institutional_ownership_is_quarterly_in_decimals_and_skips_open_quarters(
+    monkeypatch,
+):
+    requested: list[str] = []
+
+    def fake_get_financial_data(
+        url, sleep_timer=True, raw=False, user_subscription="Free"
+    ):  # noqa: ARG001
+        requested.append(url)
+        quarter = int(url.split("quarter=")[1].split("&")[0])
+        if "symbol-positions-summary" in url:
+            return pd.DataFrame(
+                [
+                    {
+                        "investorsHolding": 100 * quarter,
+                        "investorsHoldingChange": 10,
+                        "numberOf13Fshares": 1_000,
+                        "numberOf13FsharesChange": 5,
+                        "totalInvested": 2_000,
+                        "ownershipPercent": 60.0 + quarter,
+                        "ownershipPercentChange": 1.0,
+                        "newPositions": 3,
+                        "increasedPositions": 4,
+                        "reducedPositions": 5,
+                        "closedPositions": 6,
+                        "putCallRatio": 0.9,
+                    }
+                ]
+            )
+        # The ten largest holders of the shares; an option position must not count.
+        holders = [{"ownership": 2.0, "putCallShare": "Share"} for _ in range(12)]
+        holders.insert(1, {"ownership": 5.0, "putCallShare": "Call"})
+        return pd.DataFrame(holders)
+
+    monkeypatch.setattr(fmp_model, "get_financial_data", fake_get_financial_data)
+
+    # On 2026-11-05 the third quarter is still within its 45-day filing window.
+    class FrozenDatetime(fmp_model.datetime):
+        @classmethod
+        def today(cls):
+            return cls(2026, 11, 5)
+
+    monkeypatch.setattr(fmp_model, "datetime", FrozenDatetime)
+
+    ownership, no_data = fmp_model.get_institutional_ownership(
+        ["AAPL"], "key", start_date="2026-01-01", end_date="2026-12-31"
+    )
+
+    assert no_data == []
+    assert ownership.loc["AAPL"].index.tolist() == [
+        pd.Period("2026Q1"),
+        pd.Period("2026Q2"),
+    ]
+    assert ownership.loc[("AAPL", pd.Period("2026Q2")), "Ownership"] == pytest.approx(
+        0.62
+    )
+    assert ownership.loc[
+        ("AAPL", pd.Period("2026Q2")), "Ownership Change"
+    ] == pytest.approx(0.01)
+    assert ownership.loc[
+        ("AAPL", pd.Period("2026Q2")), "Top 10 Ownership"
+    ] == pytest.approx(0.2)
+    assert all("quarter=3" not in url for url in requested)
+
+
+def test_institutional_ownership_reports_a_ticker_without_filings(monkeypatch):
+    monkeypatch.setattr(
+        fmp_model,
+        "get_financial_data",
+        lambda url, sleep_timer=True, raw=False, user_subscription="Free": pd.DataFrame(),  # noqa: ARG005
+    )
+
+    ownership, no_data = fmp_model.get_institutional_ownership(
+        ["ASML.AS"], "key", start_date="2025-01-01", end_date="2025-06-30"
+    )
+
+    assert ownership.empty
+    assert no_data == ["ASML.AS"]
+
+
+def test_price_targets_leave_the_average_of_an_empty_window_out(responses):
+    canned, _ = responses
+    canned["price-target-consensus"] = [
+        {
+            "symbol": "NVDA",
+            "targetHigh": 300,
+            "targetLow": 150,
+            "targetConsensus": 250,
+            "targetMedian": 240,
+        }
+    ]
+    canned["price-target-summary"] = [
+        {
+            "symbol": "NVDA",
+            "lastMonthCount": 0,
+            "lastMonthAvgPriceTarget": 0,
+            "lastQuarterCount": 4,
+            "lastQuarterAvgPriceTarget": 260,
+            "lastYearCount": 20,
+            "lastYearAvgPriceTarget": 200,
+            "allTimeCount": 80,
+            "allTimeAvgPriceTarget": 120,
+        }
+    ]
+
+    targets, missing = fmp_model.get_price_targets(["NVDA"], "key")
+
+    assert targets.loc["Target Consensus", "NVDA"] == 250
+    # The endpoint reports the average of a window without targets as 0.
+    assert pd.isna(targets.loc["Last Month Average", "NVDA"])
+    assert targets.loc["Last Quarter Average", "NVDA"] == 260
+    assert missing == []
+
+
+def test_price_target_measures():
+    targets = pd.DataFrame(
+        {"NVDA": [250.0, 240.0, 300.0, 150.0, 260.0, 200.0]},
+        index=[
+            "Target Consensus",
+            "Target Median",
+            "Target High",
+            "Target Low",
+            "Last Quarter Average",
+            "Last Year Average",
+        ],
+    )
+
+    measures = fmp_model.add_price_target_metrics(targets, pd.Series({"NVDA": 200.0}))
+
+    assert measures.loc["Price", "NVDA"] == 200
+    assert measures.loc["Upside", "NVDA"] == pytest.approx(0.25)
+    assert measures.loc["Dispersion", "NVDA"] == pytest.approx(0.6)
+    assert measures.loc["Revision Momentum", "NVDA"] == pytest.approx(0.3)
+    # The measures follow the targets they are calculated from.
+    assert list(measures.index[:5]) == [
+        "Target Consensus",
+        "Target Median",
+        "Target High",
+        "Target Low",
+        "Price",
+    ]
+
+
+def test_a_price_target_without_a_quote_has_no_upside():
+    targets = pd.DataFrame(
+        {"NVDA": [250.0, 240.0, 300.0, 150.0]},
+        index=["Target Consensus", "Target Median", "Target High", "Target Low"],
+    )
+
+    measures = fmp_model.add_price_target_metrics(targets, pd.Series(dtype=float))
+
+    assert pd.isna(measures.loc["Upside", "NVDA"])
+    assert measures.loc["Dispersion", "NVDA"] == pytest.approx(0.6)
+    assert "Revision Momentum" not in measures.index
+
+
+def test_price_target_history_pages_back_to_the_start_date(monkeypatch):
+    requested = []
+
+    def target(day, company, price_target, price):
+        return {
+            "publishedDate": f"{day}T12:00:00.000Z",
+            "analystCompany": company,
+            "priceTarget": price_target,
+            "adjPriceTarget": price_target,
+            "priceWhenPosted": price,
+        }
+
+    recent = [target("2025-06-30", "Firm", 220, 200)] * 99 + [
+        target("2025-03-03", "Bank", 150, 120)
+    ]
+    older = [
+        target("2025-02-03", "Bank", 140, 140),
+        target("2025-01-06", "Broker", 100, 125),
+        target("2024-12-02", "Broker", 90, 100),
+    ]
+
+    def fake_get_financial_data(
+        url, sleep_timer=True, raw=False, user_subscription="Free"
+    ):  # noqa: ARG001
+        requested.append(url)
+        page = int(url.split("page=")[1].split("&")[0])
+
+        return pd.DataFrame({0: recent, 1: older}.get(page, []))
+
+    monkeypatch.setattr(fmp_model, "get_financial_data", fake_get_financial_data)
+
+    history, missing = fmp_model.get_price_target_history(
+        ["NVDA"], "key", start_date="2025-01-01", end_date="2025-03-31"
+    )
+
+    # The second page holds the last targets, so no third page is requested; the previous
+    # targets are looked up over the year before the start date.
+    assert len(requested) == 2
+    assert "from=2024-01-02" in requested[0] and "to=2025-03-31" in requested[0]
+    nvda = history.loc["NVDA"]
+    assert nvda.index.get_level_values("Analyst Company").tolist() == [
+        "Broker",
+        "Bank",
+        "Bank",
+    ]
+    assert nvda["Implied Upside"].tolist() == pytest.approx([-0.2, 0.0, 0.25])
+    # The Broker's target of December, before the start date, is the previous one.
+    assert nvda["Previous Target"].iloc[0] == 90
+    assert nvda["Previous Date"].iloc[0] == "2024-12-02"
+    assert nvda["Target Change"].iloc[0] == pytest.approx(100 / 90 - 1)
+    # The Bank's first target has no previous one: new coverage.
+    assert pd.isna(nvda["Previous Target"].iloc[1])
+    assert nvda["Target Change"].iloc[2] == pytest.approx(150 / 140 - 1)
+    assert missing == []
+
+
+def test_a_previous_target_older_than_a_year_no_longer_stands(monkeypatch):
+    def target(day, price_target):
+        return {
+            "publishedDate": f"{day}T12:00:00.000Z",
+            "analystCompany": "Firm",
+            "newsTitle": f"NVIDIA (NVDA) PT Raised to ${price_target} at Firm",
+            "adjPriceTarget": price_target,
+            "priceWhenPosted": 100,
+        }
+
+    monkeypatch.setattr(
+        fmp_model,
+        "get_financial_data",
+        lambda url, **kwargs: pd.DataFrame(
+            [target("2025-06-02", 150), target("2024-05-01", 120)]
+            if "page=0" in url
+            else []
+        ),
+    )
+
+    history, _ = fmp_model.get_price_target_history("NVDA", "key")
+
+    assert history["Previous Target"].isna().all()
+
+
+def test_targets_listed_under_another_company_are_credited_to_the_named_one():
+    targets = pd.DataFrame(
+        [
+            # Listed under Macquarie, reported at JPMorgan.
+            ("2026-08-27T06:25:00.000Z", "Macquarie", 320, "NVIDIA (NVDA) PT Raised to $320 at JPMorgan"),
+            ("2026-05-21T06:25:00.000Z", "J.P. Morgan", 300, "Nvidia price target raised to $300 at JP Morgan"),
+            ("2026-05-21T06:20:00.000Z", "Macquarie", 310, "Macquarie Reiterates Outperform Rating on NVIDIA"),
+            # One article listed twice: the copy under Wells Fargo is dropped.
+            ("2026-10-02T09:25:00.000Z", "Wells Fargo", 210, "Morgan Stanley Renames NVIDIA (NVDA) to Top Pick"),
+            ("2026-10-02T09:25:00.000Z", "Morgan Stanley", 230, "Morgan Stanley Renames NVIDIA (NVDA) to Top Pick"),
+            ("2026-05-12T10:22:10.000Z", "Wells Fargo", 315, "Nvidia price target raised to $315 at Wells Fargo"),
+            # A title that names no company keeps the listed one.
+            ("2026-06-01T10:00:00.000Z", "Wells Fargo", 320, "Analyst says the AI build-out has years to run"),
+        ],
+        columns=["publishedDate", "analystCompany", "adjPriceTarget", "newsTitle"],
+    )  # fmt: skip
+
+    corrected = fmp_model.correct_analyst_companies(targets)
+
+    assert corrected["analystCompany"].tolist() == [
+        "J.P. Morgan",
+        "J.P. Morgan",
+        "Macquarie",
+        "Morgan Stanley",
+        "Wells Fargo",
+        "Wells Fargo",
+    ]
+    assert corrected["adjPriceTarget"].tolist() == [320, 300, 310, 230, 315, 320]
+
+
+def test_analyst_recommendations_count_the_analysts_and_score_them(responses):
+    canned, requested = responses
+    canned["grades-historical"] = [
+        {
+            "symbol": "AAPL",
+            "date": "2025-02-01",
+            "analystRatingsStrongBuy": 2,
+            "analystRatingsBuy": 4,
+            "analystRatingsHold": 3,
+            "analystRatingsSell": 1,
+            "analystRatingsStrongSell": 0,
+        },
+        {
+            "symbol": "AAPL",
+            "date": "2024-01-01",
+            "analystRatingsStrongBuy": 1,
+            "analystRatingsBuy": 1,
+            "analystRatingsHold": 1,
+            "analystRatingsSell": 1,
+            "analystRatingsStrongSell": 1,
+        },
+    ]
+
+    recommendations, _ = fmp_model.get_analyst_recommendations(
+        ["AAPL"], "key", start_date="2025-01-01", end_date="2025-12-31"
+    )
+
+    assert "from=2025-01-01" in requested[0]
+    aapl = recommendations.loc["AAPL"]
+    # The endpoint ignores the date range, so the 2024 month is filtered out here.
+    assert aapl.index.tolist() == [pd.Timestamp("2025-02-01")]
+    assert aapl["Analysts"].iloc[0] == 10
+    assert aapl["Buy Share"].iloc[0] == pytest.approx(0.6)
+    # (1 × 2 + 2 × 4 + 3 × 3 + 4 × 1) / 10
+    assert aapl["Mean Recommendation"].iloc[0] == pytest.approx(2.3)
+
+
+def test_the_toolkit_measures_the_upside_against_the_quote(responses, cache_location):
+    canned, _ = responses
+    canned["price-target-consensus"] = [
+        {
+            "symbol": "AAPL",
+            "targetHigh": 300,
+            "targetLow": 200,
+            "targetConsensus": 250,
+            "targetMedian": 250,
+        }
+    ]
+    canned["quote"] = [{"symbol": "AAPL", "price": 200.0}]
+
+    toolkit = toolkit_controller.Toolkit(
+        ["AAPL"],
+        api_key="test-key",
+        sleep_timer=False,
+        use_cached_data=cache_location,
+        benchmark_ticker=None,
+    )
+    targets = toolkit.get_price_targets()
+
+    assert targets.loc["Upside", "AAPL"] == pytest.approx(0.25)
+    assert targets.loc["Dispersion", "AAPL"] == pytest.approx(0.4)
+
+
+class _JSONResponse(_Response):
+    """A response whose body is JSON, as requests returns it."""
+
+    def json(self):
+        return json.loads(self.text)
+
+
+PROFILE_FIELDS = {
+    "price": 1.0,
+    "image": "",
+    "defaultImage": False,
+    "isEtf": False,
+    "isActivelyTrading": True,
+    "isAdr": False,
+    "isFund": False,
+}
+
+
+def test_each_symbol_is_requested_as_itself(monkeypatch):
+    # Answered as a server reads the request: an unencoded M&M.NS would be read as M, Macy's.
+    names = {
+        "M": "Macy's",
+        "M&M.NS": "Mahindra & Mahindra",
+        "BRK.B": "Berkshire Hathaway",
+        "^N225": "Nikkei 225",
+    }
+    requested = []
+
+    def fake_get_request(url, timeout):  # noqa: ARG001
+        sent = requests.Request("GET", url).prepare().url
+        requested.append(sent)
+        symbol = parse_qs(urlsplit(sent).query)["symbol"][0]
+
+        return _JSONResponse(
+            200,
+            json.dumps(
+                [{"symbol": symbol, "companyName": names[symbol], **PROFILE_FIELDS}]
+            ),
+        )
+
+    monkeypatch.setattr(fmp_model, "get_request", fake_get_request)
+
+    profile, _ = fmp_model.get_profile(["M&M.NS", "BRK.B", "^N225"], api_key="K")
+
+    assert profile.loc["Company Name"].to_dict() == {
+        "M&M.NS": "Mahindra & Mahindra",
+        "BRK.B": "Berkshire Hathaway",
+        "^N225": "Nikkei 225",
+    }
+    # The tickers are requested in parallel, so in any order.
+    assert sorted(url.split("?")[1] for url in requested) == [
+        "symbol=%5EN225&apikey=K",
+        "symbol=BRK.B&apikey=K",
+        "symbol=M%26M.NS&apikey=K",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("/profile?symbol=M&M.NS&apikey=K", "/profile?symbol=M%26M.NS&apikey=K"),
+        (
+            "/income-statement?symbol=J&KBANK.NS&period=annual&apikey=K&limit=5",
+            "/income-statement?symbol=J%26KBANK.NS&period=annual&apikey=K&limit=5",
+        ),
+        (
+            "/news?apikey=K&symbols=M&M.NS,BRK.B",
+            "/news?apikey=K&symbols=M%26M.NS,BRK.B",
+        ),
+        # An encoded symbol is not encoded twice.
+        (
+            "/light?symbol=%5EGSPC&from=2024-01-01",
+            "/light?symbol=%5EGSPC&from=2024-01-01",
+        ),
+        ("/quote?symbol=A+B#C&apikey=K", "/quote?symbol=A%2BB%23C&apikey=K"),
+    ],
+)
+def test_symbols_are_encoded_up_to_the_next_parameter(url, expected):
+    assert fmp_model.to_financial_modeling_prep_symbols(url) == expected
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("Invalid API KEY. Feel free to create a Free API Key.", "INVALID API KEY"),
+        ("Limit Reach . Please upgrade your plan.", "LIMIT REACH"),
+        (
+            "Premium Query Parameter: this value is not available.",
+            "PREMIUM QUERY PARAMETER",
+        ),
+        ("Exclusive Endpoint : This endpoint is not available.", "EXCLUSIVE ENDPOINT"),
+        ("Symbol not found.", "NO DATA"),
+        ("Something unexpected happened.", "REQUEST FAILED"),
+    ],
+)
+@pytest.mark.parametrize("raw", [False, True])
+def test_an_error_message_sent_with_status_200_is_classified(
+    monkeypatch, message, expected, raw
+):
+    body = json.dumps({"Error Message": message})
+    monkeypatch.setattr(
+        fmp_model, "get_request", lambda *_, **__: _JSONResponse(200, body)
+    )
+    failures = fmp_model.error_model.get_request_failures()
+
+    result = fmp_model.get_financial_data(
+        "https://financialmodelingprep.com/stable/profile?symbol=AAPL&apikey=K", raw=raw
+    )
+
+    assert list(result.columns) == [expected]
+    # A failed request is counted, which keeps its answer out of the cache.
+    assert fmp_model.error_model.get_request_failures() == failures + 1
+
+
+def test_a_rate_limit_sent_with_status_200_is_retried(monkeypatch):
+    responses = [
+        _JSONResponse(200, json.dumps({"Error Message": "Limit Reach ."})),
+        _JSONResponse(200, '[{"a": 1}]'),
+    ]
+    monkeypatch.setattr(fmp_model, "get_request", lambda *_, **__: responses.pop(0))
+    monkeypatch.setattr(fmp_model.time, "sleep", lambda _: None)
+
+    result = fmp_model.get_financial_data(
+        "https://example.com", user_subscription="Premium"
+    )
+
+    assert result.to_dict("list") == {"a": [1]}
+
+
+def test_an_error_message_sent_with_status_200_is_not_cached(
+    cache_location, monkeypatch
+):
+    from financetoolkit.discovery import discovery_model  # noqa: PLC0415
+
+    cache_controller.set_active_cache(
+        cache_controller.get_cache(location=cache_location)
+    )
+    responses = [
+        _JSONResponse(200, json.dumps({"Error Message": "Limit Reach ."})),
+        _JSONResponse(200, '[{"symbol": "M&M.NS", "price": 1.0}]'),
+    ]
+    monkeypatch.setattr(fmp_model, "get_request", lambda *_, **__: responses.pop(0))
+    url = "https://financialmodelingprep.com/stable/quote?symbol=M&M.NS&apikey=K"
+
+    first = discovery_model.get_cached_financial_data(url)
+    second = discovery_model.get_cached_financial_data(url)
+
+    # The rate limit is logged and answered with an empty frame, never cached.
+    assert first.empty and list(first.columns) == []
+    assert second["symbol"].tolist() == ["M&M.NS"]
+
+
+def test_price_targets_say_when_the_latest_target_was_published(responses):
+    canned, requested = responses
+    canned["price-target-consensus"] = [
+        {
+            "symbol": "NVDA",
+            "targetHigh": 300,
+            "targetLow": 150,
+            "targetConsensus": 250,
+            "targetMedian": 240,
+        }
+    ]
+    canned["price-target-news"] = [
+        {
+            "symbol": "NVDA",
+            "publishedDate": "2026-10-05T15:32:19.000Z",
+            "analystCompany": "BNP Paribas",
+            "adjPriceTarget": 345,
+        }
+    ]
+
+    targets, _ = fmp_model.get_price_targets(["NVDA"], "key")
+    measures = fmp_model.add_price_target_metrics(
+        targets, pd.Series({"NVDA": 200.0}), today=pd.Timestamp("2026-11-07")
+    )
+
+    news = next(url for url in requested if "price-target-news" in url)
+    assert "from=" in news and "to=" in news
+    assert measures.loc["Latest Target Date", "NVDA"] == "2026-10-05"
+    assert measures.loc["Days Since Latest Target", "NVDA"] == 33
+    assert measures.loc["Upside", "NVDA"] == pytest.approx(0.25)
+
+
+def test_price_targets_without_any_published_target_have_no_latest_date(responses):
+    canned, _ = responses
+    canned["price-target-consensus"] = [
+        {
+            "symbol": "NVDA",
+            "targetHigh": 300,
+            "targetLow": 150,
+            "targetConsensus": 250,
+            "targetMedian": 240,
+        }
+    ]
+
+    targets, _ = fmp_model.get_price_targets(["NVDA"], "key")
+    measures = fmp_model.add_price_target_metrics(targets, pd.Series({"NVDA": 200.0}))
+
+    assert pd.isna(measures.loc["Latest Target Date", "NVDA"])
+    assert pd.isna(measures.loc["Days Since Latest Target", "NVDA"])
+
+
+@pytest.mark.parametrize(
+    ("event", "release", "expected_event", "expected_period"),
+    [
+        (
+            "Producer Price Index YoY (Oct)",
+            "2026-11-09",
+            "Producer Price Index YoY",
+            "2026-10",
+        ),
+        # A December figure released in January belongs to the previous year.
+        ("Inflation Rate YoY (Dec)", "2026-01-09", "Inflation Rate YoY", "2025-12"),
+        # A flash estimate released in the month it covers keeps the year.
+        ("Inflation Rate YoY (Oct)", "2026-10-31", "Inflation Rate YoY", "2026-10"),
+        ("GDP Growth Rate QoQ (Q4)", "2026-02-14", "GDP Growth Rate QoQ", "2025Q4"),
+        # A survey published ahead of its month keeps the year, or takes the next one.
+        (
+            "Consumer Confidence (Nov)",
+            "2025-10-28 07:00",
+            "Consumer Confidence",
+            "2025-11",
+        ),
+        (
+            "Consumer Confidence (Jan)",
+            "2025-12-23 07:00",
+            "Consumer Confidence",
+            "2026-01",
+        ),
+        # A figure two months later than the release month is last year's.
+        ("Retail Sales YoY (Dec)", "2026-10-15", "Retail Sales YoY", "2025-12"),
+        ("GDP Growth Rate QoQ (Q3)", "2026-10-29", "GDP Growth Rate QoQ", "2026Q3"),
+        (
+            "Continuing Jobless Claims (Dec/27)",
+            "2027-01-08",
+            "Continuing Jobless Claims",
+            "2026-12-27",
+        ),
+        ("Budget (2026)", "2026-10-01", "Budget", "2026"),
+        (
+            "Fixed Asset Investment (YTD) YoY (Jul)",
+            "2026-08-15",
+            "Fixed Asset Investment (YTD) YoY",
+            "2026-07",
+        ),
+        # Without a period the release covers its own day.
+        (
+            "Interest Rate Decision",
+            "2026-10-29 13:15",
+            "Interest Rate Decision",
+            "2026-10-29",
+        ),
+    ],
+)
+def test_economic_calendar_reference_periods(
+    event, release, expected_event, expected_period
+):
+    from financetoolkit.economics.sources import fmp_model as economics_fmp_model
+
+    name, period = economics_fmp_model.get_reference_period(
+        event, pd.Timestamp(release)
+    )
+
+    assert name == expected_event
+    assert str(period) == expected_period
+
+
+def test_economic_calendar_as_series():
+    from financetoolkit.economics.sources import fmp_model as economics_fmp_model
+
+    releases = pd.DataFrame(
+        [
+            ("2022-05-11 01:30", "China", "Inflation Rate YoY (Apr)", 0.018, 0.021),
+            (
+                "2022-07-09 01:30",
+                "China",
+                "Producer Price Index YoY (Jun)",
+                0.060,
+                0.061,
+            ),
+            (
+                "2026-01-09 01:30",
+                "China",
+                "Producer Price Index YoY (Dec)",
+                -0.020,
+                -0.019,
+            ),
+            (
+                "2026-10-14 01:30",
+                "China",
+                "Producer Price Index YoY (Sep)",
+                0.045,
+                0.050,
+            ),
+            ("2026-10-31 09:00", "Germany", "Inflation Rate YoY (Oct)", 0.027, 0.028),
+            ("2026-11-09 01:30", "China", "Inflation Rate YoY (Oct)", 0.008, 0.007),
+            (
+                "2026-11-09 01:30",
+                "China",
+                "Producer Price Index YoY (Oct)",
+                0.053,
+                0.057,
+            ),
+            # The final figure after the flash estimate, and a release still to come.
+            ("2026-11-12 07:00", "Germany", "Inflation Rate YoY (Oct)", 0.028, 0.029),
+            ("2026-12-09 01:30", "China", "Producer Price Index YoY (Nov)", 0.06, None),
+        ],
+        columns=["Date", "Country", "Event", "Estimate", "Actual"],
+    )
+    releases["Date"] = pd.to_datetime(releases["Date"])
+    series = economics_fmp_model.get_economic_calendar_series(
+        releases.set_index("Date")
+    )
+
+    assert isinstance(series.index, pd.PeriodIndex) and series.index.freqstr == "M"
+    assert series.columns.names == ["Country", "Event"]
+    ppi = series[("China", "Producer Price Index YoY")]
+    cpi = series[("China", "Inflation Rate YoY")]
+    assert ppi["2026-10"] == pytest.approx(0.057)
+    assert ppi["2026-09"] == pytest.approx(0.050)
+    assert ppi["2022-06"] == pytest.approx(0.061)
+    assert ppi["2025-12"] == pytest.approx(-0.019)
+    assert cpi["2026-10"] == pytest.approx(0.007)
+    assert cpi["2022-04"] == pytest.approx(0.021)
+    # The latest release of a period is kept; the estimate of the next one is there already.
+    assert series.loc["2026-10", ("Germany", "Inflation Rate YoY")] == pytest.approx(
+        0.029
+    )
+    assert pd.isna(ppi["2026-11"])
+    assert series.loc[
+        "2026-11", ("China", "Producer Price Index YoY Estimate")
+    ] == pytest.approx(0.06)
+
+    # Events of different frequencies are placed on the last day of their periods.
+    quarterly = pd.DataFrame(
+        {
+            "Country": ["China", "China"],
+            "Event": ["GDP Growth Rate YoY (Q3)", "Inflation Rate YoY (Oct)"],
+            "Estimate": [None, None],
+            "Actual": [0.048, 0.007],
+        },
+        index=pd.to_datetime(["2026-10-20", "2026-11-09"]),
+    )
+    mixed = economics_fmp_model.get_economic_calendar_series(quarterly)
+    assert [str(period) for period in mixed.index] == ["2026-09-30", "2026-10-31"]
+    assert list(mixed.columns.get_level_values("Event")) == [
+        "GDP Growth Rate YoY",
+        "Inflation Rate YoY",
+    ]
+
+    assert economics_fmp_model.get_economic_calendar_series(pd.DataFrame()).empty
+
+
+def test_calendar_series_keep_a_joint_january_and_february_release_once():
+    from financetoolkit.economics.sources import fmp_model as economics_fmp_model
+
+    releases = pd.DataFrame(
+        [
+            # The same release listed for January and February.
+            ("2020-03-07 03:00", "Imports YoY (Jan)", "Medium", -0.040),
+            ("2020-03-07 03:07", "Imports YoY (Feb)", "Medium", -0.040),
+            # The dollar balance as January, the yuan figure as a low-impact February.
+            ("2024-03-07 03:00", "Balance of Trade (Jan)", "High", 125.16),
+            ("2024-03-07 03:00", "Balance of Trade (Feb)", "Low", 890.86),
+            ("2024-04-12 03:00", "Balance of Trade (Mar)", "High", 58.55),
+            # A release without a period, of an event that has one elsewhere.
+            ("2020-02-07 02:00", "Imports YoY", "Medium", -0.015),
+            ("2020-04-14 03:00", "Imports YoY (Mar)", "Medium", -0.009),
+            # Two months caught up on one day, with their own values.
+            ("2025-12-05 13:30", "Retail Sales MoM (Sep)", "High", 0.002),
+            ("2025-12-05 13:30", "Retail Sales MoM (Oct)", "High", 0.004),
+            # A joint release still to come.
+            ("2027-03-07 03:00", "Exports YoY (Jan)", "High", None),
+            ("2027-03-07 03:00", "Exports YoY (Feb)", "High", None),
+        ],
+        columns=["Date", "Event", "Impact", "Actual"],
+    ).assign(Country="China", Estimate=None)
+    releases["Date"] = pd.to_datetime(releases["Date"])
+
+    series = economics_fmp_model.get_economic_calendar_series(
+        releases.set_index("Date")
+    )
+
+    assert series.index.freqstr == "M"
+    assert not series.index.duplicated().any()
+    imports = series[("China", "Imports YoY")]
+    balance = series[("China", "Balance of Trade")]
+    assert imports["2020-02"] == pytest.approx(-0.040)
+    assert pd.isna(imports.get("2020-01"))
+    assert balance["2024-02"] == pytest.approx(125.16)
+    assert pd.isna(balance.get("2024-01"))
+    retail = series[("China", "Retail Sales MoM")]
+    assert retail["2025-09"] == pytest.approx(0.002)
+    assert retail["2025-10"] == pytest.approx(0.004)
+
+
+def test_futures_are_quoted_under_the_commodity_symbol(responses):
+    canned, requested = responses
+    canned["quote"] = [{"symbol": "BZUSD", "name": "Brent Crude Oil", "price": 91.79}]
+
+    quote, no_data = fmp_model.get_quote(["BZ=F"], api_key="K")
+
+    # Requested as BZUSD, returned under the ticker as given.
+    assert "symbol=BZUSD&" in requested[0]
+    assert quote.loc["Price", "BZ=F"] == pytest.approx(91.79)
+    assert no_data == []
+
+    fmp_model.get_intraday_data(
+        "CL=F", api_key="K", start="2026-11-09", end="2026-11-10"
+    )
+    assert "symbol=CLUSD&" in requested[-1]
+
+    # A future quoted in US cents keeps that unit, and one without a commodity symbol
+    # (Dutch TTF gas) is requested as it is.
+    assert fmp_model.FUTURES_SYMBOLS["KC=F"] == "KCUSX"
+    fmp_model.get_quote(["TTF=F"], api_key="K")
+    assert "symbol=TTF=F&" in requested[-1]
+
+
+def test_intraday_bars_of_a_single_day_are_returned(responses):
+    canned, _ = responses
+    canned["historical-chart/1hour"] = [
+        {
+            "date": f"2026-11-20 {hour:02d}:30:00",
+            "open": 100.0 + hour,
+            "high": 101.0 + hour,
+            "low": 99.0 + hour,
+            "close": 100.5 + hour,
+            "volume": 1000,
+        }
+        for hour in range(9, 16)
+    ]
+
+    # The bars are timestamps on the end date, which count as within a window of that day.
+    intraday = fmp_model.get_intraday_data(
+        "AAPL", api_key="K", start="2026-11-20", end="2026-11-20"
+    )
+
+    assert len(intraday) == 7
+    assert str(intraday.index[0]) == "2026-11-20 09:00"
+    assert str(intraday.index[-1]) == "2026-11-20 15:00"
+    assert intraday["Close"].iloc[-1] == pytest.approx(115.5)
+
+
+def test_dividends_on_the_same_ex_dividend_date_are_added_up(monkeypatch):
+    # An ordinary dividend of 1.5 and a special dividend of 0.5 on the same ex-dividend
+    # date, in either order, and a record that is served twice.
+    for records in (
+        [
+            {"date": "2024-01-04", "adjDividend": 0.5, "label": "special"},
+            {"date": "2024-01-04", "adjDividend": 1.5, "label": "ordinary"},
+        ],
+        [
+            {"date": "2024-01-04", "adjDividend": 1.5, "label": "ordinary"},
+            {"date": "2024-01-04", "adjDividend": 0.5, "label": "special"},
+            {"date": "2024-01-04", "adjDividend": 0.5, "label": "special"},
+        ],
+    ):
+        _fake_prices_with_a_dividend(monkeypatch, records)
+
+        data = fmp_model.get_historical_data(
+            "X",
+            api_key="KEY",
+            start="2024-01-02",
+            end="2024-01-08",
+            user_subscription="Premium",
+        )
+
+        assert data["Dividends"].loc["2024-01-04"] == pytest.approx(2.0)
+        assert data["Adj Close"].iloc[0] == pytest.approx(100 * (1 - 2 / 101))
+        assert data["Return"].iloc[2] == pytest.approx(0)
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"), [(503, "REQUEST FAILED"), (429, "LIMIT REACH")]
+)
+def test_a_lasting_server_error_or_rate_limit_is_named(
+    monkeypatch, caplog, status, expected
+):
+    monkeypatch.setattr(
+        fmp_model, "get_request", lambda *_, **__: _Response(status, "Unavailable")
+    )
+    monkeypatch.setattr(fmp_model.time, "sleep", lambda _: None)
+
+    with caplog.at_level("ERROR"), fmp_model.log_server_errors_once():
+        first = fmp_model.get_financial_data("https://example.com")
+        second = fmp_model.get_financial_data("https://example.com")
+
+    assert list(first.columns) == list(second.columns) == [expected]
+    assert "unrecognised error" not in caplog.text
+    if status == 503:
+        # Logged once for both requests, with the status and the number of attempts.
+        assert caplog.text.count("answered HTTP 503 after 4 attempts") == 1
+
+
+def test_an_answer_that_is_not_json_is_named_once(monkeypatch, caplog):
+    page = "<!DOCTYPE html><html><body>Service Unavailable</body></html>"
+    monkeypatch.setattr(fmp_model, "get_request", lambda *_, **__: _Response(200, page))
+
+    with caplog.at_level("ERROR"):
+        for _call in range(2):
+            with fmp_model.log_server_errors_once():
+                for _ in range(3):
+                    result = fmp_model.get_financial_data("https://example.com")
+
+    assert list(result.columns) == ["REQUEST FAILED"]
+    assert "unrecognised error" not in caplog.text
+    # Once per call, so the second call (another MCP request) is told as well.
+    assert caplog.text.count("answered with something other than JSON") == 2
+
+
+@pytest.mark.parametrize(
+    ("error", "reason"),
+    [("NO ERRORS", "could not be reached"), ("LIMIT REACH", "rate limit was reached")],
+)
+def test_an_unanswered_market_risk_premium_is_empty_and_reported(
+    monkeypatch, caplog, error, reason
+):
+    from financetoolkit import Economics
+
+    monkeypatch.setattr(
+        fmp_model,
+        "get_financial_data",
+        lambda url: pd.DataFrame(columns=[error]),  # noqa: ARG005
+    )
+
+    premium = Economics(api_key="key").get_market_risk_premium()
+
+    assert premium.empty and list(premium.columns) == []
+    assert "The market risk premium could not be retrieved" in caplog.text
+    assert reason in caplog.text

@@ -1,0 +1,823 @@
+import { describe, expect, jest, test } from "bun:test";
+import { MarketDataCoordinator } from "./index";
+import { buildQuoteKey } from "../selectors";
+import { createManualFrameDriver, DataFrameScheduler } from "../frame-scheduler";
+import { createTestDataProvider, createTestFinancials, createTestQuote } from "../../test-support/data-provider";
+import { getActiveQuoteDisplay } from "../market/status";
+import type { Quote } from "../../types/financials";
+import type { DataProvider, QuoteSubscriptionTarget } from "../../types/data-provider";
+import { MemoryResourceStore } from "../../data/memory-resource-store";
+import { setSavedCopyStore } from "../../data/pane-saved-copies";
+import {
+  QUOTE_SUBSCRIPTION_PRIORITY_UPDATE_DELAY_MS,
+  QUOTE_SUBSCRIPTION_REMOVE_GRACE_MS,
+  type QuoteSubscriptionRequest,
+} from "./quotes";
+
+function createProvider(): {
+  provider: DataProvider;
+  emitQuote: (target: QuoteSubscriptionTarget, quote: Quote) => void;
+} {
+  let onQuote: ((target: QuoteSubscriptionTarget, quote: Quote) => void) | null = null;
+  const provider = createTestDataProvider({
+    id: "test-provider",
+    subscribeQuotes: (_targets, handler) => {
+      onQuote = handler;
+      return () => {};
+    },
+  });
+  return {
+    provider,
+    emitQuote(target, quote) {
+      if (!onQuote) throw new Error("subscription was not registered");
+      onQuote(target, quote);
+    },
+  };
+}
+
+function quote(symbol: string, price: number, overrides: Partial<Quote> = {}): Quote {
+  return createTestQuote({ symbol, price, ...overrides });
+}
+
+async function flushCoordinator(): Promise<void> {
+  await Promise.resolve();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+/** A coordinator on a manual 100 ms frame clock, so frame tiers can be stepped exactly. */
+function createFramedCoordinator() {
+  const clock = createManualFrameDriver(100);
+  const { provider, emitQuote } = createProvider();
+  const coordinator = new MarketDataCoordinator(provider, { frames: new DataFrameScheduler(clock.driver) });
+  return { clock, coordinator, emitQuote };
+}
+
+describe("MarketDataCoordinator key subscriptions", () => {
+  test("subscribes active quote targets as one provider batch", () => {
+    const subscriptions: QuoteSubscriptionTarget[][] = [];
+    const provider = createTestDataProvider({
+      id: "test-provider",
+      subscribeQuotes: (targets) => {
+        subscriptions.push(targets);
+        return () => {};
+      },
+    });
+    const coordinator = new MarketDataCoordinator(provider);
+
+    coordinator.subscribeQuotes([
+      {
+        instrument: { symbol: "AAPL", exchange: "NASDAQ" },
+        priority: { surface: "portfolio", visible: true, selected: true, weight: 100 },
+      },
+      { instrument: { symbol: "MSFT", exchange: "NASDAQ" } },
+    ]);
+
+    expect(subscriptions).toHaveLength(1);
+    expect(subscriptions[0]?.map((target) => target.symbol).sort()).toEqual(["AAPL", "MSFT"]);
+    expect(subscriptions[0]?.find((target) => target.symbol === "AAPL")).toMatchObject({
+      surface: "portfolio",
+      visible: true,
+      selected: true,
+      weight: 100,
+    });
+  });
+
+  test("keeps the highest-priority target when duplicate surfaces subscribe", () => {
+    jest.useFakeTimers();
+    try {
+      const subscriptions: QuoteSubscriptionTarget[][] = [];
+      let disposals = 0;
+      const provider = createTestDataProvider({
+        id: "test-provider",
+        subscribeQuotes: (targets) => {
+          subscriptions.push(targets);
+          return () => {
+            disposals += 1;
+          };
+        },
+      });
+      const coordinator = new MarketDataCoordinator(provider);
+      const instrument = { symbol: "AAPL", exchange: "NASDAQ" };
+
+      const unsubscribeDetail = coordinator.subscribeQuotes([{
+        instrument,
+        priority: { surface: "detail", visible: true, selected: true, weight: 100 },
+      }]);
+      const unsubscribePortfolio = coordinator.subscribeQuotes([{
+        instrument,
+        priority: { surface: "portfolio", visible: false, selected: false, weight: 10 },
+      }]);
+
+      expect(subscriptions).toHaveLength(1);
+      expect(subscriptions[0]?.[0]).toMatchObject({
+        surface: "detail",
+        visible: true,
+        selected: true,
+        weight: 100,
+      });
+
+      unsubscribeDetail();
+      expect(subscriptions).toHaveLength(1);
+
+      jest.advanceTimersByTime(QUOTE_SUBSCRIPTION_PRIORITY_UPDATE_DELAY_MS);
+      expect(subscriptions).toHaveLength(2);
+      expect(disposals).toBe(1);
+      expect(subscriptions[1]?.[0]).toMatchObject({
+        surface: "portfolio",
+        visible: false,
+        selected: false,
+        weight: 10,
+      });
+
+      unsubscribePortfolio();
+      jest.runAllTimers();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test("coalesces priority updates and overlaps the upstream replacement", () => {
+    jest.useFakeTimers();
+    try {
+      const events: string[] = [];
+      const subscriptions: QuoteSubscriptionTarget[][] = [];
+      const provider = createTestDataProvider({
+        id: "test-provider",
+        subscribeQuotes: (targets) => {
+          const subscriptionId = subscriptions.length + 1;
+          subscriptions.push(targets);
+          events.push(`subscribe:${subscriptionId}`);
+          return () => events.push(`dispose:${subscriptionId}`);
+        },
+      });
+      const coordinator = new MarketDataCoordinator(provider);
+      const instruments = ["AAPL", "MSFT", "NVDA"].map((symbol) => ({
+        symbol,
+        exchange: "NASDAQ",
+      }));
+      const requests = (
+        selectedSymbol: string,
+        selectedSurface: "portfolio" | "detail" = "portfolio",
+      ): QuoteSubscriptionRequest[] => instruments.map((instrument) => ({
+        instrument,
+        priority: {
+          surface: instrument.symbol === selectedSymbol ? selectedSurface : "portfolio",
+          visible: instrument.symbol === selectedSymbol,
+          selected: instrument.symbol === selectedSymbol,
+          weight: instrument.symbol === selectedSymbol ? 100 : 10,
+        },
+      }));
+
+      const subscription = coordinator.subscribeQuotes(requests("AAPL"));
+      subscription.update(requests("MSFT"));
+      subscription.update(requests("NVDA", "detail"));
+
+      jest.advanceTimersByTime(QUOTE_SUBSCRIPTION_PRIORITY_UPDATE_DELAY_MS - 1);
+      expect(subscriptions).toHaveLength(1);
+      expect(events).toEqual(["subscribe:1"]);
+
+      jest.advanceTimersByTime(1);
+      expect(subscriptions).toHaveLength(2);
+      expect(subscriptions[1]?.find((target) => target.symbol === "NVDA")).toMatchObject({
+        surface: "detail",
+        visible: true,
+        selected: true,
+        weight: 100,
+      });
+      expect(events).toEqual(["subscribe:1", "subscribe:2", "dispose:1"]);
+
+      subscription();
+      jest.runAllTimers();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test("applies membership and routing changes immediately", () => {
+    jest.useFakeTimers();
+    try {
+      const subscriptions: QuoteSubscriptionTarget[][] = [];
+      let disposals = 0;
+      const provider = createTestDataProvider({
+        id: "test-provider",
+        subscribeQuotes: (targets) => {
+          subscriptions.push(targets);
+          return () => { disposals += 1; };
+        },
+      });
+      const coordinator = new MarketDataCoordinator(provider);
+      const aapl = {
+        symbol: "AAPL",
+        exchange: "NASDAQ",
+        brokerId: "ibkr",
+        brokerInstanceId: "ibkr-work",
+        instrument: {
+          brokerId: "ibkr",
+          brokerInstanceId: "ibkr-work",
+          conId: 1001,
+          symbol: "AAPL",
+        },
+      };
+      const msft = { symbol: "MSFT", exchange: "NASDAQ" };
+      const subscription = coordinator.subscribeQuotes([{
+        instrument: aapl,
+        priority: { route: "provider", surface: "portfolio" },
+      }]);
+
+      subscription.update([
+        { instrument: aapl, priority: { route: "provider", surface: "portfolio" } },
+        { instrument: msft, priority: { route: "provider", surface: "portfolio" } },
+      ]);
+      expect(subscriptions).toHaveLength(2);
+      expect(disposals).toBe(1);
+      expect(subscriptions[1]?.map((target) => target.symbol).sort()).toEqual(["AAPL", "MSFT"]);
+
+      subscription.update([
+        { instrument: aapl, priority: { route: "broker", surface: "detail" } },
+        { instrument: msft, priority: { route: "provider", surface: "portfolio" } },
+      ]);
+      expect(subscriptions).toHaveLength(3);
+      expect(disposals).toBe(2);
+      expect(subscriptions[2]?.find((target) => target.symbol === "AAPL")).toMatchObject({
+        route: "broker",
+        surface: "detail",
+        context: {
+          brokerId: "ibkr",
+          brokerInstanceId: "ibkr-work",
+          instrument: { brokerId: "ibkr", conId: 1001, symbol: "AAPL" },
+        },
+      });
+
+      subscription();
+      jest.runAllTimers();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test("keeps an updated handle callable and honors removal grace on dispose", () => {
+    jest.useFakeTimers();
+    try {
+      const subscriptions: QuoteSubscriptionTarget[][] = [];
+      let disposals = 0;
+      const provider = createTestDataProvider({
+        id: "test-provider",
+        subscribeQuotes: (targets) => {
+          subscriptions.push(targets);
+          return () => { disposals += 1; };
+        },
+      });
+      const coordinator = new MarketDataCoordinator(provider);
+      const instrument = { symbol: "AAPL", exchange: "NASDAQ" };
+      const subscription = coordinator.subscribeQuotes([{
+        instrument,
+        priority: { surface: "portfolio", selected: false, weight: 10 },
+      }]);
+
+      expect(typeof subscription).toBe("function");
+      expect(typeof subscription.update).toBe("function");
+      subscription.update([{
+        instrument,
+        priority: { surface: "detail", selected: true, weight: 100 },
+      }]);
+      jest.advanceTimersByTime(QUOTE_SUBSCRIPTION_PRIORITY_UPDATE_DELAY_MS);
+      expect(subscriptions).toHaveLength(2);
+      expect(disposals).toBe(1);
+
+      subscription();
+      subscription.update([{ instrument: { symbol: "MSFT", exchange: "NASDAQ" } }]);
+      subscription();
+      jest.advanceTimersByTime(QUOTE_SUBSCRIPTION_REMOVE_GRACE_MS - 1);
+      expect(subscriptions).toHaveLength(2);
+      expect(disposals).toBe(1);
+
+      jest.advanceTimersByTime(1);
+      expect(subscriptions).toHaveLength(2);
+      expect(disposals).toBe(2);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test("replaces a capped target window without retaining pending removals", () => {
+    jest.useFakeTimers();
+    try {
+      const subscriptions: string[][] = [];
+      let disposals = 0;
+      const provider = createTestDataProvider({
+        id: "test-provider",
+        subscribeQuotes: (targets) => {
+          subscriptions.push(targets.map((target) => target.symbol));
+          return () => {
+            disposals += 1;
+          };
+        },
+      });
+      const coordinator = new MarketDataCoordinator(provider);
+      const oldTargets = Array.from({ length: 16 }, (_, index) => ({
+        instrument: { symbol: `OPT${index}`, exchange: "OPTIONS" },
+      }));
+      const newTargets = Array.from({ length: 16 }, (_, index) => ({
+        instrument: { symbol: `OPT${index + 2}`, exchange: "OPTIONS" },
+      }));
+
+      const unsubscribeOld = coordinator.subscribeQuotes(oldTargets);
+      unsubscribeOld();
+      const unsubscribeNew = coordinator.subscribeQuotes(newTargets);
+
+      expect(disposals).toBe(1);
+      expect(subscriptions).toHaveLength(2);
+      expect(subscriptions[1]).toEqual(newTargets.map(({ instrument }) => instrument.symbol).sort());
+
+      unsubscribeNew();
+      jest.runAllTimers();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test("notifies listeners for changed keys only", async () => {
+    const { provider, emitQuote } = createProvider();
+    const coordinator = new MarketDataCoordinator(provider);
+    const aapl = { symbol: "AAPL", exchange: "NASDAQ" };
+    const msft = { symbol: "MSFT", exchange: "NASDAQ" };
+    let aaplCalls = 0;
+    let msftCalls = 0;
+
+    coordinator.subscribeKeys([buildQuoteKey(aapl)], () => { aaplCalls += 1; });
+    coordinator.subscribeKeys([buildQuoteKey(msft)], () => { msftCalls += 1; });
+    coordinator.subscribeQuotes([{ instrument: aapl }, { instrument: msft }]);
+
+    emitQuote({ symbol: "AAPL", exchange: "NASDAQ" }, quote("AAPL", 100));
+    await flushCoordinator();
+
+    expect(aaplCalls).toBe(1);
+    expect(msftCalls).toBe(0);
+  });
+
+  test("dedupes listeners subscribed to multiple changed keys", async () => {
+    const { provider, emitQuote } = createProvider();
+    const coordinator = new MarketDataCoordinator(provider);
+    const aapl = { symbol: "AAPL", exchange: "NASDAQ" };
+    const msft = { symbol: "MSFT", exchange: "NASDAQ" };
+    let calls = 0;
+
+    coordinator.subscribeKeys([buildQuoteKey(aapl), buildQuoteKey(msft)], () => { calls += 1; });
+    coordinator.subscribeQuotes([{ instrument: aapl }, { instrument: msft }]);
+
+    emitQuote({ symbol: "AAPL", exchange: "NASDAQ" }, quote("AAPL", 100));
+    emitQuote({ symbol: "MSFT", exchange: "NASDAQ" }, quote("MSFT", 200));
+    await flushCoordinator();
+
+    expect(calls).toBe(1);
+  });
+
+  test("coalesces global notifications per microtask", async () => {
+    const { provider, emitQuote } = createProvider();
+    const coordinator = new MarketDataCoordinator(provider);
+    const aapl = { symbol: "AAPL", exchange: "NASDAQ" };
+    const msft = { symbol: "MSFT", exchange: "NASDAQ" };
+    let calls = 0;
+
+    coordinator.subscribe(() => { calls += 1; });
+    coordinator.subscribeQuotes([{ instrument: aapl }, { instrument: msft }]);
+
+    emitQuote({ symbol: "AAPL", exchange: "NASDAQ" }, quote("AAPL", 100));
+    emitQuote({ symbol: "MSFT", exchange: "NASDAQ" }, quote("MSFT", 200));
+    await flushCoordinator();
+
+    expect(calls).toBe(1);
+    expect(coordinator.getVersion()).toBe(1);
+  });
+
+  test("applies visible keys every frame and off-screen keys at most once a second, latest tick winning", () => {
+    const { clock, coordinator, emitQuote } = createFramedCoordinator();
+    const amd = { symbol: "AMD", exchange: "NASDAQ" };
+    const msft = { symbol: "MSFT", exchange: "NASDAQ" };
+    // The server paces a target without a visible or selected hint, so the client does too.
+    const nvda = { symbol: "NVDA", exchange: "NASDAQ" };
+    coordinator.subscribeQuotes([
+      { instrument: amd, priority: { visible: true } },
+      { instrument: msft, priority: { visible: false, weight: 10 } },
+      { instrument: nvda },
+    ]);
+    const price = (instrument: typeof amd) => coordinator.getQuoteEntry(instrument).data?.price;
+
+    emitQuote(amd, quote("AMD", 100));
+    emitQuote(msft, quote("MSFT", 200));
+    emitQuote(nvda, quote("NVDA", 300));
+    expect(price(amd)).toBeUndefined();
+    clock.advance(0);
+    // First data for a key never waits, whatever its tier.
+    expect(price(amd)).toBe(100);
+    expect(price(msft)).toBe(200);
+
+    for (let tick = 1; tick <= 5; tick += 1) {
+      emitQuote(amd, quote("AMD", 100 + tick));
+      emitQuote(msft, quote("MSFT", 200 + tick));
+      emitQuote(nvda, quote("NVDA", 300 + tick));
+      clock.advance(100);
+      expect(price(amd)).toBe(100 + tick);
+      expect([price(msft), price(nvda)]).toEqual([200, 300]);
+    }
+
+    // Due a second after the last apply, an off-screen key waits for a frame with visible quotes.
+    clock.advance(500);
+    expect([price(msft), price(nvda)]).toEqual([200, 300]);
+    emitQuote(amd, quote("AMD", 106));
+    clock.advance(0);
+    expect([price(msft), price(nvda)]).toEqual([205, 305]);
+
+    // A held-back tick shows on the next frame once its row scrolls into view.
+    emitQuote(msft, quote("MSFT", 206));
+    clock.advance(100);
+    expect(price(msft)).toBe(205);
+    coordinator.subscribeQuotes([{ instrument: msft, priority: { visible: true } }]);
+    clock.advance(100);
+    expect(price(msft)).toBe(206);
+  });
+
+  test("an off-screen tick comes with a frame that has visible quotes, or a moment after it is due, and never holds one back", () => {
+    const { clock, coordinator, emitQuote } = createFramedCoordinator();
+    const amd = { symbol: "AMD", exchange: "NASDAQ" };
+    const msft = { symbol: "MSFT", exchange: "NASDAQ" };
+    coordinator.subscribeQuotes([
+      { instrument: amd, priority: { visible: true } },
+      { instrument: msft, priority: { visible: false, weight: 10 } },
+    ]);
+    const price = (instrument: typeof amd) => coordinator.getQuoteEntry(instrument).data?.price;
+    emitQuote(amd, quote("AMD", 100));
+    emitQuote(msft, quote("MSFT", 200));
+    clock.advance(0);
+
+    // Due at 1,000 ms. A frame of its own there would space the next frame, and a visible tick just after it would wait out the interval.
+    clock.advance(900);
+    emitQuote(msft, quote("MSFT", 201));
+    clock.advance(105);
+    expect(price(msft)).toBe(200);
+    emitQuote(amd, quote("AMD", 101));
+    clock.advance(0);
+    expect([price(amd), price(msft)]).toEqual([101, 201]);
+
+    // With nothing visible ticking it still arrives, a quarter second after it falls due (at 2,005 ms).
+    emitQuote(msft, quote("MSFT", 202));
+    clock.advance(1_249);
+    expect(price(msft)).toBe(201);
+    clock.advance(1);
+    expect(price(msft)).toBe(202);
+  });
+
+  test("applies a frame's quotes and notifies their readers in one pass", () => {
+    const { clock, coordinator, emitQuote } = createFramedCoordinator();
+    const aapl = { symbol: "AAPL", exchange: "NASDAQ" };
+    const msft = { symbol: "MSFT", exchange: "NASDAQ" };
+    const seen: Array<[number | undefined, number | undefined]> = [];
+    coordinator.subscribeKeys([buildQuoteKey(aapl), buildQuoteKey(msft)], () => {
+      seen.push([coordinator.getQuoteEntry(aapl).data?.price, coordinator.getQuoteEntry(msft).data?.price]);
+    });
+    coordinator.subscribeQuotes([{ instrument: aapl }, { instrument: msft }]);
+
+    emitQuote(aapl, quote("AAPL", 100));
+    emitQuote(msft, quote("MSFT", 200));
+    emitQuote(aapl, quote("AAPL", 101));
+    clock.advance(0);
+
+    expect(seen).toEqual([[101, 200]]);
+  });
+
+  test("a repeat that only moves the arrival time does not notify readers", () => {
+    const realDateNow = Date.now;
+    const { clock, coordinator, emitQuote } = createFramedCoordinator();
+    const aapl = { symbol: "AAPL", exchange: "NASDAQ" };
+    const firstTimestamp = 1_800_000_000_000;
+    let calls = 0;
+    try {
+      coordinator.subscribeKeys([buildQuoteKey(aapl)], () => { calls += 1; });
+      coordinator.subscribeQuotes([{ instrument: aapl }]);
+      const tick = quote("AAPL", 100, { lastUpdated: firstTimestamp, change: Number.NaN, dataSource: "live", delivery: "stream" });
+
+      Date.now = () => firstTimestamp;
+      emitQuote(aapl, tick);
+      clock.advance(100);
+      expect(calls).toBe(1);
+
+      Date.now = () => firstTimestamp + 1_000;
+      emitQuote(aapl, { ...tick });
+      clock.advance(100);
+      expect(calls).toBe(1);
+      expect(coordinator.getQuoteEntry(aapl).data?.receivedAt).toBe(firstTimestamp);
+    } finally {
+      Date.now = realDateNow;
+    }
+  });
+
+  test("ticks held into an unchanged quote reach a tick follower alone: nothing is stored and no pane hears", () => {
+    const realDateNow = Date.now;
+    const { clock, coordinator, emitQuote } = createFramedCoordinator();
+    const aapl = { symbol: "AAPL", exchange: "NASDAQ" };
+    const key = buildQuoteKey(aapl);
+    const at = 1_800_000_000_000;
+    const heard = { key: 0, all: 0, ticks: 0 };
+    try {
+      Date.now = () => at;
+      coordinator.subscribeKeys([key], () => { heard.key += 1; });
+      coordinator.subscribe(() => { heard.all += 1; });
+      const follow = coordinator.followStreamTicks([key], () => { heard.ticks += 1; });
+      // Off screen: it applies a second apart.
+      coordinator.subscribeQuotes([{ instrument: aapl }]);
+      const tick = (price: number) => quote("AAPL", price, { lastUpdated: at, change: Number.NaN, dataSource: "live", delivery: "stream" });
+      emitQuote(aapl, tick(100));
+      clock.advance(0);
+      // One price is the quote itself: nothing more to follow.
+      expect(heard).toEqual({ key: 1, all: 1, ticks: 0 });
+      const stored = coordinator.getQuoteEntry(aapl);
+
+      emitQuote(aapl, tick(101));
+      clock.advance(100);
+      emitQuote(aapl, tick(99));
+      clock.advance(100);
+      emitQuote(aapl, tick(100));
+      clock.advance(1_100);
+      expect(coordinator.getQuoteEntry(aapl)).toBe(stored);
+      expect(heard).toEqual({ key: 1, all: 1, ticks: 1 });
+      expect(follow.take().get(key)).toMatchObject({ low: { price: 99 }, high: { price: 101 }, last: 100 });
+      expect(follow.take().size).toBe(0);
+    } finally {
+      Date.now = realDateNow;
+    }
+  });
+
+  test("after-hours ticks that name no session reach a tick follower at the prints the applied quote shows", async () => {
+    const realDateNow = Date.now;
+    // 17:00 in New York: after hours.
+    const at = Date.parse("2026-11-20T22:00:00Z");
+    try {
+      Date.now = () => at;
+      const clock = createManualFrameDriver(100);
+      const { provider, emitQuote } = createProvider();
+      const coordinator = new MarketDataCoordinator({
+        ...provider,
+        getTickerFinancials: async () => createTestFinancials({ quote: quote("AAPL", 100, {
+          previousClose: 99, lastUpdated: at - 60_000, marketState: "POST", postMarketPrice: 100.5, dataSource: "live",
+        }) }),
+      }, { frames: new DataFrameScheduler(clock.driver) });
+      const aapl = { symbol: "AAPL", exchange: "NASDAQ" };
+      const key = buildQuoteKey(aapl);
+      await coordinator.loadSnapshot(aapl);
+      coordinator.subscribeQuotes([{ instrument: aapl, priority: { visible: true } }]);
+      const follow = coordinator.followStreamTicks([key], () => {});
+      // The stream's after-hours tick: its print, with the regular close as its price and no session named.
+      const tick = (print: number) => emitQuote(aapl, quote("AAPL", 100, {
+        postMarketPrice: print, change: 1, changePercent: 1.01, lastUpdated: at, dataSource: "live", delivery: "stream",
+      }));
+      tick(101);
+      clock.advance(100);
+      tick(103);
+      tick(101.5);
+      clock.advance(100);
+      expect(getActiveQuoteDisplay(coordinator.getQuoteEntry(aapl).data)?.price).toBe(101.5);
+      expect(follow.take().get(key)).toMatchObject({ low: { price: 101.5 }, high: { price: 103 }, last: 101.5, fellFromHigh: true });
+    } finally {
+      Date.now = realDateNow;
+    }
+  });
+
+  test("applies a tick stamped slightly ahead of the local clock", async () => {
+    const { provider, emitQuote } = createProvider();
+    const coordinator = new MarketDataCoordinator(provider);
+    const aapl = { symbol: "AAPL", exchange: "NASDAQ" };
+    coordinator.subscribeQuotes([{ instrument: aapl }]);
+
+    emitQuote(aapl, quote("AAPL", 123, { lastUpdated: Date.now() + 300, dataSource: "live", delivery: "stream" }));
+    await flushCoordinator();
+
+    expect(coordinator.getQuoteEntry(aapl).data?.price).toBe(123);
+  });
+
+  test("a request that resolves after a newer streamed tick keeps the streamed quote", async () => {
+    const now = Date.now();
+    let resolveRest: ((quote: Quote) => void) | null = null;
+    let onQuote: ((target: QuoteSubscriptionTarget, quote: Quote) => void) | null = null;
+    const provider = createTestDataProvider({
+      id: "test-provider",
+      getQuote: () => new Promise<Quote>((resolve) => { resolveRest = resolve; }),
+      subscribeQuotes: (_targets, handler) => {
+        onQuote = handler;
+        return () => {};
+      },
+    });
+    const coordinator = new MarketDataCoordinator(provider);
+    const aapl = { symbol: "AAPL", exchange: "NASDAQ" };
+    coordinator.subscribeQuotes([{ instrument: aapl }]);
+
+    const loading = coordinator.loadQuote(aapl, { forceRefresh: true });
+    onQuote!(aapl, quote("AAPL", 101, { lastUpdated: now - 1_000, dataSource: "live", delivery: "stream" }));
+    await flushCoordinator();
+    resolveRest!(quote("AAPL", 99, { lastUpdated: now - 20_000, dataSource: "live" }));
+    const entry = await loading;
+
+    expect(entry.data?.price).toBe(101);
+    expect(entry.phase).toBe("ready");
+    expect(coordinator.getQuoteEntry(aapl).data?.price).toBe(101);
+  });
+
+  test("applies repeated stream quotes that refresh quote freshness", async () => {
+    const realDateNow = Date.now;
+    const { provider, emitQuote } = createProvider();
+    const coordinator = new MarketDataCoordinator(provider);
+    const aapl = { symbol: "AAPL", exchange: "NASDAQ" };
+    let calls = 0;
+
+    const firstTimestamp = 1_700_000_000_000;
+    try {
+      coordinator.subscribeKeys([buildQuoteKey(aapl)], () => { calls += 1; });
+      coordinator.subscribeQuotes([{ instrument: aapl, priority: { visible: true } }]);
+
+      Date.now = () => firstTimestamp;
+      emitQuote({ symbol: "AAPL", exchange: "NASDAQ" }, quote("AAPL", 100, { lastUpdated: firstTimestamp }));
+      await flushCoordinator();
+
+      Date.now = () => firstTimestamp + 10_000;
+      emitQuote({ symbol: "AAPL", exchange: "NASDAQ" }, quote("AAPL", 100, { lastUpdated: firstTimestamp + 10_000 }));
+      await flushCoordinator();
+
+      expect(calls).toBe(2);
+      expect(coordinator.getQuoteEntry(aapl).data?.lastUpdated).toBe(firstTimestamp + 10_000);
+      expect(coordinator.getQuoteEntry(aapl).data?.receivedAt).toBe(firstTimestamp + 10_000);
+
+      Date.now = () => firstTimestamp + 20_000;
+      emitQuote({ symbol: "AAPL", exchange: "NASDAQ" }, quote("AAPL", 101, { lastUpdated: firstTimestamp + 10_000 }));
+      await flushCoordinator();
+
+      expect(calls).toBe(3);
+      expect(coordinator.getQuoteEntry(aapl).data?.price).toBe(101);
+      expect(coordinator.getQuoteEntry(aapl).data?.lastUpdated).toBe(firstTimestamp + 10_000);
+      expect(coordinator.getQuoteEntry(aapl).data?.receivedAt).toBe(firstTimestamp + 20_000);
+    } finally {
+      Date.now = realDateNow;
+    }
+  });
+
+  test("the first stream tick replaces a saved quote even when the price and timestamp are unchanged", async () => {
+    const previous = setSavedCopyStore(new MemoryResourceStore());
+    const first = createProvider();
+    const next = createProvider();
+    const initial = new MarketDataCoordinator(first.provider);
+    const reopened = new MarketDataCoordinator(next.provider);
+    const instrument = { symbol: "AAPL", exchange: "NASDAQ" };
+    const tick = quote("AAPL", 100, { lastUpdated: Date.now(), dataSource: "live", delivery: "stream" });
+    try {
+      initial.subscribeQuotes([{ instrument }]);
+      first.emitQuote(instrument, tick);
+      await flushCoordinator();
+      expect(reopened.getQuoteEntry(instrument).savedCopyAt).toBeNumber();
+      reopened.subscribeQuotes([{ instrument }]);
+      next.emitQuote(instrument, tick);
+      await flushCoordinator();
+      expect(reopened.getQuoteEntry(instrument).data?.price).toBe(100);
+      expect(reopened.getQuoteEntry(instrument).savedCopyAt).toBeUndefined();
+    } finally {
+      initial.destroy();
+      reopened.destroy();
+      setSavedCopyStore(previous);
+    }
+  });
+
+  test("advances receipt freshness for an identical live stream heartbeat", async () => {
+    const realDateNow = Date.now;
+    const { provider, emitQuote } = createProvider();
+    const coordinator = new MarketDataCoordinator(provider);
+    const option = { symbol: "AAPL260731C00110000", exchange: "OPTIONS" };
+    const firstTimestamp = 1_800_000_000_000;
+    let calls = 0;
+
+    try {
+      coordinator.subscribeKeys([buildQuoteKey(option)], () => { calls += 1; });
+      coordinator.subscribeQuotes([{ instrument: option, priority: { visible: true } }]);
+
+      Date.now = () => firstTimestamp;
+      const heartbeat = quote(option.symbol, 2.5, {
+        lastUpdated: firstTimestamp,
+        bid: 2.4,
+        ask: 2.6,
+        mark: 2.5,
+        dataSource: "live",
+        delivery: "stream",
+        stale: false,
+      });
+      emitQuote(option, heartbeat);
+      await flushCoordinator();
+
+      Date.now = () => firstTimestamp + 60_000;
+      emitQuote(option, heartbeat);
+      await flushCoordinator();
+
+      expect(calls).toBe(2);
+      expect(coordinator.getQuoteEntry(option).data).toMatchObject({
+        lastUpdated: firstTimestamp,
+        receivedAt: firstTimestamp + 60_000,
+      });
+    } finally {
+      Date.now = realDateNow;
+    }
+  });
+
+  test("holds a tick that only restamps the quote within its minute until the next receipt refresh", async () => {
+    const realDateNow = Date.now;
+    const { provider, emitQuote } = createProvider();
+    const coordinator = new MarketDataCoordinator(provider);
+    const nvda = { symbol: "NVDA", exchange: "NASDAQ" };
+    // Seconds into a minute, so the stamps below stay inside it until the last.
+    const first = 1_800_000_000_000 - (1_800_000_000_000 % 60_000) + 10_000;
+    const tick = (stamp: number) => quote("NVDA", 173.73, { lastUpdated: stamp, bid: 173.7, ask: 173.8, dataSource: "live", delivery: "stream" });
+    let calls = 0;
+
+    try {
+      coordinator.subscribeKeys([buildQuoteKey(nvda)], () => { calls += 1; });
+      coordinator.subscribeQuotes([{ instrument: nvda, priority: { visible: true } }]);
+
+      Date.now = () => first;
+      emitQuote(nvda, tick(first));
+      await flushCoordinator();
+      expect(calls).toBe(1);
+
+      for (const offset of [200, 1_000, 3_500]) {
+        Date.now = () => first + offset;
+        emitQuote(nvda, tick(first + offset));
+        await flushCoordinator();
+      }
+      expect(calls).toBe(1);
+      expect(coordinator.getQuoteEntry(nvda).data).toMatchObject({ lastUpdated: first, receivedAt: first });
+
+      // The receipt refresh stores it, with the stamp it carries.
+      Date.now = () => first + 6_000;
+      emitQuote(nvda, tick(first + 6_000));
+      await flushCoordinator();
+      expect(calls).toBe(2);
+      expect(coordinator.getQuoteEntry(nvda).data).toMatchObject({ lastUpdated: first + 6_000, receivedAt: first + 6_000 });
+
+      // A stamp in the next minute opens a bar, moves the as-of clock: stored at once, and so is any other change.
+      Date.now = () => first + 6_100;
+      emitQuote(nvda, tick(first + 60_000));
+      await flushCoordinator();
+      expect(calls).toBe(3);
+      Date.now = () => first + 6_200;
+      emitQuote(nvda, { ...tick(first + 60_100), bid: 173.71 });
+      await flushCoordinator();
+      expect(calls).toBe(4);
+    } finally {
+      Date.now = realDateNow;
+    }
+  });
+
+  test("does not refresh receipt time from an explicitly stale polled quote", async () => {
+    const realDateNow = Date.now;
+    const { provider, emitQuote } = createProvider();
+    const coordinator = new MarketDataCoordinator(provider);
+    const option = { symbol: "AAPL260731C00110000", exchange: "OPTIONS" };
+    const firstTimestamp = 1_800_000_000_000;
+    try {
+      coordinator.subscribeQuotes([{ instrument: option, priority: { visible: true } }]);
+
+      Date.now = () => firstTimestamp;
+      emitQuote(
+        option,
+        quote(option.symbol, 2.5, {
+          lastUpdated: firstTimestamp,
+          dataSource: "live",
+          delivery: "stream",
+          stale: false,
+        }),
+      );
+      await flushCoordinator();
+
+      expect(coordinator.getQuoteEntry(option).data).toMatchObject({
+        delivery: "stream",
+        stale: false,
+        receivedAt: firstTimestamp,
+      });
+
+      Date.now = () => firstTimestamp + 10_000;
+      emitQuote(
+        option,
+        quote(option.symbol, 2.5, {
+          lastUpdated: firstTimestamp,
+          dataSource: "live",
+          delivery: "poll",
+          stale: true,
+        }),
+      );
+      await flushCoordinator();
+
+      const entry = coordinator.getQuoteEntry(option);
+      expect(entry.data).toBeNull();
+      expect(entry.lastGoodData).toMatchObject({
+        delivery: "stream",
+        stale: false,
+        receivedAt: firstTimestamp,
+      });
+    } finally {
+      Date.now = realDateNow;
+    }
+  });
+});

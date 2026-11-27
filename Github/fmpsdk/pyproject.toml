@@ -1,0 +1,38 @@
+[tool.poetry]
+name = "fmpsdk"
+version = "20260824.0"
+description = "A Python SDK for the Financial Modeling Prep (FMP) stable API — typed responses, automatic retries, and methods organized into per-category client namespaces."
+authors = ["Dax Mickelson <github@daxm.net>"]
+readme = "README.md"
+license = "BSD-3-Clause"
+# PEP 561: ships fmpsdk/py.typed so type checkers (mypy, pyright) treat this
+# package's own type hints as authoritative instead of falling back to
+# untyped/Any for anyone who imports it.
+include = ["fmpsdk/py.typed"]
+
+[tool.poetry.dependencies]
+python = ">=3.9"
+requests = "*"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "*"
+requests-mock = "*"
+python-dotenv = "*"
+pytest-recording = "*"
+black = "*"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Plain `pytest` never spends real API quota: live/ultimate are opt-in via
+# `pytest -m live` / `pytest -m ultimate` (overriding this addopts marker
+# expression), never run by accident from a bare `pytest` invocation.
+addopts = "-m 'not live and not ultimate'"
+markers = [
+    "unit: mocked, no network, always runs in CI",
+    "live: real API call against Bucket 1 (free-tier-reachable) endpoints",
+    "ultimate: real API call against Bucket 2 (FMP Ultimate-gated) endpoints, skipped by default",
+]
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

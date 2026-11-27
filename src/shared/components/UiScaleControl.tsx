@@ -11,7 +11,7 @@ export const UiScaleControl = memo(function UiScaleControl() {
       className="flex items-center gap-1 rounded bg-[rgba(255,255,255,0.05)] px-2 py-1.5 text-[0.6875rem] text-[#b0b5c0]"
       title="界面字号缩放（自动跟随窗口宽度，可手动锁定）"
     >
-      <span className="text-[0.5625rem] text-[#636878]">字号</span>
+      <span className="text-[0.75rem] text-[#636878]">字号</span>
       <select
         value={String(setting)}
         onChange={(e) => {

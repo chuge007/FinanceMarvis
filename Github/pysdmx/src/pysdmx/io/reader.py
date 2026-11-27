@@ -1,0 +1,404 @@
+"""SDMX All formats reader module."""
+
+import contextlib
+from io import BytesIO
+from pathlib import Path
+from typing import (
+    TYPE_CHECKING,
+    Dict,
+    Iterator,
+    Optional,
+    Sequence,
+    Union,
+    cast,
+    overload,
+)
+
+if TYPE_CHECKING:  # pragma: no cover
+    from pysdmx.io.pd import PandasDataset
+
+from pysdmx.errors import Invalid
+from pysdmx.io.format import Format
+from pysdmx.io.input_processor import URL_TIMEOUT, stream_sdmx
+from pysdmx.model import AvailabilityConstraint, Schema
+from pysdmx.model.__base import MaintainableArtefact
+from pysdmx.model.dataset import Dataset
+from pysdmx.model.message import Message
+from pysdmx.model.metadata import MetadataReport
+from pysdmx.model.submission import SubmissionResult
+from pysdmx.util import parse_short_urn
+from pysdmx.util._model_utils import schema_generator
+
+
+def read_sdmx(  # noqa: C901
+    sdmx_document: Union[str, Path, BytesIO],
+    validate: bool = True,
+    pem: Optional[Union[str, Path]] = None,
+    timeout: float = URL_TIMEOUT,
+) -> Message:
+    """Reads any SDMX message and extracts its content.
+
+    Check the :ref:`formats supported <io-reader-formats-supported>`
+
+    SDMX-ML and SDMX-CSV data messages are read in a single pass, while
+    the file is read or the URL downloaded, without holding the whole
+    message in memory. The validation of SDMX-ML data messages against
+    the XSD happens in the same pass.
+
+    A message compressed with gzip (e.g. a ``.gz`` file, or a response of
+    Eurostat's SDMX API) is detected from its first bytes and decompressed
+    while it is read.
+
+    When reading from a URL, if the server has not started to send the
+    message after 60 seconds, a ``UserWarning`` is emitted, and another one
+    every 10 seconds while it keeps waiting.
+
+    A data query that Eurostat's SDMX API queues as an asynchronous
+    extraction, answering with the id of the extraction instead of the
+    data, is followed: the status of the extraction is checked every 10
+    seconds, until it is available or the timeout has passed, and its data
+    are then read.
+
+    .. important::
+        When reading a SDMX-JSON structure message, you can read it
+        without installing the pysdmx[json] extra
+        by passing the parameter ``validate=False`` to this function.
+        Otherwise, if not installed, an error will be raised
+        if using ``validate=True``, as it is the default value.
+
+    Args:
+        sdmx_document: Path to file
+          (`pathlib.Path <https://docs.python.org/3/library/pathlib.html>`_),
+          URL, or string.
+        validate: Validate the input file (only for SDMX-ML and SDMX-JSON).
+        pem: When using a URL, in case the service exposed
+          a certificate created by an unknown certificate
+          authority, you can pass a PEM file for this
+          authority using this parameter.
+        timeout: When using a URL, the seconds to wait for each network
+          operation, such as the server starting to send the message or
+          sending its next part. It does not limit the whole download, but
+          it limits the wait for an asynchronous extraction of Eurostat's
+          SDMX API to be available. Defaults to 600 seconds.
+
+    Returns:
+        A Message with the content of the SDMX document. A message without
+        content is valid SDMX (an empty catalogue, a data query matching
+        nothing, a metadata query without reports), so it is returned as
+        a Message whose ``structures``, ``data`` or ``reports`` sequence
+        is empty rather than rejected.
+
+    Raises:
+        Invalid:
+            If the format is not supported, or if the document is not a
+            valid message of the detected format (e.g. a submission
+            message whose SubmitStructureResponse has no
+            SubmissionResult).
+        NotImplemented:
+            If the SDMX flavour is detected but not supported yet.
+    """
+    chunks, read_format = stream_sdmx(sdmx_document, pem=pem, timeout=timeout)
+    with contextlib.closing(chunks):
+        # A data message without any DataSet is valid SDMX as well (it is
+        # how a service answers a query matching nothing), so it is
+        # returned as a Message with an empty data sequence.
+        # TODO: Add here the Schema download for Datasets, based on structure
+        # TODO: Ensure we have changed the signature of the data readers
+        if read_format in (
+            Format.DATA_SDMX_ML_2_1_GEN,
+            Format.DATA_SDMX_ML_2_1_GENTS,
+            Format.DATA_SDMX_ML_2_1_STR,
+            Format.DATA_SDMX_ML_2_1_STRTS,
+            Format.DATA_SDMX_ML_3_0,
+            Format.DATA_SDMX_ML_3_1,
+        ):
+            return __read_sdmx_ml_data(chunks, read_format, validate)
+        if read_format in (
+            Format.DATA_SDMX_CSV_1_0_0,
+            Format.DATA_SDMX_CSV_2_0_0,
+            Format.DATA_SDMX_CSV_2_1_0,
+        ):
+            return __read_sdmx_csv_data(chunks, read_format)
+        input_str = "".join(chunks)
+
+    header = None
+    result_structures: Sequence[
+        Union[MaintainableArtefact, AvailabilityConstraint]
+    ] = []
+    result_submission: Sequence[SubmissionResult] = []
+    reports: Sequence[MetadataReport] = []
+    if read_format == Format.STRUCTURE_SDMX_ML_2_1:
+        from pysdmx.io.xml.sdmx21.reader.structure import (
+            read as read_structure,
+        )
+
+        # SDMX-ML 2.1 Structure
+        result_structures = read_structure(input_str, validate=validate)
+    elif read_format == Format.STRUCTURE_SDMX_ML_3_0:
+        from pysdmx.io.xml.sdmx30.reader.structure import (
+            read as read_structure,
+        )
+
+        # SDMX-ML 3.0 Structure
+        result_structures = read_structure(input_str, validate=validate)
+    elif read_format == Format.STRUCTURE_SDMX_ML_3_1:
+        from pysdmx.io.xml.sdmx31.reader.structure import (
+            read as read_structure,
+        )
+
+        # SDMX-ML 3.1 Structure
+        result_structures = read_structure(input_str, validate=validate)
+    elif read_format in (
+        Format.STRUCTURE_SDMX_JSON_2_0_0,
+        Format.STRUCTURE_SDMX_JSON_2_1_0,
+    ):
+        from pysdmx.io.json.sdmxjson2.reader.structure import (
+            read as read_struct,
+        )
+
+        struct_msg = read_struct(input_str, validate=validate)
+        header = struct_msg.header
+        result_structures = struct_msg.structures or []
+    elif read_format in (
+        Format.REFMETA_SDMX_JSON_2_0_0,
+        Format.REFMETA_SDMX_JSON_2_1_0,
+    ):
+        from pysdmx.io.json.sdmxjson2.reader.metadata import (
+            read as read_refmeta,
+        )
+
+        ref_msg = read_refmeta(input_str, validate=validate)
+        header = ref_msg.header
+        reports = ref_msg.reports or []
+    elif read_format == Format.REFMETA_SDMX_ML_3_0:
+        from pysdmx.io.xml.sdmx30.reader.metadata import (
+            read as read_refmeta_ml,
+        )
+
+        # SDMX-ML 3.0 reference metadata (GenericMetadata)
+        reports = read_refmeta_ml(input_str, validate=validate)
+    elif read_format == Format.REFMETA_SDMX_ML_3_1:
+        from pysdmx.io.xml.sdmx31.reader.metadata import (
+            read as read_refmeta_ml,
+        )
+
+        # SDMX-ML 3.1 reference metadata (GenericMetadata)
+        reports = read_refmeta_ml(input_str, validate=validate)
+    elif read_format == Format.REGISTRY_SDMX_ML_2_1:
+        from pysdmx.io.xml.sdmx21.reader.submission import read as read_sub
+
+        # SDMX-ML 2.1 Submission
+        result_submission = read_sub(input_str, validate=validate)
+    else:
+        from pysdmx.io.xml.sdmx21.reader.error import read as read_error
+
+        # SDMX-ML 2.1 Error
+        read_error(input_str, validate=validate)
+
+    if read_format in (
+        Format.STRUCTURE_SDMX_ML_2_1,
+        Format.STRUCTURE_SDMX_ML_3_0,
+        Format.STRUCTURE_SDMX_ML_3_1,
+        Format.REFMETA_SDMX_ML_3_0,
+        Format.REFMETA_SDMX_ML_3_1,
+    ):
+        from pysdmx.io.xml.header import read as read_header
+
+        # The body reader has already validated the message
+        header = read_header(input_str, validate=False)
+
+    # Returning a Message class
+    if read_format in (
+        Format.STRUCTURE_SDMX_ML_2_1,
+        Format.STRUCTURE_SDMX_ML_3_0,
+        Format.STRUCTURE_SDMX_ML_3_1,
+        Format.STRUCTURE_SDMX_JSON_2_0_0,
+        Format.STRUCTURE_SDMX_JSON_2_1_0,
+    ):
+        # A structure message without artefacts is valid SDMX (it is how
+        # a service reports an empty catalogue), so it is returned as an
+        # empty Message rather than rejected.
+        # TODO: Ensure we have changed the signature of the structure readers
+        return Message(header=header, structures=tuple(result_structures))
+
+    if read_format == Format.REGISTRY_SDMX_ML_2_1:
+        return Message(header=header, submission=tuple(result_submission))
+    # SDMX-ML and SDMX-JSON reference metadata, with or without reports
+    return Message(header=header, reports=tuple(reports))
+
+
+def __read_sdmx_ml_data(
+    chunks: Iterator[str], read_format: Format, validate: bool
+) -> Message:
+    """Reads an SDMX-ML data message in a single pass."""
+    if read_format in (
+        Format.DATA_SDMX_ML_2_1_GEN,
+        Format.DATA_SDMX_ML_2_1_GENTS,
+    ):
+        # SDMX-ML 2.1 Generic / Generic Time Series Data
+        from pysdmx.io.xml.sdmx21.reader.generic import read_stream
+    elif read_format in (
+        Format.DATA_SDMX_ML_2_1_STR,
+        Format.DATA_SDMX_ML_2_1_STRTS,
+    ):
+        # SDMX-ML 2.1 Structure Specific Data
+        from pysdmx.io.xml.sdmx21.reader.structure_specific import (
+            read_stream,
+        )
+    elif read_format == Format.DATA_SDMX_ML_3_0:
+        # SDMX-ML 3.0 Structure Specific Data
+        from pysdmx.io.xml.sdmx30.reader.structure_specific import (
+            read_stream,
+        )
+    else:
+        # SDMX-ML 3.1 Structure Specific Data
+        from pysdmx.io.xml.sdmx31.reader.structure_specific import (
+            read_stream,
+        )
+    from pysdmx.io.xml.header import parse_header
+
+    header, datasets = read_stream(chunks, validate=validate)
+    # The header is parsed after the data, so that the errors in the data
+    # come first, as when reading the whole message
+    return Message(header=parse_header(header), data=datasets)
+
+
+def __read_sdmx_csv_data(
+    chunks: Iterator[str], read_format: Format
+) -> Message:
+    """Reads an SDMX-CSV data message in a single pass."""
+    if read_format == Format.DATA_SDMX_CSV_1_0_0:
+        # SDMX-CSV 1.0
+        from pysdmx.io.csv.sdmx10.reader import read_stream
+    else:
+        # SDMX-CSV 2.0 and 2.1
+        from pysdmx.io.csv.sdmx21.reader import read_stream
+
+    return Message(header=None, data=read_stream(chunks))
+
+
+def __manage_dataset_level_attributes(dataset: Dataset) -> None:
+    """Manage attributes at dataset level and remove them from data."""
+    # This function requires the dataset to have a structure defined.
+    dataset_level_attributes = [
+        x
+        for x in dataset.structure.components.attributes  # type: ignore[union-attr]
+        if x.attachment_level == "D"
+    ]
+    if len(dataset.attributes) > 0:
+        # If the dataset already has attributes, we do not need to add them
+        return
+    attached_attributes: Dict[str, Optional[str]] = {}
+    for att in dataset_level_attributes:
+        if att.id not in dataset.data.columns:  # type: ignore[attr-defined]
+            attached_attributes[att.id] = None
+        else:
+            val = (
+                dataset.data[att.id].unique().tolist()[0]  # type: ignore[attr-defined]
+            )
+            attached_attributes[att.id] = str(val) if val is not None else None
+            del dataset.data[att.id]  # type: ignore[attr-defined]
+    dataset.attributes = attached_attributes
+
+
+def __assign_structure_to_dataset(
+    datasets: Sequence[Dataset], structure_msg: Message
+) -> None:
+    for dataset in datasets:
+        short_urn: str = (
+            dataset.structure.short_urn
+            if isinstance(dataset.structure, Schema)
+            else dataset.structure
+        )
+        dataset_ref = parse_short_urn(short_urn)
+        dataset.structure = schema_generator(structure_msg, dataset_ref)
+        __manage_dataset_level_attributes(dataset)
+
+
+@overload
+def get_datasets(  # pragma: no cover
+    data: Union[str, Path, BytesIO],
+    structure: None = None,
+    validate: bool = True,
+    pem: Optional[Union[str, Path]] = None,
+    timeout: float = URL_TIMEOUT,
+) -> "Sequence[PandasDataset]": ...
+
+
+@overload
+def get_datasets(  # pragma: no cover
+    data: Union[str, Path, BytesIO],
+    structure: Union[str, Path, BytesIO] = ...,
+    validate: bool = True,
+    pem: Optional[Union[str, Path]] = None,
+    timeout: float = URL_TIMEOUT,
+) -> "Sequence[PandasDataset]": ...
+
+
+def get_datasets(
+    data: Union[str, Path, BytesIO],
+    structure: Optional[Union[str, Path, BytesIO]] = None,
+    validate: bool = True,
+    pem: Optional[Union[str, Path]] = None,
+    timeout: float = URL_TIMEOUT,
+) -> "Sequence[PandasDataset]":
+    """Reads a data message and a structure message and returns a dataset.
+
+    This method reads a data message and an optional structure message,
+    and returns a sequence of PandasDatasets.
+    Check the :ref:`formats supported <io-reader-formats-supported>`
+
+    The resulting datasets will have their structure assigned,
+    this is required for:
+
+    - Data validation against its structure
+    - Data writing in SDMX-ML Structure Specific with DimensionAtObservation
+      not equal to AllDimensions or Generic formats
+    - Execution of VTL scripts over PandasDataset
+
+    .. important::
+        When reading a SDMX-JSON structure message (as the structure argument),
+        you can read it without installing the pysdmx[json] extra
+        by passing the parameter ``validate=False`` to this function.
+        Otherwise, if not installed, an error will be raised
+        if using ``validate=True``, as it is the default value.
+
+    Args:
+        data: Path to file
+          (`pathlib.Path <https://docs.python.org/3/library/pathlib.html>`_),
+          URL, or string for the data message.
+        structure:
+          Path to file
+          (`pathlib.Path <https://docs.python.org/3/library/pathlib.html>`_),
+          URL, or string for the structure message, if needed.
+        validate: Validate the input file (only for SDMX-ML and SDMX-JSON).
+        pem: When using a URL, in case the service exposed
+            a certificate created by an unknown certificate
+            authority, you can pass a PEM file for this
+            authority using this parameter.
+        timeout: When using a URL, the seconds to wait for each network
+            operation, as in :func:`read_sdmx`. Defaults to 600 seconds.
+
+    Raises:
+        Invalid:
+            If the data message is empty or the related data structure
+            (or dataflow with its children) is not found.
+        NotFound:
+            If the related data structure (or dataflow with its children)
+            is not found.
+    """
+    data_msg = read_sdmx(data, validate=validate, pem=pem, timeout=timeout)
+    if not data_msg.data:
+        raise Invalid("No data found in the data message")
+
+    if structure is None:
+        return cast("Sequence[PandasDataset]", data_msg.data)
+    structure_msg = read_sdmx(
+        structure, validate=validate, pem=pem, timeout=timeout
+    )
+    if structure_msg.structures is None:
+        raise Invalid("No structure found in the structure message")
+
+    __assign_structure_to_dataset(data_msg.data, structure_msg)
+
+    return cast("Sequence[PandasDataset]", data_msg.data)

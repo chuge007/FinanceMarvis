@@ -1,0 +1,420 @@
+import type { EarningsField, FinancialStatement, TickerFinancials } from "../../../../types/financials";
+import {
+  areNearbyFinancialPeriodEnds,
+  completeAvailability,
+  quarterRows,
+  statementFieldAvailability,
+  statementPeriodMonths,
+} from "../../../../utils/financial-statements";
+import { hasStatementGap } from "../../../../utils/statement-gaps";
+import { trailingEpsAcrossFiscalYearEnd } from "../../../../utils/trailing-eps";
+
+export type FinancialPeriod = "annual" | "quarterly";
+
+export interface FinancialTableStatement extends FinancialStatement {
+  aggregation?: {
+    /** Four quarters summed, or (a half-yearly reporter) Gloom Cloud's year plus the half since it less a year earlier's. */
+    kind: "trailing-four-quarters" | "annual-plus-interim";
+    periodEnd: string;
+    /** How an annual-plus-interim TTM was built: "FY to 2025-12-31 + 6 months to 2026-06-30 − 6 months to 2025-06-30". */
+    basis?: string;
+    /** The months of the year to date an annual-plus-interim TTM adds: 6 when it runs to a half. */
+    interimMonths?: number;
+    sourcePeriods: Array<Pick<FinancialStatement,
+      "date" | "currency" | "dateSource" | "providerDate" | "dateEvidence" | "availableAt" | "fieldAvailability" | "fieldSources" | "unavailableFields" | "unavailableEarnings"
+    >>;
+  };
+}
+
+const FLOW_KEYS = new Set<string>([
+  "totalRevenue",
+  "costOfRevenue",
+  "grossProfit",
+  "sellingGeneralAndAdministration",
+  "researchAndDevelopment",
+  "operatingExpense",
+  "operatingIncome",
+  "operatingRevenue",
+  "totalExpenses",
+  "pretaxIncome",
+  "normalizedIncome",
+  "netIncomeCommonStockholders",
+  "netIncomeContinuousOperations",
+  "otherIncomeExpense",
+  "otherNonOperatingIncomeExpenses",
+  "depreciationAmortizationDepletionIncomeStatement",
+  "depreciationAndAmortizationInIncomeStatement",
+  "interestExpense",
+  "taxProvision",
+  "netIncome",
+  "netIncomeIncludingNoncontrollingInterests",
+  "ebitda",
+  "basicEps",
+  "eps",
+  "operatingCashFlow",
+  "depreciationAndAmortization",
+  "depreciationAmortizationDepletion",
+  "depreciation",
+  "deferredIncomeTax",
+  "deferredTax",
+  "stockBasedCompensation",
+  "otherNonCashItems",
+  "changeInWorkingCapital",
+  "changeInReceivables",
+  "changeInInventory",
+  "changeInPayable",
+  "changeInAccountPayable",
+  "changeInOtherWorkingCapital",
+  "capitalExpenditure",
+  "cashFlowFromContinuingOperatingActivities",
+  "interestPaidSupplementalData",
+  "incomeTaxPaidSupplementalData",
+  "freeCashFlow",
+  "purchaseOfPPE",
+  "saleOfPPE",
+  "netPPEPurchaseAndSale",
+  "investingCashFlow",
+  "cashFlowFromContinuingInvestingActivities",
+  "purchaseOfBusiness",
+  "saleOfBusiness",
+  "netBusinessPurchaseAndSale",
+  "purchaseOfInvestment",
+  "saleOfInvestment",
+  "netInvestmentPurchaseAndSale",
+  "netOtherInvestingChanges",
+  "financingCashFlow",
+  "cashFlowFromContinuingFinancingActivities",
+  "issuanceOfDebt",
+  "repaymentOfDebt",
+  "netIssuancePaymentsOfDebt",
+  "longTermDebtIssuance",
+  "longTermDebtPayments",
+  "netLongTermDebtIssuance",
+  "shortTermDebtIssuance",
+  "shortTermDebtPayments",
+  "netShortTermDebtIssuance",
+  "repurchaseOfCapitalStock",
+  "commonStockIssuance",
+  "commonStockPayments",
+  "netCommonStockIssuance",
+  "cashDividendsPaid",
+  "commonStockDividendPaid",
+  "netOtherFinancingCharges",
+  "changesInCash",
+  "effectOfExchangeRateChanges",
+]);
+
+const EARNINGS_KEYS = ["basicEps", "eps"] as const satisfies readonly EarningsField[];
+
+const BALANCE_KEYS = new Set<string>([
+  "totalAssets",
+  "currentAssets",
+  "cashAndCashEquivalents",
+  "cashCashEquivalentsAndShortTermInvestments",
+  "otherShortTermInvestments",
+  "receivables",
+  "accountsReceivable",
+  "inventory",
+  "prepaidAssets",
+  "otherCurrentAssets",
+  "totalNonCurrentAssets",
+  "netPPE",
+  "grossPPE",
+  "accumulatedDepreciation",
+  "goodwill",
+  "otherIntangibleAssets",
+  "goodwillAndOtherIntangibleAssets",
+  "investmentsAndAdvances",
+  "otherNonCurrentAssets",
+  "totalLiabilities",
+  "currentLiabilities",
+  "currentDebt",
+  "currentDebtAndCapitalLeaseObligation",
+  "payablesAndAccruedExpenses",
+  "currentAccruedExpenses",
+  "payables",
+  "accountsPayable",
+  "currentDeferredRevenue",
+  "currentDeferredLiabilities",
+  "otherCurrentLiabilities",
+  "totalNonCurrentLiabilities",
+  "longTermDebt",
+  "longTermDebtAndCapitalLeaseObligation",
+  "longTermCapitalLeaseObligation",
+  "nonCurrentDeferredLiabilities",
+  "nonCurrentDeferredTaxesLiabilities",
+  "otherNonCurrentLiabilities",
+  "totalDebt",
+  "capitalLeaseObligations",
+  "totalCapitalization",
+  "totalEquity",
+  "totalEquityGrossMinorityInterest",
+  "commonStockEquity",
+  "commonStock",
+  "capitalStock",
+  "additionalPaidInCapital",
+  "treasuryStock",
+  "gainsLossesNotAffectingRetainedEarnings",
+  "otherEquityAdjustments",
+  "retainedEarnings",
+  "longTermEquityInvestment",
+  "workingCapital",
+  "netTangibleAssets",
+  "investedCapital",
+  "tangibleBookValue",
+  "shareIssued",
+  "ordinarySharesNumber",
+  "treasurySharesNumber",
+  "endCashPosition",
+]);
+
+function aggregateQuarterlyStatements(
+  statements: FinancialStatement[],
+  date: string,
+  /** Every quarter and fiscal year on file, for EPS across a fiscal Q4 that reports none. */
+  onFile: { quarterly: readonly FinancialStatement[]; annual: readonly FinancialStatement[] } = { quarterly: [], annual: [] },
+): FinancialTableStatement | null {
+  if (statements.length !== 4) return null;
+  // A reported figure can be valid on its own even when the historical
+  // statements provider used a different definition for that line.
+  const mixed = statements.some(({ filledFrom }) =>
+    filledFrom?.source === "results"
+    && filledFrom.definitions?.some(({ field }) => filledFrom.fields.includes(field) && statements.some((statement) =>
+      statement.filledFrom?.source !== "results" || !statement.filledFrom.fields.includes(field),
+    )),
+  );
+  if (mixed) return null;
+  // A provider may return semiannual reports or skip a quarter. Four rows do
+  // not necessarily cover twelve months; never label those sums as TTM.
+  for (let index = 1; index < statements.length; index += 1) {
+    const days = (Date.parse(statements[index]!.date) - Date.parse(statements[index - 1]!.date)) / 86_400_000;
+    if (!Number.isFinite(days) || days < 60 || days > 120) return null;
+  }
+  const currencies = new Set(statements.map((statement) => statement.currency));
+  if (currencies.size > 1) return null;
+  // Its counts and EPS are on the quarters' share basis when all four state the same one.
+  const shareBases = new Set(statements.map((statement) => statement.shareBasis));
+  const shareBasis = shareBases.size === 1 ? [...shareBases][0] : undefined;
+
+  const aggregate: FinancialTableStatement = {
+    date,
+    currency: [...currencies][0],
+    ...(shareBasis ? { shareBasis } : {}),
+    aggregation: {
+      kind: "trailing-four-quarters",
+      periodEnd: statements.at(-1)!.date,
+      sourcePeriods: statements.map(({ date, currency, dateSource, providerDate, dateEvidence, availableAt, fieldAvailability, fieldSources, unavailableFields, unavailableEarnings }) => ({
+        date, currency, dateSource, providerDate,
+        ...(dateEvidence ? { dateEvidence: { ...dateEvidence } } : {}),
+        availableAt,
+        ...(fieldAvailability ? { fieldAvailability: { ...fieldAvailability } } : {}),
+        ...(fieldSources ? { fieldSources: { ...fieldSources } } : {}),
+        ...(unavailableFields ? { unavailableFields: [...unavailableFields] } : {}),
+        ...(unavailableEarnings ? { unavailableEarnings: [...unavailableEarnings] } : {}),
+      })),
+    },
+  };
+  const availability: Record<string, string> = {};
+  const includedFields: string[] = [];
+  const retainAvailability = (key: string, sources: FinancialStatement[]) => {
+    includedFields.push(key);
+    const availableAt = completeAvailability(sources.map((source) => statementFieldAvailability(source, key)));
+    if (availableAt) availability[key] = availableAt;
+  };
+  // A quarter that declares an EPS line unavailable, or whose EPS share basis
+  // is unresolved, leaves the year's EPS unknown even when it still carries a
+  // number: the sum is withheld and the aggregate says why, as a quarter would.
+  const unresolvedEps = statements.find((statement) => statement.epsBasis?.status === "unresolved");
+  const gapped = EARNINGS_KEYS.filter((key) => statements.some((statement) => hasStatementGap(statement, key)));
+  if (gapped.length > 0) aggregate.unavailableEarnings = [...gapped];
+  if (unresolvedEps) aggregate.epsBasis = unresolvedEps.epsBasis;
+  const withheld = new Set<string>(gapped);
+  if (unresolvedEps) withheld.add("eps");
+  for (const key of FLOW_KEYS) {
+    if (withheld.has(key)) continue;
+    const values = statements
+      .map((statement) => (statement as unknown as Record<string, unknown>)[key])
+      .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+    if (values.length === 4) {
+      (aggregate as unknown as Record<string, unknown>)[key] = values.reduce((left, right) => left + right, 0);
+      retainAvailability(key, statements);
+    } else if (key === "eps" || key === "basicEps") {
+      const acrossYearEnd = trailingEpsAcrossFiscalYearEnd(statements, onFile.quarterly, onFile.annual, key);
+      if (!acrossYearEnd) continue;
+      aggregate[key] = acrossYearEnd.value;
+      retainAvailability(key, acrossYearEnd.inputs);
+    }
+  }
+
+  const latest = statements[statements.length - 1]!;
+  for (const key of BALANCE_KEYS) {
+    const value = (latest as unknown as Record<string, unknown>)[key];
+    if (typeof value === "number" && Number.isFinite(value)) {
+      (aggregate as unknown as Record<string, unknown>)[key] = value;
+      retainAvailability(key, [latest]);
+    }
+  }
+
+  const openingCash = statements[0]!.beginningCashPosition;
+  if (openingCash != null && Number.isFinite(openingCash)) {
+    aggregate.beginningCashPosition = openingCash;
+    retainAvailability("beginningCashPosition", [statements[0]!]);
+  }
+
+  // These are average shares over each quarter, unlike balance-sheet shares.
+  for (const key of ["basicShares", "dilutedShares"] as const) {
+    const values = statements.map((statement) => statement[key]);
+    if (values.every((value): value is number => value != null && Number.isFinite(value))) {
+      aggregate[key] = values.reduce((sum, value) => sum + value, 0) / 4;
+      retainAvailability(key, statements);
+    }
+  }
+  if (Object.keys(availability).length > 0) aggregate.fieldAvailability = availability;
+  const availableAt = completeAvailability(includedFields.map((key) => availability[key]));
+  if (availableAt) aggregate.availableAt = availableAt;
+  return aggregate;
+}
+
+/**
+ * The four quarters to the one dated `end`, summed: what a quarterly column
+ * reads a flow over a year from. Null when fewer than four consecutive
+ * quarters end there.
+ */
+export function trailingFourQuarters(
+  quarterlyStatements: readonly FinancialStatement[],
+  end: string,
+  annualStatements: readonly FinancialStatement[] = [],
+) {
+  const sorted = sortedQuarters(quarterlyStatements);
+  const index = sorted.findIndex((statement) => statement.date === end);
+  return index < 3 ? null : aggregateQuarterlyStatements(sorted.slice(index - 3, index + 1), "TTM", { quarterly: sorted, annual: annualStatements });
+}
+
+/** The quarterly list's quarters, oldest first: a half filled into it is never summed as a quarter. */
+function sortedQuarters(quarterlyStatements: readonly FinancialStatement[]): FinancialStatement[] {
+  return quarterRows(quarterlyStatements).sort((a, b) => a.date.localeCompare(b.date));
+}
+
+/**
+ * The trailing twelve months Gloom Cloud built where the quarters do not give
+ * them (a half-yearly reporter: FY2025 + H1 2026 − H1 2025), as a TTM column.
+ * Null when there is none or it ends no later than the latest year.
+ */
+export function servedTrailingStatement(
+  trailing: TickerFinancials["trailingStatement"],
+  annualStatements: readonly FinancialStatement[],
+): FinancialTableStatement | null {
+  if (!trailing) return null;
+  const periodEnd = trailing.date.slice(0, 10);
+  const latestYear = annualStatements.reduce((latest, row) => (row.date.slice(0, 10) > latest ? row.date.slice(0, 10) : latest), "");
+  if (periodEnd <= latestYear) return null;
+  const { trailing: how, date: _date, ...statement } = trailing;
+  return {
+    ...statement,
+    date: "TTM",
+    aggregation: {
+      kind: "annual-plus-interim",
+      periodEnd,
+      basis: how.basis,
+      interimMonths: how.interim.months,
+      sourcePeriods: [how.priorInterim.end, how.annual, how.interim.end].map((end) => ({ date: end, currency: statement.currency })),
+    },
+  };
+}
+
+/**
+ * The latest four quarters summed. With `complete`, the latest four that all
+ * pass it: a quarter whose statements are not in yet (only its EPS is on file,
+ * as a company's newest quarter is between its earnings release and its 10-Q)
+ * never joins the sum, which then runs to the quarter before it.
+ */
+export function computeTTM(
+  quarterlyStatements: FinancialStatement[],
+  annualStatements: readonly FinancialStatement[] = [],
+  complete?: (quarter: FinancialStatement) => boolean,
+) {
+  const sorted = sortedQuarters(quarterlyStatements);
+  const onFile = { quarterly: sorted, annual: annualStatements };
+  if (!complete) return aggregateQuarterlyStatements(sorted.slice(-4), "TTM", onFile);
+  for (let end = sorted.length; end >= 4; end -= 1) {
+    const quarters = sorted.slice(end - 4, end);
+    if (!quarters.every(complete)) continue;
+    const ttm = aggregateQuarterlyStatements(quarters, "TTM", onFile);
+    if (ttm) return ttm;
+  }
+  return null;
+}
+
+/**
+ * The twelve months a TTM column's growth is measured against: the same kind
+ * of window a year earlier. For four quarters, the four before them. For a
+ * year plus the half since it, the twelve months to a year before its end, a
+ * fiscal year or four quarters ending then; none when neither is on file
+ * (never the latest year, which ends at another point of the year).
+ */
+function previousTrailing(
+  ttm: FinancialTableStatement,
+  quarterlyStatements: readonly FinancialStatement[],
+  annualStatements: readonly FinancialStatement[],
+): FinancialStatement | null {
+  const sorted = sortedQuarters(quarterlyStatements);
+  if (ttm.aggregation?.kind !== "annual-plus-interim") {
+    // The four quarters before the TTM's own, which need not be the latest on file (computeTTM).
+    const index = sorted.findIndex((row) => row.date === ttm.aggregation?.periodEnd);
+    const end = index >= 0 ? index + 1 : sorted.length;
+    const previous = aggregateQuarterlyStatements(sorted.slice(Math.max(0, end - 8), Math.max(0, end - 4)), "prevTTM", { quarterly: sorted, annual: annualStatements });
+    const latest = sorted[end - 1];
+    const prior = end >= 5 ? sorted[end - 5] : undefined;
+    const days = latest && prior ? (Date.parse(latest.date) - Date.parse(prior.date)) / 86_400_000 : NaN;
+    return previous && days >= 300 && days <= 430 ? previous : null;
+  }
+  const end = ttm.aggregation.periodEnd;
+  const yearBefore = `${Number(end.slice(0, 4)) - 1}${end.slice(4, 10)}`;
+  const year = annualStatements.find((row) => row.currency === ttm.currency && areNearbyFinancialPeriodEnds(row.date.slice(0, 10), yearBefore));
+  if (year) return year;
+  const quarter = sorted.find((row) => areNearbyFinancialPeriodEnds(row.date.slice(0, 10), yearBefore));
+  const quarters = quarter ? trailingFourQuarters(sorted, quarter.date, annualStatements) : null;
+  return quarters && quarters.currency === ttm.currency ? quarters : null;
+}
+
+export function buildPreviousStatementMap(
+  period: FinancialPeriod,
+  annualStatements: FinancialStatement[],
+  quarterlyStatements: FinancialStatement[],
+  ttm: FinancialTableStatement | null,
+) {
+  const sourceStatements = period === "annual" ? annualStatements : quarterlyStatements;
+  const previousMap = new Map<string, FinancialStatement>();
+
+  for (let index = 1; index < sourceStatements.length; index += 1) {
+    const current = sourceStatements[index]!;
+    // Providers can include off-cycle 12-month observations (for example ADR
+    // EPS) between fiscal years. They must not hide a comparable prior year.
+    // More than one annual candidate is ambiguous; do not guess its identity.
+    // A half in the quarterly list compares with the same half a year earlier, never with a quarter.
+    const half = period === "quarterly" && (statementPeriodMonths(current) ?? 3) > 3;
+    const candidates = period === "annual" || half
+      ? sourceStatements.filter((candidate) => {
+        const days = (Date.parse(current.date) - Date.parse(candidate.date)) / 86_400_000;
+        return half
+          ? days >= 350 && days <= 380 && statementPeriodMonths(candidate) === statementPeriodMonths(current)
+          : days >= 300 && days <= 430;
+      })
+      : [sourceStatements[index - 1]!];
+    if (candidates.length !== 1) continue;
+    const previous = candidates[0]!;
+    // A half beside a quarter is no change over a period.
+    if (statementPeriodMonths(current) !== statementPeriodMonths(previous)) continue;
+    const days = (Date.parse(current.date) - Date.parse(previous.date)) / 86_400_000;
+    const [minimum, maximum] = period === "annual" ? [300, 430] : half ? [350, 380] : [60, 120];
+    if (days < minimum! || days > maximum! || !Number.isFinite(days)) continue;
+    previousMap.set(current.date, previous);
+  }
+
+  if (ttm) {
+    const previousTtm = previousTrailing(ttm, quarterlyStatements, annualStatements);
+    if (previousTtm) previousMap.set("TTM", previousTtm);
+  }
+
+  return previousMap;
+}

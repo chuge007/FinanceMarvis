@@ -1,0 +1,704 @@
+from datetime import datetime
+from datetime import timezone as tz
+
+import msgspec
+import pytest
+
+from pysdmx import errors
+from pysdmx.io.json.sdmxjson2.messages.dsd import (
+    JsonDataStructure,
+    JsonDataStructuresMessage,
+)
+from pysdmx.model import (
+    Annotation,
+    Code,
+    Codelist,
+    Component,
+    Components,
+    Concept,
+    DataStructureDefinition,
+    DataType,
+    Facets,
+    ItemReference,
+    Role,
+    decoders,
+)
+from pysdmx.model.dataflow import Group
+
+_BASE = "urn:sdmx:org.sdmx.infomodel."
+
+
+@pytest.fixture
+def dsd():
+    f1 = Code("A")
+    f2 = Code("M")
+    cl = Codelist("CL_FREQ", agency="BIS", version="1.0", items=[f1, f2])
+    c1 = Component(
+        "FREQ",
+        True,
+        Role.DIMENSION,
+        Concept(
+            "FREQ",
+            urn=f"{_BASE}conceptscheme.Concept=Z:ZZ(1.0).FREQ",
+        ),
+        DataType.ALPHA,
+        Facets(min_length=1, max_length=1),
+        local_codes=cl,
+        local_enum_ref=f"{_BASE}codelist.Codelist=BIS:CL_FREQ(1.0)",
+    )
+    c2 = Component(
+        "CUR1",
+        True,
+        Role.DIMENSION,
+        Concept(
+            "CUR1",
+            urn=f"{_BASE}conceptscheme.Concept=Z:ZZ(1.0).CUR1",
+        ),
+        DataType.ALPHA,
+        Facets(min_length=3, max_length=3),
+    )
+    c3 = Component(
+        "CUR2",
+        True,
+        Role.DIMENSION,
+        Concept(
+            "CUR2",
+            urn=f"{_BASE}conceptscheme.Concept=Z:ZZ(1.0).CUR2",
+        ),
+        DataType.ALPHA,
+        Facets(min_length=3, max_length=3),
+    )
+    c4 = Component(
+        "TIME_PERIOD",
+        True,
+        Role.DIMENSION,
+        Concept(
+            "TIME_PERIOD",
+            urn=f"{_BASE}conceptscheme.Concept=Z:ZZ(1.0).TIME_PERIOD",
+        ),
+        DataType.PERIOD,
+    )
+    c5 = Component(
+        "OBS_VALUE",
+        False,
+        Role.MEASURE,
+        ItemReference("Concept", "Z", "ZZ", "1.0", "OBS_VALUE"),
+        DataType.FLOAT,
+    )
+    c6 = Component(
+        "OBS_STATUS",
+        True,
+        Role.ATTRIBUTE,
+        ItemReference("Concept", "Z", "ZZ", "1.0", "OBS_STATUS"),
+        DataType.ALPHA,
+        Facets(min_length=1, max_length=1),
+        attachment_level="O",
+    )
+    c7 = Component(
+        "UNIT",
+        True,
+        Role.ATTRIBUTE,
+        ItemReference("Concept", "Z", "ZZ", "1.0", "UNIT"),
+        DataType.ALPHA,
+        Facets(min_length=3, max_length=3),
+        attachment_level="FREQ,CUR1,CUR2",
+    )
+    c8 = Component(
+        "TITLE",
+        False,
+        Role.ATTRIBUTE,
+        ItemReference("Concept", "Z", "ZZ", "1.0", "TITLE"),
+        DataType.STRING,
+        Facets(min_length=1, max_length=400),
+        attachment_level="FREQ,CUR1,CUR2",
+    )
+    c9 = Component(
+        "UNIT_MULT",
+        True,
+        Role.ATTRIBUTE,
+        ItemReference("Concept", "Z", "ZZ", "1.0", "UNIT_MULT"),
+        DataType.SHORT,
+        Facets(min_value=0, max_value=9),
+        attachment_level="D",
+    )
+    comps = Components([c1, c2, c3, c4, c5, c6, c7, c8, c9])
+    grps = [Group("Sibling", dimensions=["CUR1", "CUR2"])]
+    return DataStructureDefinition(
+        "EXR",
+        name="Exchange rates",
+        description="Test DSD for EXR",
+        version="1.7",
+        valid_from=datetime.now(tz.utc),
+        valid_to=datetime.now(tz.utc),
+        is_external_reference=False,
+        agency="BIS",
+        annotations=[Annotation(type="test")],
+        components=comps,
+        evolving_structure=False,
+        groups=grps,
+    )
+
+
+@pytest.fixture
+def dsd_no_attrs():
+    f1 = Code("A")
+    f2 = Code("M")
+    cl = Codelist("CL_FREQ", agency="BIS", version="1.0", items=[f1, f2])
+    c1 = Component(
+        "FREQ",
+        True,
+        Role.DIMENSION,
+        Concept(
+            "FREQ",
+            urn=f"{_BASE}conceptscheme.Concept=Z:ZZ(1.0).FREQ",
+        ),
+        DataType.ALPHA,
+        Facets(min_length=1, max_length=1),
+        local_codes=cl,
+    )
+    c2 = Component(
+        "CUR1",
+        True,
+        Role.DIMENSION,
+        Concept(
+            "CUR1",
+            urn=f"{_BASE}conceptscheme.Concept=Z:ZZ(1.0).CUR1",
+        ),
+        DataType.ALPHA,
+        Facets(min_length=3, max_length=3),
+    )
+    c3 = Component(
+        "CUR2",
+        True,
+        Role.DIMENSION,
+        Concept(
+            "CUR2",
+            urn=f"{_BASE}conceptscheme.Concept=Z:ZZ(1.0).CUR2",
+        ),
+        DataType.ALPHA,
+        Facets(min_length=3, max_length=3),
+    )
+    c4 = Component(
+        "TIME_PERIOD",
+        True,
+        Role.DIMENSION,
+        Concept(
+            "TIME_PERIOD",
+            urn=f"{_BASE}conceptscheme.Concept=Z:ZZ(1.0).TIME_PERIOD",
+        ),
+        DataType.PERIOD,
+    )
+    c5 = Component(
+        "OBS_VALUE",
+        False,
+        Role.MEASURE,
+        ItemReference("Concept", "Z", "ZZ", "1.0", "OBS_VALUE"),
+        DataType.FLOAT,
+    )
+    comps = Components([c1, c2, c3, c4, c5])
+    return DataStructureDefinition(
+        "EXR", name="Exchange rates", agency="BIS", components=comps
+    )
+
+
+@pytest.fixture
+def dsd_no_measures():
+    f1 = Code("A")
+    f2 = Code("M")
+    cl = Codelist("CL_FREQ", agency="BIS", version="1.0", items=[f1, f2])
+    c1 = Component(
+        "FREQ",
+        True,
+        Role.DIMENSION,
+        Concept(
+            "FREQ",
+            urn=f"{_BASE}conceptscheme.Concept=Z:ZZ(1.0).FREQ",
+        ),
+        DataType.ALPHA,
+        Facets(min_length=1, max_length=1),
+        local_codes=cl,
+    )
+    c2 = Component(
+        "CUR1",
+        True,
+        Role.DIMENSION,
+        Concept(
+            "CUR1",
+            urn=f"{_BASE}conceptscheme.Concept=Z:ZZ(1.0).CUR1",
+        ),
+        DataType.ALPHA,
+        Facets(min_length=3, max_length=3),
+    )
+    c3 = Component(
+        "CUR2",
+        True,
+        Role.DIMENSION,
+        Concept(
+            "CUR2",
+            urn=f"{_BASE}conceptscheme.Concept=Z:ZZ(1.0).CUR2",
+        ),
+        DataType.ALPHA,
+        Facets(min_length=3, max_length=3),
+    )
+    c7 = Component(
+        "UNIT",
+        True,
+        Role.ATTRIBUTE,
+        ItemReference("Concept", "Z", "ZZ", "1.0", "UNIT"),
+        DataType.ALPHA,
+        Facets(min_length=3, max_length=3),
+        attachment_level="FREQ,CUR1,CUR2",
+    )
+    c8 = Component(
+        "TITLE",
+        False,
+        Role.ATTRIBUTE,
+        ItemReference("Concept", "Z", "ZZ", "1.0", "TITLE"),
+        DataType.STRING,
+        Facets(min_length=1, max_length=400),
+        attachment_level="FREQ,CUR1,CUR2",
+    )
+    c9 = Component(
+        "UNIT_MULT",
+        True,
+        Role.ATTRIBUTE,
+        ItemReference("Concept", "Z", "ZZ", "1.0", "UNIT_MULT"),
+        DataType.SHORT,
+        Facets(min_value=0, max_value=9),
+        attachment_level="D",
+    )
+    comps = Components([c1, c2, c3, c7, c8, c9])
+    return DataStructureDefinition(
+        "EXR", name="Exchange rates", agency="BIS", components=comps
+    )
+
+
+@pytest.fixture
+def dsd_no_name():
+    c1 = Component(
+        "FREQ",
+        True,
+        Role.DIMENSION,
+        Concept(
+            "FREQ",
+            urn=f"{_BASE}conceptscheme.Concept=Z:ZZ(1.0).FREQ",
+        ),
+        DataType.ALPHA,
+        Facets(min_length=1, max_length=1),
+    )
+    c2 = Component(
+        "CUR1",
+        True,
+        Role.DIMENSION,
+        Concept(
+            "FREQ",
+            urn=f"{_BASE}conceptscheme.Concept=Z:ZZ(1.0).CUR1",
+        ),
+        DataType.ALPHA,
+        Facets(min_length=3, max_length=3),
+    )
+    comps = Components([c1, c2])
+    return DataStructureDefinition(
+        "EXR",
+        agency="BIS",
+        components=comps,
+    )
+
+
+@pytest.fixture
+def no_concept_ref():
+    c1 = Component(
+        "FREQ",
+        True,
+        Role.DIMENSION,
+        Concept(
+            "FREQ",
+            urn=f"{_BASE}conceptscheme.Concept=Z:ZZ(1.0).FREQ",
+        ),
+        DataType.ALPHA,
+        Facets(min_length=1, max_length=1),
+    )
+    c2 = Component(
+        "CUR1",
+        True,
+        Role.DIMENSION,
+        Concept("FREQ"),
+        DataType.ALPHA,
+        Facets(min_length=3, max_length=3),
+    )
+    comps = Components([c1, c2])
+    return DataStructureDefinition(
+        "EXR",
+        agency="BIS",
+        name="Exchange rates",
+        components=comps,
+    )
+
+
+@pytest.fixture
+def dsd_multi_meas():
+    f1 = Code("A")
+    f2 = Code("M")
+    cl = Codelist("CL_FREQ", agency="BIS", version="1.0", items=[f1, f2])
+    c1 = Component(
+        "FREQ",
+        True,
+        Role.DIMENSION,
+        Concept(
+            "FREQ",
+            urn=f"{_BASE}conceptscheme.Concept=Z:ZZ(1.0).FREQ",
+        ),
+        DataType.ALPHA,
+        Facets(min_length=1, max_length=1),
+        local_codes=cl,
+        local_enum_ref=f"{_BASE}codelist.Codelist=BIS:CL_FREQ(1.0)",
+    )
+    c2 = Component(
+        "CUR1",
+        True,
+        Role.DIMENSION,
+        Concept(
+            "CUR1",
+            urn=f"{_BASE}conceptscheme.Concept=Z:ZZ(1.0).CUR1",
+        ),
+        DataType.ALPHA,
+        Facets(min_length=3, max_length=3),
+    )
+    c3 = Component(
+        "CUR2",
+        True,
+        Role.DIMENSION,
+        Concept(
+            "CUR2",
+            urn=f"{_BASE}conceptscheme.Concept=Z:ZZ(1.0).CUR2",
+        ),
+        DataType.ALPHA,
+        Facets(min_length=3, max_length=3),
+    )
+    c4 = Component(
+        "TIME_PERIOD",
+        True,
+        Role.DIMENSION,
+        Concept(
+            "TIME_PERIOD",
+            urn=f"{_BASE}conceptscheme.Concept=Z:ZZ(1.0).TIME_PERIOD",
+        ),
+        DataType.PERIOD,
+    )
+    c5 = Component(
+        "OI",
+        False,
+        Role.MEASURE,
+        ItemReference("Concept", "Z", "ZZ", "1.0", "OI"),
+        DataType.FLOAT,
+    )
+    c6 = Component(
+        "TO",
+        False,
+        Role.MEASURE,
+        ItemReference("Concept", "Z", "ZZ", "1.0", "TO"),
+        DataType.FLOAT,
+    )
+    c7 = Component(
+        "TO_STATUS",
+        True,
+        Role.ATTRIBUTE,
+        ItemReference("Concept", "Z", "ZZ", "1.0", "TO_STATUS"),
+        DataType.STRING,
+        Facets(min_length=1, max_length=1),
+        attachment_level="TO",
+    )
+    c8 = Component(
+        "OI_STATUS",
+        True,
+        Role.ATTRIBUTE,
+        ItemReference("Concept", "Z", "ZZ", "1.0", "OI_STATUS"),
+        DataType.STRING,
+        Facets(min_length=1, max_length=1),
+        attachment_level="OI",
+    )
+    c9 = Component(
+        "OBS_CONF",
+        True,
+        Role.ATTRIBUTE,
+        ItemReference("Concept", "Z", "ZZ", "1.0", "OBS_CONF"),
+        DataType.STRING,
+        Facets(min_length=1, max_length=1),
+        attachment_level="TO,OI",
+    )
+    comps = Components([c1, c2, c3, c4, c5, c6, c7, c8, c9])
+    return DataStructureDefinition(
+        "EXR", name="Exchange rates", agency="BIS", components=comps
+    )
+
+
+@pytest.fixture
+def body_rels():
+    with open("tests/api/fmr/samples/dsd/dsd_attrs_rels.json", "rb") as f:
+        return f.read()
+
+
+def test_dsd(dsd: DataStructureDefinition):
+    sjson = JsonDataStructure.from_model(dsd)
+
+    # Check the DSD properties
+    assert sjson.agency == "BIS"
+    assert sjson.id == dsd.id
+    assert sjson.name == dsd.name
+    assert sjson.version == "1.7"
+    assert sjson.isExternalReference is False
+    assert isinstance(sjson.validFrom, datetime)
+    assert isinstance(sjson.validTo, datetime)
+    assert sjson.description == dsd.description
+    assert len(sjson.annotations) == 1
+    assert sjson.dataStructureComponents is not None
+    assert sjson.evolvingStructure is False
+
+    # Check the dimensions
+    assert sjson.dataStructureComponents.dimensionList is not None
+    assert len(sjson.dataStructureComponents.dimensionList.dimensions) == 3
+    assert (
+        sjson.dataStructureComponents.dimensionList.timeDimension is not None
+    )
+    dim1 = sjson.dataStructureComponents.dimensionList.dimensions[0]
+    dim2 = sjson.dataStructureComponents.dimensionList.dimensions[1]
+    time = sjson.dataStructureComponents.dimensionList.timeDimension
+    assert dim1.id == "FREQ"
+    assert (
+        dim1.conceptIdentity == f"{_BASE}conceptscheme.Concept=Z:ZZ(1.0).FREQ"
+    )
+    assert dim1.conceptRoles is None
+    assert dim1.position is None
+    assert (
+        dim1.localRepresentation.enumerationFormat.dataType
+        == DataType.ALPHA.value
+    )
+    assert dim1.localRepresentation.enumerationFormat.minLength == 1
+    assert dim1.localRepresentation.enumerationFormat.maxLength == 1
+    assert (
+        dim1.localRepresentation.enumeration
+        == f"{_BASE}codelist.Codelist=BIS:CL_FREQ(1.0)"
+    )
+    assert dim2.id == "CUR1"
+    assert (
+        dim2.conceptIdentity == f"{_BASE}conceptscheme.Concept=Z:ZZ(1.0).CUR1"
+    )
+    assert dim2.conceptRoles is None
+    assert dim2.position is None
+    assert dim2.localRepresentation.format.dataType == DataType.ALPHA.value
+    assert dim2.localRepresentation.format.minLength == 3
+    assert dim2.localRepresentation.format.maxLength == 3
+    assert time.id == "TIME_PERIOD"
+    assert (
+        time.conceptIdentity
+        == f"{_BASE}conceptscheme.Concept=Z:ZZ(1.0).TIME_PERIOD"
+    )
+    assert time.conceptRoles is None
+    assert time.position is None
+    assert time.localRepresentation.format.dataType == DataType.PERIOD.value
+
+    # Check the attributes
+    assert sjson.dataStructureComponents.attributeList is not None
+    assert len(sjson.dataStructureComponents.attributeList.attributes) == 4
+    attr1 = sjson.dataStructureComponents.attributeList.attributes[0]
+    attr2 = sjson.dataStructureComponents.attributeList.attributes[2]
+    attr3 = sjson.dataStructureComponents.attributeList.attributes[3]
+    assert attr1.id == "OBS_STATUS"
+    assert (
+        attr1.conceptIdentity
+        == f"{_BASE}conceptscheme.Concept=Z:ZZ(1.0).OBS_STATUS"
+    )
+    assert attr1.conceptRoles is None
+    assert attr1.usage == "mandatory"
+    assert attr1.localRepresentation.format.dataType == DataType.ALPHA.value
+    assert attr1.localRepresentation.format.minLength == 1
+    assert attr1.localRepresentation.format.maxLength == 1
+    assert attr1.attributeRelationship.observation == {}
+    assert attr2.id == "TITLE"
+    assert (
+        attr2.conceptIdentity
+        == f"{_BASE}conceptscheme.Concept=Z:ZZ(1.0).TITLE"
+    )
+    assert attr2.conceptRoles is None
+    assert attr2.usage == "optional"
+    assert attr2.localRepresentation.format.dataType == DataType.STRING.value
+    assert attr2.localRepresentation.format.minLength == 1
+    assert attr2.localRepresentation.format.maxLength == 400
+    assert attr2.attributeRelationship.dimensions == ["FREQ", "CUR1", "CUR2"]
+    assert attr3.id == "UNIT_MULT"
+    assert (
+        attr3.conceptIdentity
+        == f"{_BASE}conceptscheme.Concept=Z:ZZ(1.0).UNIT_MULT"
+    )
+    assert attr3.conceptRoles is None
+    assert attr3.usage == "mandatory"
+    assert attr3.localRepresentation.format.dataType == DataType.SHORT.value
+    assert attr3.localRepresentation.format.minValue == 0
+    assert attr3.localRepresentation.format.maxValue == 9
+    assert attr3.attributeRelationship.dataflow == {}
+
+    # Check the measures
+    assert sjson.dataStructureComponents.measureList is not None
+    assert len(sjson.dataStructureComponents.measureList.measures) == 1
+    measure = sjson.dataStructureComponents.measureList.measures[0]
+    assert measure.id == "OBS_VALUE"
+    assert (
+        measure.conceptIdentity
+        == f"{_BASE}conceptscheme.Concept=Z:ZZ(1.0).OBS_VALUE"
+    )
+    assert measure.conceptRoles is None
+    assert measure.usage == "optional"
+    assert measure.localRepresentation.format.dataType == DataType.FLOAT.value
+
+    # Check the groups
+    assert len(sjson.dataStructureComponents.groups) == 1
+    grp = sjson.dataStructureComponents.groups[0]
+    assert grp.id == "Sibling"
+    assert grp.groupDimensions == ["CUR1", "CUR2"]
+
+
+def test_dsd_no_name(dsd_no_name):
+    with pytest.raises(errors.Invalid, match="must have a name"):
+        JsonDataStructure.from_model(dsd_no_name)
+
+
+def test_dsd_no_concept_ref(no_concept_ref):
+    with pytest.raises(errors.Invalid, match="Missing concept reference"):
+        JsonDataStructure.from_model(no_concept_ref)
+
+
+def test_dsd_no_attrs(dsd_no_attrs: DataStructureDefinition):
+    sjson = JsonDataStructure.from_model(dsd_no_attrs)
+
+    # Check the attributes
+    assert sjson.dataStructureComponents.attributeList is None
+
+
+def test_dsd_no_grps(dsd_no_attrs: DataStructureDefinition):
+    sjson = JsonDataStructure.from_model(dsd_no_attrs)
+
+    # Check the attributes
+    assert len(sjson.dataStructureComponents.groups) == 0
+
+
+def test_dsd_no_measures(dsd_no_measures: DataStructureDefinition):
+    sjson = JsonDataStructure.from_model(dsd_no_measures)
+
+    # Check the dimensions
+    assert sjson.dataStructureComponents.dimensionList is not None
+    assert len(sjson.dataStructureComponents.dimensionList.dimensions) == 3
+    assert sjson.dataStructureComponents.dimensionList.timeDimension is None
+
+    # Check the measures
+    assert sjson.dataStructureComponents.measureList is None
+
+
+def test_dsd_multi_measures(dsd_multi_meas: DataStructureDefinition):
+    sjson = JsonDataStructure.from_model(dsd_multi_meas)
+
+    assert sjson.dataStructureComponents.attributeList is not None
+    assert len(sjson.dataStructureComponents.attributeList.attributes) == 3
+
+    attr1 = sjson.dataStructureComponents.attributeList.attributes[0]
+    assert attr1.id == "TO_STATUS"
+    assert attr1.attributeRelationship.observation == {}
+    assert attr1.measureRelationship == ["TO"]
+
+    attr2 = sjson.dataStructureComponents.attributeList.attributes[1]
+    assert attr2.id == "OI_STATUS"
+    assert attr2.attributeRelationship.observation == {}
+    assert attr2.measureRelationship == ["OI"]
+
+    attr3 = sjson.dataStructureComponents.attributeList.attributes[2]
+    assert attr3.id == "OBS_CONF"
+    assert attr3.attributeRelationship.observation == {}
+    assert sorted(attr3.measureRelationship) == ["OI", "TO"]
+
+
+def test_write_attribute_measure_relationships(body_rels):
+    decoder = msgspec.json.Decoder(
+        JsonDataStructuresMessage, dec_hook=decoders
+    )
+    dsds = decoder.decode(body_rels).to_model()
+    assert len(dsds) == 1
+
+    sjson = JsonDataStructure.from_model(dsds[0])
+
+    for a in sjson.dataStructureComponents.attributeList.attributes:
+        if a.id == "DATAFLOW_ATTR":
+            assert a.attributeRelationship.dataflow == {}
+            assert a.attributeRelationship.dimensions is None
+            assert a.attributeRelationship.group is None
+            assert a.attributeRelationship.observation is None
+            assert a.measureRelationship is None
+        elif a.id in ["GROUP_ATTR", "DIM_GROUP_ATTR"]:
+            assert a.attributeRelationship.dataflow is None
+            assert a.attributeRelationship.dimensions == ["DIM2", "DIM3"]
+            assert a.attributeRelationship.group is None
+            assert a.attributeRelationship.observation is None
+            assert a.measureRelationship is None
+        elif a.id == "DIM_NOGROUP_ATTR":
+            assert a.attributeRelationship.dataflow is None
+            assert a.attributeRelationship.dimensions == ["DIM2"]
+            assert a.attributeRelationship.group is None
+            assert a.attributeRelationship.observation is None
+            assert a.measureRelationship is None
+        elif a.id == "SERIES_ATTR":
+            assert a.attributeRelationship.dataflow is None
+            assert a.attributeRelationship.dimensions == [
+                "DIM1",
+                "DIM2",
+                "DIM3",
+            ]
+            assert a.attributeRelationship.group is None
+            assert a.attributeRelationship.observation is None
+            assert a.measureRelationship is None
+        elif a.id == "OBS_ATTR":
+            assert a.attributeRelationship.dataflow is None
+            assert a.attributeRelationship.dimensions is None
+            assert a.attributeRelationship.group is None
+            assert a.attributeRelationship.observation == {}
+            assert sorted(a.measureRelationship) == ["MEAS1", "MEAS2", "MEAS3"]
+        elif a.id == "GROUP_ATTR_M":
+            # Fails
+            assert a.attributeRelationship.dataflow is None
+            assert a.attributeRelationship.dimensions == ["DIM2", "DIM3"]
+            assert a.attributeRelationship.group is None
+            assert a.attributeRelationship.observation is None
+            assert sorted(a.measureRelationship) == ["MEAS2", "MEAS3"]
+        elif a.id == "DIM_GROUP_ATTR_M":
+            # Fails
+            assert a.attributeRelationship.dataflow is None
+            assert sorted(a.attributeRelationship.dimensions) == [
+                "DIM2",
+                "DIM3",
+            ]
+            assert a.attributeRelationship.group is None
+            assert a.attributeRelationship.observation is None
+            assert sorted(a.measureRelationship) == ["MEAS1", "MEAS3"]
+        elif a.id == "DIM_NOGROUP_ATTR_M":
+            # Fails
+            assert a.attributeRelationship.dataflow is None
+            assert a.attributeRelationship.dimensions == ["DIM2"]
+            assert a.attributeRelationship.group is None
+            assert a.attributeRelationship.observation is None
+            assert sorted(a.measureRelationship) == sorted(["MEAS1", "MEAS2"])
+        elif a.id == "SERIES_ATTR_M":
+            # Fails
+            assert a.attributeRelationship.dataflow is None
+            assert a.attributeRelationship.dimensions == [
+                "DIM1",
+                "DIM2",
+                "DIM3",
+            ]
+            assert a.attributeRelationship.group is None
+            assert a.attributeRelationship.observation is None
+            assert sorted(a.measureRelationship) == ["MEAS2", "MEAS3"]
+        elif a.id == "OBS_ATTR_M":
+            assert a.attributeRelationship.dataflow is None
+            assert a.attributeRelationship.dimensions is None
+            assert a.attributeRelationship.group is None
+            assert a.attributeRelationship.observation == {}
+            assert sorted(a.measureRelationship) == ["MEAS1", "MEAS3"]
+        else:
+            pytest.fail("Unexpected attribute")

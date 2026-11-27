@@ -1,0 +1,495 @@
+import type { DataProvider, EarningsEvent } from "../../../types/data-provider";
+import type { CorporateActionsData, EarningsAction, EarningsDateStatus, EarningsEpsBasis, FilingEpsDetails } from "../../../types/financials";
+import { canonicalExchange, canonicalTickerKey, parsePublicTickerKey } from "../../../utils/exchanges";
+import { logFailure } from "../../../utils/log-failure";
+import { zonedDateKey } from "../../../utils/zoned-date-time";
+import { dateStatusFromEstimateFlag, displayEarningsEpsBasis, earningsActionForReport, earningsDateStatus, earningsEpsBasis } from "./earnings-report";
+import { coherentEarningsValue, EARNINGS_ESTIMATE_FIELDS } from "./earnings-estimate-basis";
+import { listingTimeZone } from "../../../market-data/market/trading-sessions";
+
+/**
+ * The one reading of a company's report dates that `earnings`, `events`, EE,
+ * ERN, OSA and the LEAPS next-earnings column share: the per-ticker
+ * calendar's date resolved against the quarters the company has on record
+ * (corporate actions, ERN's history), so a symbol shows the same next date,
+ * timing and status everywhere.
+ *
+ * - A confirmed date beats an estimated one; otherwise the calendar's stands
+ *   (JPM: the record's 2027-01-13 gives way to the calendar's confirmed
+ *   2027-01-14).
+ * - A date that has passed is reported, with the actual EPS once it is known
+ *   (PEP's 2026-10-08). A report out today is reported as soon as its figure
+ *   is, as same-day actuals are (META after the close).
+ * - A next date only the calendar knows is added (GS's 2027-01-19).
+ */
+
+/** Two dates this close are one report under two sources: quarterly reports are some ninety days apart. */
+const SAME_QUARTER_DAYS = 45;
+/** An actual this close to an upcoming date is that report, out already. */
+const SAME_REPORT_DAYS = 3;
+const DAY_MS = 86_400_000;
+
+/** The trading calendar's day, which report dates are on. */
+export function newYorkDay(now = Date.now()): string {
+  return zonedDateKey(now, "America/New_York");
+}
+
+/**
+ * The day on a listing's own venue, which its report date is on: SIE:XETRA's
+ * 12 Nov report has passed at 02:00 UTC on the 13th, Berlin's Friday, while
+ * New York is still on Thursday. A US listing, or a venue with no known
+ * clock, keeps New York's day.
+ */
+export function listingDay(exchange: string | null | undefined, now = Date.now()): string {
+  const zone = exchange ? listingTimeZone(undefined, exchange) : null;
+  return zone ? zonedDateKey(now, zone) : newYorkDay(now);
+}
+
+/** The day the calendar puts a report on, YYYY-MM-DD. */
+function calendarDay(event: Pick<EarningsEvent, "earningsDate">): string {
+  return event.earningsDate.toISOString().slice(0, 10);
+}
+
+/**
+ * A calendar event's status on `today`: reported once the report is out
+ * (Gloom Cloud says so, or has its figure) or its date has passed.
+ */
+function calendarStatus(
+  event: Pick<EarningsEvent, "earningsDate" | "epsActual" | "isDateEstimate" | "dateStatus">,
+  today: string,
+): EarningsDateStatus | null {
+  if (event.epsActual != null || earningsDateStatus(event.dateStatus) === "reported" || calendarDay(event) < today) return "reported";
+  return dateStatusFromEstimateFlag(event.isDateEstimate);
+}
+
+/** Whether the calendar's date for a report replaces another source's: a confirmed date beats an estimated one, else the calendar's stands. */
+function calendarDateWins(calendar: EarningsDateStatus | null, other: EarningsDateStatus | null): boolean {
+  return calendar === "confirmed" || other !== "confirmed";
+}
+
+/** The calendar's report as a quarter on record takes it. */
+export interface CalendarReport {
+  date: string;
+  timing: "bmo" | "amc" | null;
+  dateStatus: EarningsDateStatus | null;
+  /** Whether the calendar's consensus is for this report; see `consensusIsReports`. */
+  ownConsensus: boolean;
+  /** Null when the calendar's consensus cannot be tied to the report. */
+  epsEstimate: number | null;
+  epsAnalysts: number | null;
+  epsActual: number | null;
+  epsBasis: EarningsEpsBasis | null;
+  revenueEstimate: number | null;
+  /** The quarter the estimate is for, YYYY-MM, when the calendar names it. */
+  fiscalPeriod: string | null;
+  currency: string | null;
+  /** The revenue estimate's currency, when the calendar names it. */
+  revenueCurrency: string | null;
+}
+
+/**
+ * Whether the calendar's consensus is for its own report. A report out keeps
+ * its date while the consensus rolls to the next quarter (PEP's 2026-10-08
+ * beside December's 2.24), so once a report is out its consensus counts only
+ * when something ties it to that report: the calendar's actual beside it,
+ * Gloom Cloud's stored report (which says its status, and keeps the report's
+ * own consensus), or a forecast quarter ending before the report date.
+ */
+function consensusIsReports(event: EarningsEvent, dateStatus: EarningsDateStatus | null, date: string): boolean {
+  if (dateStatus !== "reported" || event.epsActual != null || event.dateStatus != null) return true;
+  const periodEnd = event.estimateBasis?.epsEstimate?.periodEndDate ?? null;
+  return periodEnd != null && periodEnd < date;
+}
+
+/**
+ * A calendar event read as its report, as every surface reads it: reported
+ * once out, and with a consensus only when it is that report's.
+ */
+export function calendarReport(event: EarningsEvent, today: string): CalendarReport {
+  const date = calendarDay(event);
+  const dateStatus = calendarStatus(event, today);
+  const ownConsensus = consensusIsReports(event, dateStatus, date);
+  const periodEnd = event.estimateBasis?.epsEstimate?.periodEndDate ?? null;
+  const epsEstimate = ownConsensus ? coherentEarningsValue(event, "epsEstimate") : null;
+  return {
+    date,
+    timing: event.timing === "BMO" ? "bmo" : event.timing === "AMC" ? "amc" : null,
+    dateStatus,
+    ownConsensus,
+    epsEstimate,
+    epsAnalysts: epsEstimate == null ? null : coherentEarningsValue(event, "epsAnalysts"),
+    epsActual: event.epsActual ?? null,
+    epsBasis: epsEstimate == null ? null : earningsEpsBasis(event.epsBasis),
+    revenueEstimate: ownConsensus ? coherentEarningsValue(event, "revenueEstimate") : null,
+    fiscalPeriod: ownConsensus && periodEnd ? periodEnd.slice(0, 7) : null,
+    currency: epsEstimate == null ? null : event.estimateBasis?.epsEstimate?.currency ?? null,
+    revenueCurrency: event.estimateBasis?.revenueEstimate?.currency ?? null,
+  };
+}
+
+/** What the resolver reads of a quarter on record. */
+interface ReportSlot {
+  date: string;
+  dateStatus: EarningsDateStatus | null | undefined;
+  epsActual: number | null | undefined;
+}
+
+/** How one source's rows are read and rebuilt: corporate actions for events and EE, history for ERN. */
+export interface ReportRowAdapter<T> {
+  slot(row: T): ReportSlot;
+  /** The row labelled reported, with `epsActual` (the calendar's `report`'s, when it has one) when it has no figure of its own. */
+  reported(row: T, epsActual: number | null, report?: CalendarReport): T;
+  /** The calendar's report as a row: over `row` when it is the same report, else a new one. */
+  fromCalendar(report: CalendarReport, row: T | null): T;
+}
+
+const isOut = (slot: ReportSlot, today: string) => slot.epsActual != null || slot.dateStatus === "reported" || slot.date < today;
+const dayGap = (left: string, right: string) => Math.abs(Date.parse(`${left}T00:00:00Z`) - Date.parse(`${right}T00:00:00Z`)) / DAY_MS;
+
+/**
+ * The row the calendar's report is: for a report out, the nearest quarter on
+ * record that is out, else an upcoming one days away; for an upcoming one,
+ * the nearest upcoming quarter, else one out days away (out early).
+ */
+function calendarRowIndex(slots: readonly ReportSlot[], report: CalendarReport, today: string): number {
+  const nearest = (keep: (slot: ReportSlot) => boolean, days: number) => {
+    let best = -1;
+    for (const [index, slot] of slots.entries()) {
+      const gap = dayGap(slot.date, report.date);
+      if (gap <= days && keep(slot) && (best < 0 || gap < dayGap(slots[best]!.date, report.date))) best = index;
+    }
+    return best;
+  };
+  const out = (slot: ReportSlot) => isOut(slot, today);
+  const upcoming = (slot: ReportSlot) => !isOut(slot, today);
+  const [first, second] = report.dateStatus === "reported" ? [out, upcoming] : [upcoming, out];
+  const index = nearest(first, SAME_QUARTER_DAYS);
+  return index >= 0 ? index : nearest(second, SAME_REPORT_DAYS);
+}
+
+/**
+ * Quarters on record resolved against the calendar's event, with the row
+ * that is the calendar's report. Past quarters read reported; the calendar's
+ * report updates its row, or is added when the record has none.
+ */
+function resolveReportRowsWithCalendar<T>(
+  rows: readonly T[],
+  event: EarningsEvent | null | undefined,
+  today: string,
+  adapter: ReportRowAdapter<T>,
+): { rows: T[]; calendarRow: T | null } {
+  const resolved = rows.map((row) => {
+    const slot = adapter.slot(row);
+    return isOut(slot, today) && slot.dateStatus !== "reported" ? adapter.reported(row, null) : row;
+  });
+  if (!event) return { rows: resolved, calendarRow: null };
+  const report = calendarReport(event, today);
+  const index = calendarRowIndex(resolved.map(adapter.slot), report, today);
+  if (index < 0) {
+    const added = adapter.fromCalendar(report, null);
+    return { rows: [...resolved, added], calendarRow: added };
+  }
+  const row = resolved[index]!;
+  const slot = adapter.slot(row);
+  if (isOut(slot, today)) {
+    if (slot.epsActual == null && report.epsActual != null) resolved[index] = adapter.reported(row, report.epsActual, report);
+  } else if (report.dateStatus === "reported" || calendarDateWins(report.dateStatus, earningsDateStatus(slot.dateStatus))) {
+    resolved[index] = adapter.fromCalendar(report, row);
+  }
+  return { rows: resolved, calendarRow: resolved[index]! };
+}
+
+export function resolveReportRows<T>(rows: readonly T[], event: EarningsEvent | null | undefined, today: string, adapter: ReportRowAdapter<T>): T[] {
+  return resolveReportRowsWithCalendar(rows, event, today, adapter).rows;
+}
+
+const TIME_TEXT = { bmo: "Pre Market", amc: "After Hours" } as const;
+
+function definedFields<T extends object>(row: T): T {
+  return Object.fromEntries(Object.entries(row).filter(([, value]) => value !== undefined)) as T;
+}
+
+/** Corporate-actions earnings rows, as events, EE and the `earnings` resolution read them. */
+const ACTION_ROWS: ReportRowAdapter<EarningsAction> = {
+  slot: (row) => ({ date: row.date, dateStatus: earningsDateStatus(row.dateStatus), epsActual: row.epsActual }),
+  reported(row, epsActual) {
+    if (epsActual == null) return { ...row, dateStatus: "reported" };
+    const { epsActualSource: _source, difference: _difference, surprisePercent: _surprise, ...inputs } = row;
+    return { ...inputs, dateStatus: "reported", epsActual, epsBasis: null };
+  },
+  fromCalendar(report, row) {
+    // The calendar's consensus goes with its date; without one, the record's stays.
+    const estimate = report.epsEstimate != null;
+    const { epsActualSource: _source, difference: _difference, surprisePercent: _surprise, ...inputs } = row ?? {};
+    return definedFields<EarningsAction>({
+      ...inputs,
+      date: report.date,
+      dateType: "announcement",
+      time: report.timing ? TIME_TEXT[report.timing] : row?.time,
+      currency: estimate ? report.currency ?? row?.currency : row?.currency,
+      epsEstimate: estimate ? report.epsEstimate! : row?.epsEstimate,
+      epsAnalysts: estimate ? report.epsAnalysts ?? undefined : row?.epsAnalysts,
+      epsActual: report.epsActual ?? row?.epsActual,
+      fiscalPeriod: row?.fiscalPeriod ?? report.fiscalPeriod ?? undefined,
+      epsBasis: report.epsActual != null ? null : estimate ? report.epsBasis : row?.epsBasis,
+      dateStatus: report.dateStatus ?? undefined,
+    });
+  },
+};
+
+/** A company's corporate-actions earnings rows, newest first, resolved against its calendar event. */
+export function resolveEarningsActions(earnings: readonly EarningsAction[], event: EarningsEvent | null | undefined, today: string): EarningsAction[] {
+  return resolveReportRows(earnings, event, today, ACTION_ROWS).sort((left, right) => right.date.localeCompare(left.date));
+}
+
+/** A company's corporate actions with their earnings rows resolved against its calendar event. */
+export function withResolvedEarnings(actions: CorporateActionsData, event: EarningsEvent | null | undefined, today: string): CorporateActionsData {
+  // Without a calendar event the rows still resolve: a date gone by reads reported, as ERN reads it.
+  return { ...actions, earnings: resolveEarningsActions(actions.earnings, event, today) };
+}
+
+/** The calendar's event for a symbol, as it was asked for (SAN:EPA comes back as SAN:EPA). */
+export function calendarEventOf(events: readonly EarningsEvent[] | null | undefined, symbol: string): EarningsEvent | null {
+  const key = symbol.trim().toUpperCase();
+  return events?.find((event) => event.symbol.trim().toUpperCase() === key) ?? null;
+}
+
+/**
+ * Whether the calendar event is read against its quarters on record: once
+ * its date has come or its report is out, for the actual and the next
+ * report, and while its date is not confirmed, which a confirmed date on
+ * record beats. A confirmed date to come stands alone.
+ */
+function needsRecordedQuarters(event: EarningsEvent, today: string): boolean {
+  return event.epsActual == null && (calendarDay(event) <= today || calendarStatus(event, today) !== "confirmed");
+}
+
+export interface ResolvedEarningsEvent extends EarningsEvent, FilingEpsDetails {
+  /** Out, announced or projected, after resolution; null when no source says. */
+  dateStatus: EarningsDateStatus | null;
+  difference?: number;
+  surpriseNotMeaningful?: true;
+}
+
+const TIMING_OF_TEXT: Record<string, EarningsEvent["timing"]> = { "Pre Market": "BMO", "After Hours": "AMC" };
+
+/** The calendar's event without estimates from a different period or a displaced EPS forecast. */
+function withoutConsensus(event: EarningsEvent, epsOnly = false): EarningsEvent {
+  const stripped: EarningsEvent = { ...event, epsBasis: null };
+  const basis = { ...event.estimateBasis };
+  for (const field of EARNINGS_ESTIMATE_FIELDS) {
+    if (epsOnly && !field.startsWith("eps")) continue;
+    if (stripped[field] != null) stripped[field] = null;
+    delete basis[field];
+  }
+  if (epsOnly && Object.keys(basis).length) stripped.estimateBasis = basis;
+  else delete stripped.estimateBasis;
+  return stripped;
+}
+
+const statusFlag = (status: EarningsDateStatus | null) => status === "projected" ? true : status === "confirmed" ? false : null;
+
+/**
+ * The resolved event for a row. The calendar's own report keeps its revenue
+ * and same-report consensus. If the record supplies EPS instead, its EPS
+ * figures replace the calendar's forecast and its metadata together.
+ * Another report on record is that row alone.
+ */
+function eventOfRow(event: EarningsEvent, row: EarningsAction, report: CalendarReport | null): ResolvedEarningsEvent {
+  const ownDate = row.date === calendarDay(event);
+  const dateStatus = earningsDateStatus(row.dateStatus);
+  const earningsDate = ownDate ? event.earningsDate : new Date(`${row.date}T00:00:00.000Z`);
+  const rowTiming = TIMING_OF_TEXT[row.time ?? ""];
+  const recordBasis = displayEarningsEpsBasis(row);
+  const { difference, surprisePercent, surpriseNotMeaningful } = earningsActionForReport(row);
+  const comparison = {
+    surprise: surprisePercent ?? null,
+    ...(difference == null ? {} : { difference }),
+    ...(surpriseNotMeaningful ? { surpriseNotMeaningful } : {}),
+  };
+  if (report) {
+    const filed = row.epsActual != null && row.epsBasis === "company-adjusted";
+    const recordFigures = row.epsActual != null && (event.epsActual == null || filed);
+    const base = !report.ownConsensus ? withoutConsensus(event) : recordFigures ? withoutConsensus(event, true) : event;
+    const epsActual = recordFigures ? row.epsActual! : event.epsActual ?? null;
+    const epsEstimate = recordFigures ? row.epsEstimate ?? null : base.epsEstimate ?? row.epsEstimate ?? null;
+    return {
+      ...base,
+      ...(filed ? { streetEps: row.streetEps, gaapEps: row.gaapEps } : {}),
+      earningsDate,
+      earningsCallDate: ownDate ? event.earningsCallDate ?? null : null,
+      // The company's time is for its own date, never another the record places the report on.
+      releaseAt: ownDate ? event.releaseAt ?? null : null,
+      isDateEstimate: statusFlag(dateStatus) ?? (dateStatus === "reported" ? base.isDateEstimate ?? null : null),
+      epsEstimate,
+      epsAnalysts: recordFigures ? row.epsAnalysts ?? null : base.epsAnalysts ?? row.epsAnalysts ?? null,
+      epsActual,
+      epsBasis: recordFigures ? recordBasis : epsActual == null ? earningsEpsBasis(base.epsBasis) ?? recordBasis : null,
+      ...(recordFigures ? comparison : { surprise: null }),
+      timing: (ownDate && event.timing) || rowTiming || event.timing,
+      dateStatus,
+    };
+  }
+  return {
+    symbol: event.symbol,
+    name: event.name,
+    earningsDate,
+    earningsCallDate: null,
+    isDateEstimate: statusFlag(dateStatus),
+    epsEstimate: row.epsEstimate ?? null,
+    epsAnalysts: row.epsAnalysts ?? null,
+    epsActual: row.epsActual ?? null,
+    ...(row.streetEps ? { streetEps: row.streetEps, gaapEps: row.gaapEps } : {}),
+    epsBasis: recordBasis,
+    revenueEstimate: null,
+    revenueActual: null,
+    ...comparison,
+    timing: rowTiming ?? "",
+    dateStatus,
+  };
+}
+
+/**
+ * A company's next report: the calendar's, resolved against its quarters on
+ * record when they were read. Once the calendar's date has passed, the next
+ * upcoming quarter on record stands in, else the report that is out, with its
+ * actual and the estimate it was measured against. Without the record, a past
+ * date still reads reported.
+ */
+export function resolveCalendarEvent(event: EarningsEvent, earnings: readonly EarningsAction[] | null | undefined, today: string): ResolvedEarningsEvent {
+  const status = calendarStatus(event, today);
+  if (!earnings && status !== "reported") return { ...event, dateStatus: status, surprise: null };
+  const { rows, calendarRow } = resolveReportRowsWithCalendar(earnings ?? [], event, today, ACTION_ROWS);
+  const next = rows
+    .filter((row) => !isOut(ACTION_ROWS.slot(row), today))
+    .sort((left, right) => left.date.localeCompare(right.date))[0];
+  const chosen = next ?? calendarRow!;
+  return eventOfRow(event, chosen, chosen === calendarRow ? calendarReport(event, today) : null);
+}
+
+/** The next report date, YYYY-MM-DD, of a resolved event; null once it is out. */
+export function upcomingReportDate(event: ResolvedEarningsEvent | null | undefined): string | null {
+  return event && event.dateStatus !== "reported" ? calendarDay(event) : null;
+}
+
+/** A listing: the calendar's key for it (SAN:EPA) and the symbol and venue corporate actions are read by. */
+export interface EarningsListing {
+  key: string;
+  symbol: string;
+  exchange: string;
+  /** The day on the listing's venue (`listingDay`), when it is not the one every listing is read on. */
+  today?: string;
+}
+
+/** A listing's latest report on record, for a listing the calendar has no next date for. */
+export interface LastReport {
+  /** The day it came out, YYYY-MM-DD; null when only the quarter it covered is on record. */
+  date: string | null;
+  /** The quarter it covered, as its period end names it: 2026-09-30, or 2026-09 when only the month is known. */
+  periodEnd: string | null;
+}
+
+/** A report's statement is the quarter that ended at most this long before it came out. */
+const REPORT_LAG_DAYS = 150;
+
+/**
+ * The listing's latest report on record: the newest announcement on or before
+ * `today` with a reported figure (its corporate actions), and the quarter it
+ * covered, from the action itself or else the newest quarterly statement that
+ * ended before it. A listing whose statements are on record but no report
+ * date is answered with the quarter alone. Null when neither is.
+ */
+export async function lastReportOnRecord(
+  provider: Pick<DataProvider, "getCorporateActions" | "getTickerFinancials">,
+  listing: Pick<EarningsListing, "symbol" | "exchange">,
+  today: string,
+): Promise<LastReport | null> {
+  const actions = provider.getCorporateActions
+    ? await provider.getCorporateActions(listing.symbol, listing.exchange)
+      .catch(logFailure("earnings-calendar", "Read a listing's reported quarters failed", null))
+    : null;
+  const reported = (actions?.earnings ?? [])
+    .filter((row) => row.dateType !== "fiscal-period-end" && row.epsActual != null && row.date.slice(0, 10) <= today)
+    .sort((left, right) => left.date.localeCompare(right.date))
+    .at(-1);
+  const date = reported?.date.slice(0, 10) ?? null;
+  if (reported?.fiscalPeriod) return { date, periodEnd: reported.fiscalPeriod };
+  const financials = await provider.getTickerFinancials(listing.symbol, listing.exchange)
+    .catch(logFailure("earnings-calendar", "Read a listing's quarterly statements failed", null));
+  const until = date ?? today;
+  const earliest = date ? new Date(Date.parse(`${date}T00:00:00Z`) - REPORT_LAG_DAYS * DAY_MS).toISOString().slice(0, 10) : "";
+  const quarter = (financials?.quarterlyStatements ?? [])
+    .map((statement) => statement.date.slice(0, 10))
+    .filter((end) => end < until && end >= earliest)
+    .sort()
+    .at(-1) ?? null;
+  return date || quarter ? { date, periodEnd: quarter } : null;
+}
+
+/**
+ * What a listing the calendar has no next date for says, after its key: "no
+ * next report date on record; last reported 2026-10-29 (quarter ended
+ * 2026-09-30)", the quarter alone when no report date is on record.
+ */
+export function noNextReportText(last: LastReport | null): string {
+  const lead = "no next report date on record";
+  if (!last) return lead;
+  const period = last.periodEnd ? `quarter ended ${last.periodEnd}` : null;
+  if (last.date) return `${lead}; last reported ${last.date}${period ? ` (${period})` : ""}`;
+  return period ? `${lead}; latest results on record: ${period}` : lead;
+}
+
+/** Calendar events need their quarters on record read at most this many at a time. */
+const RECORD_CONCURRENCY = 4;
+
+function matchingReportedFiling(actions: CorporateActionsData, listing: EarningsListing, event: EarningsEvent): EarningsAction | undefined {
+  const requested = parsePublicTickerKey(canonicalTickerKey(listing.symbol, listing.exchange));
+  const returned = parsePublicTickerKey(actions.symbol);
+  if (returned.symbol !== requested.symbol) return;
+  const venues = [requested.exchange, returned.exchange, canonicalExchange(actions.exchange), canonicalExchange(actions.micCode)].filter(Boolean);
+  if (new Set(venues).size > 1) return;
+  const date = calendarDay(event);
+  const basis = event.estimateBasis?.epsEstimate;
+  const period = basis?.periodEndDate?.slice(0, 7);
+  return actions.earnings.find((row) => row.date === date && row.dateType !== "fiscal-period-end"
+    && (!period || !row.fiscalPeriod || row.fiscalPeriod === period)
+    && (!basis?.currency || row.currency === basis.currency)
+    && row.epsActualSource === "filing" && row.epsBasis === "company-adjusted"
+    && Number.isFinite(row.epsActual) && Number.isFinite(row.gaapEps)
+    && row.streetEps?.actualBasis === "including-stock-compensation" && Number.isFinite(row.streetEps.actual));
+}
+
+/**
+ * Each listing's calendar event, resolved: the corporate actions of those
+ * whose date has come are read for a missing actual and the next quarter on
+ * record. The earnings command also checks populated actuals for a matching
+ * filing without looking for another date. Absent or failed records leave
+ * the calendar alone.
+ */
+export async function resolveListingEvents(
+  provider: Pick<DataProvider, "getCorporateActions">,
+  listings: readonly EarningsListing[],
+  events: readonly EarningsEvent[],
+  today: string,
+  options: { includeReportedFiling?: boolean } = {},
+): Promise<Map<string, ResolvedEarningsEvent>> {
+  const resolved = new Map<string, ResolvedEarningsEvent>();
+  const pending = listings.flatMap((listing) => {
+    const event = calendarEventOf(events, listing.key);
+    return event ? [{ listing, event }] : [];
+  });
+  for (let index = 0; index < pending.length; index += RECORD_CONCURRENCY) {
+    await Promise.all(pending.slice(index, index + RECORD_CONCURRENCY).map(async ({ listing, event }) => {
+      const day = listing.today ?? today;
+      const filingOnly = options.includeReportedFiling && event.epsActual != null;
+      const actions = (filingOnly || needsRecordedQuarters(event, day)) && provider.getCorporateActions
+        ? await provider.getCorporateActions(listing.symbol, listing.exchange)
+          .catch(logFailure("earnings-calendar", "Read corporate actions for a past report date failed", null))
+        : null;
+      const filing = filingOnly && actions ? matchingReportedFiling(actions, listing, event) : null;
+      const earnings = filingOnly ? (filing ? [filing] : null) : actions?.earnings;
+      resolved.set(listing.key.toUpperCase(), resolveCalendarEvent(event, earnings, day));
+    }));
+  }
+  return resolved;
+}

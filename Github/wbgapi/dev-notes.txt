@@ -1,0 +1,40 @@
+
+# ancillary and deprecated code. Not currently included in the implementation
+
+# Here's an object-oriented approach we may use someday, but I'm not sure it's especially practical
+# to implement from region, lendingtype or incomelevel. Update list() and get() to yield or return
+# Region(row) instead of row
+
+class Region(dict):
+    @property
+    def members(self):
+        return members(self['code'])
+
+Other potentially useful, not-well-docuented API parameters:
+
+NB: I don't think any of these have default or implicit values
+
+downloadformat=csv|xml|excel - download a complete data file for a topic, indicator or country. Delivered as a ZIP file with
+                                     separate files for metadata
+
+filetype=data                - with downloadformat, download the original file format instead of ZIP with no metadata
+
+HREQ=(y|n)                   - with downloadformat, omit the metadata headers so the first row is the column names (csv and excel only)
+
+databid:                     - with /v2/en/sources, this will include the internal database ID you need for Databank links
+
+## Steps to update in pypi.org ##
+
+1. Update setup.py if necessary
+
+2. Update wbgapi/__version__.py and README.md
+
+3. Commit changes
+
+4. Run from project directory (builds dist/*):
+
+   python3 setup.py sdist bdist_wheel
+
+5. Run from the project directory:
+
+   python3 -m twine upload dist/*

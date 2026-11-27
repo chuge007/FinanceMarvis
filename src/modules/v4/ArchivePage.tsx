@@ -4,6 +4,7 @@ import { vaultStats, type VaultStats } from '../../core/data/vault';
 import { METRICS } from '../../core/metrics/registry';
 import { readJSON } from '../../shared/utils/localStore';
 import { SourcePlaybook } from './components/SourcePlaybook';
+import { DataPlatformPanel } from './components/DataPlatformPanel';
 import type { JournalEntry } from './components/QuickRecord';
 
 const KEY = 'marvis.journal.v1';
@@ -35,10 +36,12 @@ export const ArchivePage = memo(function ArchivePage() {
     <div className="space-y-3 p-3">
       <div>
         <h2 className="text-[0.875rem] font-bold text-[#d8dce6]">档案 · 这些数字从哪来，我以前怎么做的</h2>
-        <p className="mt-0.5 text-[0.625rem] text-[#636878]">
+        <p className="mt-0.5 text-[0.8125rem] text-[#636878]">
           数据血缘、指标字典、决策历史。任何数字都应该能回答“来源、时间、样本长度、口径”。
         </p>
       </div>
+
+      <DataPlatformPanel />
 
       <div className="rounded-[0.3125rem] border border-[#1a1d26] bg-[#0f1118] p-3">
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">

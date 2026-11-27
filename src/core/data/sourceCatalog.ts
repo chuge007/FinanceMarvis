@@ -5,11 +5,13 @@
  * status=integrated 表示应用已接入真实数据；external 表示需要离开应用核对。
  */
 
-export type SourceCadence = 'daily' | 'weekly' | 'monthly' | 'quarterly' | 'event';
+export type SourceCadence = 'intraday' | 'daily' | 'weekly' | 'monthly' | 'quarterly' | 'event';
 export type SourceKind = 'macro' | 'micro' | 'positioning' | 'flow' | 'china' | 'crypto';
 export type SourceChain = 'A' | 'B' | 'C' | 'D' | 'E';
-export type SourceStatus = 'integrated' | 'external';
-export type SourceAccess = 'direct' | 'proxy' | 'manual';
+export type SourceStatus = 'integrated' | 'external' | 'planned' | 'deprecated';
+export type SourceAccess = 'direct' | 'proxy' | 'manual' | 'key' | 'client' | 'sidecar';
+export type SourceDomain = 'market' | 'fundamental' | 'macro' | 'flow' | 'sentiment' | 'sector' | 'event' | 'alternative' | 'tool';
+export type SourceRole = 'primary' | 'backup' | 'fallback' | 'external-only' | 'tool' | 'deprecated';
 
 export interface SourceEntry {
   id: string;
@@ -22,9 +24,34 @@ export interface SourceEntry {
   chain: SourceChain;
   status: SourceStatus;
   access: SourceAccess;
+  /** 2026-11-26 新增：主维度与角色，缺省按 kind 推导。 */
+  domain?: SourceDomain;
+  role?: SourceRole;
 }
 
+export const DOMAIN_LABEL: Record<SourceDomain, string> = {
+  market: '行情与价格',
+  fundamental: '基本面与财务',
+  macro: '宏观与利率',
+  flow: '资金与持仓',
+  sentiment: '情绪与波动',
+  sector: '板块与结构',
+  event: '事件与日历',
+  alternative: '另类与加密',
+  tool: '研究工具',
+};
+
+export const ROLE_LABEL: Record<SourceRole, string> = {
+  primary: '主源',
+  backup: '备源',
+  fallback: '兜底',
+  'external-only': '外部核对',
+  tool: '工具',
+  deprecated: '已失效',
+};
+
 export const CADENCE_LABEL: Record<SourceCadence, string> = {
+  intraday: '盘中',
   daily: '每日',
   weekly: '每周',
   monthly: '每月',
@@ -44,6 +71,16 @@ export const ACCESS_LABEL: Record<SourceAccess, string> = {
   direct: '直连',
   proxy: '需代理/镜像',
   manual: '手动/需登录',
+  key: '需 Key',
+  client: '需本地客户端',
+  sidecar: '本地 Python 侧车',
+};
+
+export const STATUS_LABEL: Record<SourceStatus, string> = {
+  integrated: '已接入',
+  external: '外部核对',
+  planned: '已登记未接入',
+  deprecated: '已失效',
 };
 
 export const KIND_LABEL: Record<SourceKind, string> = {
@@ -96,7 +133,46 @@ export const SOURCE_ENTRIES: SourceEntry[] = [
   { id: 'opex', name: '期权到期与四巫日', publisher: 'CBOE', url: 'https://www.cboe.com/about/hours/us-options/', cadence: 'event', kind: 'micro', watch: '月度/季度到期周，波动与成交量容易被放大', chain: 'C', status: 'external', access: 'direct' },
 ];
 
+/**
+ * 全部开源项目登记（2026-11-26）：22 个项目逐条给唯一去向。
+ * 这份表只描述「库 → 去向」，不产生数值；档案页「全部项目登记」区块直接渲染。
+ * 详细判据见 docs/金融数据源资产整理方案_2026-11-26.md。
+ */
+export interface ProjectEntry {
+  name: string;
+  category: string;
+  role: SourceRole;
+  destination: string;
+  reason: string;
+}
+
+export const PROJECT_REGISTRY: ProjectEntry[] = [
+  { name: 'AkShare', category: '中国市场取数', role: 'backup', destination: 'Python 侧车（特色品类）', reason: '爬虫合集、无 SLA、无 PIT 锚点，只补龙虎榜/基金/期货，不做主源' },
+  { name: 'Tushare Pro', category: '中国市场取数', role: 'primary', destination: 'Key 通道（已接入）', reason: '财务三表带公告日锚点，PIT 回测主源' },
+  { name: 'baostock', category: '中国市场取数', role: 'backup', destination: 'K 线第二备源（仅登记）', reason: '日线轻量但财务覆盖有限、无 PIT 锚点' },
+  { name: 'ADATA', category: '中国市场取数', role: 'fallback', destination: '合并 → 腾讯行业榜 / 新浪板块', reason: '东财封装，push2 当前网络被重置' },
+  { name: 'efinance', category: '中国市场取数', role: 'fallback', destination: '合并 → 腾讯链', reason: '同为东财封装，单源无降级' },
+  { name: 'pytdx / mootdx', category: '中国市场取数', role: 'external-only', destination: '外部手册', reason: '依赖本机通达信行情服务器，不可随程序分发' },
+  { name: 'yfinance', category: '全球市场取数', role: 'fallback', destination: '合并 → Yahoo query1/query2', reason: '非官方接口、429 限流、无 SLA，routing.md 标不可用' },
+  { name: 'OpenBB', category: '全球市场取数', role: 'external-only', destination: '不入链（聚合层）', reason: '公司 2026 关停、治理变更；其 provider 已逐个直连' },
+  { name: 'pandas-datareader', category: '全球市场取数', role: 'fallback', destination: '合并 → /fred 直连', reason: 'Yahoo 源已移除，FRED/Stooq 可直连' },
+  { name: 'yahooquery', category: '全球市场取数', role: 'fallback', destination: '合并 → Yahoo 通道', reason: '与 yfinance 同源同限流' },
+  { name: 'sec-edgar-downloader / edgartools', category: '全球市场取数', role: 'primary', destination: 'Python 侧车（SEC 文件）', reason: 'EDGAR 官方一手，补 us:filings' },
+  { name: 'Alpha Vantage / Twelve Data / FMP', category: '全球市场取数', role: 'backup', destination: 'FMP 入 Key 通道；另两家合并', reason: 'routing.md 已选 FMP 做美股 EOD 备源，避免多 Key 多配额' },
+  { name: 'ccxt', category: '加密货币', role: 'primary', destination: 'Python 侧车（加密行情）', reason: '100+ 交易所公共行情免 Key' },
+  { name: 'freqtrade', category: '加密货币', role: 'tool', destination: '工具层登记', reason: '交易机器人框架，不是数据源' },
+  { name: 'fredapi', category: '宏观/另类', role: 'fallback', destination: '合并 → /fred 直连', reason: '项目已直连 FRED CSV' },
+  { name: 'Nasdaq Data Link', category: '宏观/另类', role: 'external-only', destination: '外部手册', reason: '多数数据集需 Key/付费，与官方一手源重复' },
+  { name: 'Backtrader', category: '回测/组合工具', role: 'tool', destination: '工具层登记', reason: '事件驱动回测，维护停滞' },
+  { name: 'vectorbt', category: '回测/组合工具', role: 'tool', destination: '工具层登记', reason: '向量化回测框架，不是数据源' },
+  { name: 'RQAlpha', category: '回测/组合工具', role: 'tool', destination: '工具层登记', reason: 'A 股回测框架' },
+  { name: 'vn.py', category: '回测/组合工具', role: 'tool', destination: '工具层登记', reason: 'CTP 实盘框架，项目不做自动交易' },
+  { name: 'pyfolio / empyrical', category: '回测/组合工具', role: 'tool', destination: '工具层登记', reason: '绩效指标公式可借鉴，已有自建计算' },
+  { name: 'ConvexTrade（既有源）', category: '历史源', role: 'deprecated', destination: '标注已失效（404）', reason: '2026-11-26 实测公开 API 下线，已被 FRED + 财政部替代' },
+];
+
 export const CADENCE_HINT: Record<SourceCadence, { title: string; time: string; items: string }> = {
+  intraday: { title: '盘中', time: '实时', items: '快照、逐笔与资金流；口径为当日，不参与跨日分位' },
   daily: { title: '每日盘前', time: '10 分钟', items: '期指与美债、DXY、VIX、油价、隔夜新闻；先看方向再看幅度' },
   weekly: { title: '每周一次', time: '20 分钟', items: 'COT 持仓、ICI 货基、ETF 周度净流入、AAII/NAAIM 情绪' },
   monthly: { title: '每月一次', time: '30 分钟', items: 'CPI/非农/PCE/ISM、FINRA 保证金、IIF 与央行数据' },

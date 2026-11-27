@@ -1,0 +1,3 @@
+,Eigenvalue,Trace Statistic,Trace Critical Value 10%,Trace Critical Value 5%,Trace Critical Value 1%,"Reject (Trace, 5%)",Max-Eigenvalue Statistic,Max-Eigenvalue Critical Value 10%,Max-Eigenvalue Critical Value 5%,Max-Eigenvalue Critical Value 1%,"Reject (Max-Eigenvalue, 5%)"
+r <= 0,,,,,,False,,,,,False
+r <= 1,,,,,,False,,,,,False

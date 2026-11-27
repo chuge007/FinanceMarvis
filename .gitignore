@@ -8,6 +8,10 @@ pnpm-debug.log*
 lerna-debug.log*
 
 node_modules
+# 已下载的第三方源码资产，单独保留其自身 .git；不并入主工程与代码索引
+Github/
+# 本地独立 Python 运行时（按需生成，不随版本库分发）
+runtime/
 dist
 dist-ssr
 dist_test
